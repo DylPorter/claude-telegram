@@ -1,0 +1,17 @@
+[Unit]
+Description=signal-brief evening sweep — inbox + orphans + Friction Log + Teaching Queue
+After=network-online.target claude-telegram.service
+Wants=network-online.target
+Requires=claude-telegram.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/signal-brief
+ExecStart=%h/Documents/Programming/claude-telegram/signal-brief/.venv/bin/python -m signal_brief.orchestrators.evening
+StandardOutput=journal
+StandardError=journal
+# Evening writes notes — give it 30 min.
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,24 @@
+[project]
+name = "signal-brief"
+version = "0.1.0"
+description = "Daily industry-signal digest orchestrator. Fetches from RSS, newsletters, conferences, X; LLM-filters against vault memory with anti-bubble enforcement; pushes chunked Telegram messages and writes daily-note audit trail."
+requires-python = ">=3.11"
+dependencies = [
+    "feedparser>=6.0.11",
+    "requests>=2.32.0",
+    "pyyaml>=6.0",
+    "python-dateutil>=2.9.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+signal-brief-morning = "signal_brief.orchestrators.morning:main"
+signal-brief-evening = "signal_brief.orchestrators.evening:main"
+signal-brief-weekly = "signal_brief.orchestrators.weekly:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["signal_brief*"]

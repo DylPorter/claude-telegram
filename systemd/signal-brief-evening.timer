@@ -1,0 +1,12 @@
+[Unit]
+Description=Trigger signal-brief evening sweep daily
+
+[Timer]
+# Adjust timezone to your local zone — see signal-brief-morning.timer for guidance.
+OnCalendar=*-*-* 22:00:00 Asia/Hong_Kong
+Persistent=true
+RandomizedDelaySec=60
+Unit=signal-brief-evening.service
+
+[Install]
+WantedBy=timers.target

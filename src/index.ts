@@ -10,6 +10,7 @@ import {
 import { handlePhoto } from "./handlers/photo.js";
 import { handleText } from "./handlers/text.js";
 import { handleVoice } from "./handlers/voice.js";
+import { startPushServer } from "./lib/push.js";
 
 const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
 
@@ -101,6 +102,10 @@ bot.on("message:text", async (ctx) => {
 console.log(`[startup] authorized user: ${env.TELEGRAM_ALLOWED_USER_ID}`);
 console.log(`[startup] default cwd: ${env.DEFAULT_CWD}`);
 console.log(`[startup] claude bin: ${env.CLAUDE_BIN}`);
+
+// Outbound /push HTTP server for scheduled briefs.
+startPushServer(bot);
+
 await bot.start({
   onStart: (me) => console.log(`[startup] bot @${me.username} is live`),
 });

@@ -1,0 +1,12 @@
+[Unit]
+Description=Trigger signal-brief weekly review on Sunday evening
+
+[Timer]
+# Adjust timezone to your local zone.
+OnCalendar=Sun *-*-* 20:00:00 Asia/Hong_Kong
+Persistent=true
+RandomizedDelaySec=120
+Unit=signal-brief-weekly.service
+
+[Install]
+WantedBy=timers.target

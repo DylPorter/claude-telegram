@@ -1,0 +1,17 @@
+[Unit]
+Description=signal-brief weekly review — cluster Friction Log, audit Ideas/, graph health, write Reviews/
+After=network-online.target claude-telegram.service
+Wants=network-online.target
+Requires=claude-telegram.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/signal-brief
+ExecStart=%h/Documents/Programming/claude-telegram/signal-brief/.venv/bin/python -m signal_brief.orchestrators.weekly
+StandardOutput=journal
+StandardError=journal
+# Weekly review is the heaviest — 45 min budget.
+TimeoutStartSec=2700
+
+[Install]
+WantedBy=default.target

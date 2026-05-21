@@ -1,0 +1,41 @@
+# X/Twitter accounts to monitor via RSSHub.
+#
+# Best-effort source — degrades cleanly if RSSHub instances rate-limit or die.
+# Add accounts that consistently produce signal you care about. The LLM filter
+# will rank these against your vault memory.
+
+accounts:
+  # AI lab principals and researchers
+  - handle: karpathy
+    domain: ai-tech
+    notes: "Andrej Karpathy"
+
+  - handle: demishassabis
+    domain: ai-tech
+    notes: "Demis Hassabis, Google DeepMind"
+
+  - handle: sama
+    domain: ai-tech
+    notes: "Sam Altman, OpenAI"
+
+  - handle: DarioAmodei
+    domain: ai-tech
+    notes: "Dario Amodei, Anthropic"
+
+  - handle: AnthropicAI
+    domain: ai-tech
+
+  - handle: OpenAI
+    domain: ai-tech
+
+  - handle: GoogleDeepMind
+    domain: ai-tech
+
+  # Industry analysts / engineering culture
+  - handle: GergelyOrosz
+    domain: career-industry
+    notes: "Pragmatic Engineer"
+
+  - handle: swyx
+    domain: ai-tech
+    notes: "Shawn Wang / Latent Space"

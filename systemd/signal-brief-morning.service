@@ -1,0 +1,18 @@
+[Unit]
+Description=signal-brief morning digest — fetch sources, LLM filter, push Telegram
+After=network-online.target claude-telegram.service
+Wants=network-online.target
+# Bot must be up for the /push endpoint to work.
+Requires=claude-telegram.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/signal-brief
+ExecStart=%h/Documents/Programming/claude-telegram/signal-brief/.venv/bin/python -m signal_brief.orchestrators.morning
+StandardOutput=journal
+StandardError=journal
+# 12-minute hard cap — the LLM pass usually takes 2-4 min at opus/high.
+TimeoutStartSec=720
+
+[Install]
+WantedBy=default.target

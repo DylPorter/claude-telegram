@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Google I/O 2026",
+    "start": "2026-05-19",
+    "end": "2026-05-21",
+    "url": "https://io.google",
+    "description": "Annual Google developer conference. AI/Gemini/Android/Workspace announcements.",
+    "tags": ["google", "ai"]
+  },
+  {
+    "name": "Apple WWDC 2026",
+    "start": "2026-06-08",
+    "end": "2026-06-12",
+    "url": "https://developer.apple.com/wwdc26/",
+    "description": "Apple developer conference. OS releases + AI updates.",
+    "tags": ["apple", "ios"]
+  },
+  {
+    "name": "Anthropic Code with Claude",
+    "start": "2026-10-15",
+    "end": "2026-10-15",
+    "url": "https://www.anthropic.com/events",
+    "description": "Anthropic developer event (date approximate — verify before relying).",
+    "tags": ["anthropic", "claude"]
+  },
+  {
+    "name": "OpenAI DevDay 2026",
+    "start": "2026-10-06",
+    "end": "2026-10-06",
+    "url": "https://devday.openai.com",
+    "description": "OpenAI annual developer day (date approximate — verify).",
+    "tags": ["openai"]
+  },
+  {
+    "name": "AWS re:Invent 2026",
+    "start": "2026-12-01",
+    "end": "2026-12-05",
+    "url": "https://reinvent.awsevents.com",
+    "description": "AWS annual conference. Major AWS service announcements.",
+    "tags": ["aws", "infra"]
+  },
+  {
+    "name": "NeurIPS 2026",
+    "start": "2026-12-08",
+    "end": "2026-12-14",
+    "url": "https://neurips.cc",
+    "description": "Top ML research conference.",
+    "tags": ["research", "ml"]
+  },
+  {
+    "name": "ICLR 2026",
+    "start": "2026-04-27",
+    "end": "2026-05-01",
+    "url": "https://iclr.cc",
+    "description": "International Conference on Learning Representations.",
+    "tags": ["research", "ml"]
+  },
+  {
+    "name": "ICML 2026",
+    "start": "2026-07-13",
+    "end": "2026-07-19",
+    "url": "https://icml.cc",
+    "description": "International Conference on Machine Learning.",
+    "tags": ["research", "ml"]
+  }
+]

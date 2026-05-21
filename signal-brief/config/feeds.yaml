@@ -1,0 +1,114 @@
+# RSS feed configuration for signal-brief.
+#
+# Domain tags here are *hints* — the LLM filter can override based on actual
+# content. They drive anti-bubble exposure tracking when content-based domain
+# isn't available.
+#
+# `max_items` is per-feed per-run; the filter will further rank globally.
+
+feeds:
+  # ─────────────────────────────────────────────────────────────────
+  # Hacker News — broad signal, catches conferences/launches/research
+  # ─────────────────────────────────────────────────────────────────
+  - id: hn-frontpage
+    name: Hacker News (Front Page)
+    url: https://hnrss.org/frontpage?points=150
+    domain: ai-tech
+    max_items: 20
+  - id: hn-best
+    name: Hacker News (Best)
+    url: https://hnrss.org/best
+    domain: ai-tech
+    max_items: 10
+
+  # ─────────────────────────────────────────────────────────────────
+  # AI lab blogs — first-party announcements
+  # ─────────────────────────────────────────────────────────────────
+  - id: anthropic-news
+    name: Anthropic News
+    url: https://www.anthropic.com/news/rss.xml
+    domain: ai-tech
+    max_items: 5
+  - id: openai-blog
+    name: OpenAI Blog
+    url: https://openai.com/blog/rss.xml
+    domain: ai-tech
+    max_items: 5
+  - id: deepmind-blog
+    name: Google DeepMind Blog
+    url: https://deepmind.google/blog/rss.xml
+    domain: ai-tech
+    max_items: 5
+  - id: google-ai-blog
+    name: Google AI Blog
+    url: https://blog.google/technology/ai/rss/
+    domain: ai-tech
+    max_items: 5
+  - id: mistral-news
+    name: Mistral News
+    url: https://mistral.ai/feed.xml
+    domain: ai-tech
+    max_items: 5
+
+  # ─────────────────────────────────────────────────────────────────
+  # Platform engineering blogs — relevant for agentic-commerce + infra
+  # ─────────────────────────────────────────────────────────────────
+  - id: stripe-blog
+    name: Stripe Blog
+    url: https://stripe.com/blog/feed.rss
+    domain: platform-engineering
+    max_items: 5
+  - id: vercel-blog
+    name: Vercel Blog
+    url: https://vercel.com/atom
+    domain: platform-engineering
+    max_items: 5
+  - id: cloudflare-blog
+    name: Cloudflare Blog
+    url: https://blog.cloudflare.com/rss/
+    domain: platform-engineering
+    max_items: 5
+
+  # ─────────────────────────────────────────────────────────────────
+  # Research / arXiv (curated)
+  # ─────────────────────────────────────────────────────────────────
+  - id: arxiv-cs-cl
+    name: arXiv cs.CL (Computation and Language)
+    url: http://export.arxiv.org/rss/cs.CL
+    domain: research-papers
+    max_items: 8
+  - id: arxiv-cs-ai
+    name: arXiv cs.AI
+    url: http://export.arxiv.org/rss/cs.AI
+    domain: research-papers
+    max_items: 5
+
+  # ─────────────────────────────────────────────────────────────────
+  # Bubble breakers — deliberately outside the user's normal interest set.
+  # Anti-bubble pass MUST surface >=1 item from these (or equivalent
+  # outside-set content) in every digest.
+  # ─────────────────────────────────────────────────────────────────
+  - id: aeon-essays
+    name: Aeon Essays (philosophy, science, culture)
+    url: https://aeon.co/feed.rss
+    domain: philosophy
+    max_items: 3
+    bubble_breaker: true
+  - id: quanta-magazine
+    name: Quanta Magazine (hard science)
+    url: https://www.quantamagazine.org/feed/
+    domain: biology-health
+    max_items: 5
+    bubble_breaker: true
+  - id: marginal-revolution
+    name: Marginal Revolution (economics, ideas)
+    url: https://marginalrevolution.com/feed
+    domain: finance-markets
+    max_items: 3
+    bubble_breaker: true
+  - id: dezeen
+    name: Dezeen (design)
+    url: https://www.dezeen.com/feed/
+    domain: design
+    max_items: 3
+    bubble_breaker: true

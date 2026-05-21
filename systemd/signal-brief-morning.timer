@@ -1,0 +1,16 @@
+[Unit]
+Description=Trigger signal-brief morning digest daily
+
+[Timer]
+# Override the timezone to your local zone (e.g. America/Los_Angeles, Europe/London).
+# Run `timedatectl list-timezones` to see options. systemd OnCalendar respects
+# the explicitly-specified timezone here.
+OnCalendar=*-*-* 07:00:00 Asia/Hong_Kong
+# Catch up if we missed a run (e.g. laptop was asleep).
+Persistent=true
+# Don't fire instantly on enable — wait for next scheduled time.
+RandomizedDelaySec=60
+Unit=signal-brief-morning.service
+
+[Install]
+WantedBy=timers.target

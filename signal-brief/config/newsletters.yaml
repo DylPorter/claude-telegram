@@ -1,0 +1,28 @@
+# Newsletters parsed from Gmail via the `gws` CLI.
+#
+# The `query` field is a Gmail search query (https://support.google.com/mail/answer/7190).
+# Use `newer_than:Xd` to limit freshness. Use `from:` or `list:` to scope.
+#
+# To add a newsletter: subscribe with your Gmail account, find the sender
+# address or list-id, and add an entry here.
+
+newsletters:
+  - id: latent-space
+    name: Latent Space
+    query: "from:swyx@latent.space OR from:newsletter@latent.space newer_than:2d"
+    domain: ai-tech
+
+  - id: import-ai
+    name: Import AI (Jack Clark)
+    query: "from:jack@jack-clark.net OR from:importai newer_than:2d"
+    domain: ai-tech
+
+  - id: pragmatic-engineer
+    name: The Pragmatic Engineer (Gergely Orosz)
+    query: "from:gergely@pragmaticengineer.com newer_than:2d"
+    domain: career-industry
+
+  - id: stratechery
+    name: Stratechery (Ben Thompson)
+    query: "from:stratechery newer_than:2d"
+    domain: career-industry
