@@ -76,7 +76,7 @@ EVENING_PROMPT = """You are running the evening vault sweep for an Obsidian-styl
       "body": "Telegram-ready markdown. <600 chars per bubble. Concise."
     }
   ],
-  "rationale": "Audit trail: what notes got created/edited, what links got added, what patterns surfaced. Multi-paragraph fine — goes to daily note, not Telegram."
+  "rationale": "Audit trail: what notes got created/edited, what links got added, what patterns surfaced. Keep under 400 chars — this is metadata, not an essay."
 }
 ```
 

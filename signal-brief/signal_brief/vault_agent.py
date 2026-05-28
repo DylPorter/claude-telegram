@@ -52,6 +52,7 @@ def run_vault_agent(prompt: str) -> VaultAgentResult:
             "--permission-mode", "bypassPermissions",
             "--model", SIGNAL_BRIEF_MODEL,
             "--effort", SIGNAL_BRIEF_EFFORT,
+            "--max-tokens", "4096",
         ],
         capture_output=True,
         text=True,

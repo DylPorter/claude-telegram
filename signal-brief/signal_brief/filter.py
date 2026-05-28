@@ -74,6 +74,22 @@ also written to their vault daily note.
    or events that affect the user's active projects (look these up in memory) —
    ranks high regardless of mainstream newsworthiness.
 
+6. **Broad tech/AI signal** — genuinely interesting technology and AI developments
+   that any informed engineer should know about, even if they don't hook into a
+   specific project. This includes: semiconductor geopolitics, hardware supply chain
+   shifts, major platform announcements, programming language/tooling changes, AI
+   safety developments, infrastructure shifts, notable acquisitions. These should
+   surface NATURALLY as signal — do NOT force them into the bubble breaker slot.
+   A story about China refusing Nvidia GPUs and building its own is broad tech
+   signal; it belongs in Today's Signal or its own section, not buried in quiet rest.
+
+**The Bubble Breaker is for genuinely OUTSIDE domains** — philosophy, biology,
+architecture, economics, history, art, physics, sports science, linguistics.
+It is NOT a catch-all for tech topics that don't hit a specific project. If the
+only underexposed content is still tech-adjacent, pick the most non-tech item
+and frame it as the bubble breaker. Do not water down the bubble breaker with
+tech content that should have appeared naturally above.
+
 **Wikilink convention:** Use `[[note-name]]` to reference vault notes when
 relevant. The user reads this output in Telegram (no preview) and in their
 vault (where wikilinks resolve). Link liberally when it adds context.
@@ -97,9 +113,10 @@ vault (where wikilinks resolve). Link liberally when it adds context.
 
 **Suggested section order:**
 1. **Today's Signal** — top 2-3 items hitting active projects/lodestones
-2. **Happening Now** — conferences live or starting this week
-3. **Bubble Breaker** — MANDATORY outside-set item
-4. **Quiet rest** — short paragraph noting the rest
+2. **Broad Tech/AI** — notable tech developments worth knowing regardless of project hooks
+3. **Happening Now** — conferences live or starting this week
+4. **Bubble Breaker** — MANDATORY genuinely-outside-tech item
+5. **Quiet rest** — short paragraph noting the rest
 
 You may add/remove sections to fit the day's signal. Quality > template adherence.
 """
@@ -179,9 +196,36 @@ def _parse_claude_response(raw: str) -> dict:
         try:
             return json.loads(text[start:end + 1])
         except json.JSONDecodeError as e:
+            # Truncated JSON recovery: extract headline + any fully-closed sections.
+            partial = _recover_truncated_json(text[start:])
+            if partial:
+                log.warning("recovered partial JSON from truncated vault agent output")
+                return partial
             raise ValueError(f"could not parse Claude response as JSON: {e}\n\nResponse was:\n{text[:1000]}")
 
     raise ValueError(f"no JSON object found in Claude response:\n{text[:1000]}")
+
+
+def _recover_truncated_json(text: str) -> dict | None:
+    """Best-effort recovery from a truncated JSON object.
+
+    Extracts headline and any sections whose closing `}` is present.
+    Falls back to None if nothing useful can be recovered.
+    """
+    result: dict = {"headline": "", "sections": [], "rationale": "⚠️ output truncated"}
+
+    # Extract headline (always comes first and is usually short enough to survive)
+    headline_match = re.search(r'"headline"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if headline_match:
+        result["headline"] = headline_match.group(1)
+
+    # Extract fully-closed section objects from the sections array
+    for m in re.finditer(r'\{\s*"title"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', text):
+        result["sections"].append({"title": m.group(1), "body": m.group(2)})
+
+    if result["headline"] or result["sections"]:
+        return result
+    return None
 
 
 def filter_items(items: list[Item], *, today: str | None = None) -> Digest:
