@@ -73,7 +73,7 @@ EVENING_PROMPT = """You are running the evening vault sweep for an Obsidian-styl
   "sections": [
     {
       "title": "Section heading",
-      "body": "Telegram-ready markdown. <600 chars per bubble. Concise."
+      "body": "Telegram-ready markdown. MAX 300 chars. One sentence per point. No wikilinks in body."
     }
   ],
   "rationale": "Audit trail: what notes got created/edited, what links got added, what patterns surfaced. Keep under 400 chars — this is metadata, not an essay."
