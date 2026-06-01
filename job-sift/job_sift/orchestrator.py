@@ -9,7 +9,7 @@ import sys
 from datetime import date
 
 from job_sift import config
-from job_sift.classifier import classify, classify_scope_only
+from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
 from job_sift.render import render, render_vault_archive
 from job_sift.schema import ClassifierResult, JobListing
@@ -96,11 +96,14 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     new_listings, seen_by_source = filter_new(listings)
     log.info("%d new listings (after dedupe)", len(new_listings))
 
-    # 3. Classify each new listing (per-source strategy)
+    # 3. Classify all new listings in one batched pass (≤1 LLM call per ~20
+    #    listings per route) — see classifier.classify_batch. The old per-listing
+    #    loop spawned one `claude` CLI each, which blew the 600s service timeout
+    #    once the backlog grew, killing the run before push/state-save.
     surfaced: list[tuple[JobListing, ClassifierResult]] = []
     skipped: list[tuple[JobListing, ClassifierResult]] = []
-    for listing in new_listings:
-        result = _classify_one(listing)
+    results = classify_batch(new_listings)
+    for listing, result in zip(new_listings, results):
         log_classification(listing, result)
         if result.surface:
             surfaced.append((listing, result))
