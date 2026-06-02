@@ -10,6 +10,7 @@ Mirrors job-sift/sources/_ats_common.py (config loader + shared filter).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -109,6 +110,19 @@ def _within_horizon(start: datetime | None) -> bool:
     return lo <= start <= hi
 
 
+_DESC_URL_RE = re.compile(r"https?://(?:lu\.ma|luma\.com)/[^\s\\]+", re.IGNORECASE)
+
+
+def _link_from_description(description: str | None) -> str:
+    """Pull the canonical event link from a feed DESCRIPTION when the URL
+    property is empty. Luma leaves URL blank and embeds the real link as
+    'Get up-to-date information at: https://luma.com/XXXX'."""
+    if not description:
+        return ""
+    m = _DESC_URL_RE.search(description)
+    return m.group(0) if m else ""
+
+
 def parse_ics(text: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
     """Parse VEVENTs from an .ics document into horizon-filtered Event objects.
 
@@ -139,12 +153,19 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
         description = str(comp.get("DESCRIPTION", "")).strip() or None
         organizer = str(comp.get("ORGANIZER", "")).strip() or organizer_default
 
+        # Link priority: VEVENT URL → an http(s) LOCATION (some Luma events put
+        # the real registration URL there, e.g. leapeast.com) → a lu.ma link
+        # mined from the DESCRIPTION. NEVER a plain-text address — a street
+        # address rendered as a [register] link is the dead link Dylan hit.
+        loc_link = location if (location and location.lower().startswith("http")) else ""
+        link = url or loc_link or _link_from_description(description)
+
         events.append(
             Event(
                 source=source,
                 external_id=uid,
                 title=summary,
-                url=url or location or "",  # fall back to location if no URL in feed
+                url=link,
                 start=start,
                 end=end,
                 location=location,
