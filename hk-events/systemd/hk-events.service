@@ -1,0 +1,17 @@
+[Unit]
+Description=hk-events daily — aggregate HK tech/startup/AI + SME-buyer events, classify, push to Telegram, sync calendar
+After=network-online.target claude-telegram.service
+Wants=network-online.target
+Requires=claude-telegram.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/hk-events
+ExecStart=%h/Documents/Programming/claude-telegram/hk-events/.venv/bin/python -m hk_events.orchestrator
+StandardOutput=journal
+StandardError=journal
+# 10-minute cap — classifier is fast (haiku, per-event), most time is feed fetch + gws calls.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

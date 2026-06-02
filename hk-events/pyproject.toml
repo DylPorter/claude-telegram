@@ -1,0 +1,25 @@
+[project]
+name = "hk-events"
+version = "0.1.0"
+description = "Daily Hong Kong tech/startup/AI + SME-buyer event digest. Aggregates iCal feeds (Meetup/Luma/AI Tinkerers) + scrapes (Cyberport/StartmeupHK), dedupes, LLM-classifies for relevance, pushes a chunked Telegram digest, and idempotently creates Google Calendar events via gws."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "icalendar>=5.0.0",
+    "python-dateutil>=2.9.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.32.0",
+]
+
+[project.scripts]
+hk-events = "hk_events.orchestrator:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hk_events*"]

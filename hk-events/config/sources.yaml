@@ -1,0 +1,91 @@
+# hk-events source configuration.
+#
+# Two tiers (see README):
+#   ical_feeds  — clean .ics feeds. PREFERRED. Per-feed degrade.
+#   scrape      — brittle HTML scrapers, wired in code (cyberport, startmeuphk).
+#                 Listed here only for documentation; the scraper adapters hold
+#                 their own URLs.
+#
+# To add an iCal feed: paste the verified .ics URL under the right group.
+# Entries whose url is empty or starts with "TODO" are SKIPPED by the loader,
+# so an unverified feed never breaks a run.
+#
+# VERIFY a feed before relying on it — fetch it and confirm it returns
+# text/calendar with VEVENTs:
+#   curl -sL '<url>' | head -20      # should show BEGIN:VCALENDAR / VEVENT
+
+ical_feeds:
+  meetup:
+    # Meetup per-group iCal: https://www.meetup.com/<slug>/events/ical/
+    - name: Data Science & Generative AI Hong Kong
+      # VERIFIED 2026-06-01: feed returns valid VCALENDAR (HTTP 200).
+      url: https://www.meetup.com/data-science-andgenai-hk/events/ical/
+    - name: vLLM Hong Kong
+      # VERIFIED 2026-06-01: feed returns valid VCALENDAR (HTTP 200).
+      url: https://www.meetup.com/vllm-hong-kong-meetup-group/events/ical/
+
+  luma:
+    # Luma calendar iCal pattern (VERIFIED 2026-06-01):
+    #   https://api.lu.ma/ics/get?entity=calendar&id=<cal-id>
+    # Find <cal-id> by curling the calendar's public page, grepping cal-XXXX,
+    # then confirming X-WR-CALNAME matches the intended calendar.
+    - name: Hong Kong Startup Events Calendar  # lu.ma/startupshk — 133 events @ verify
+      url: https://api.lu.ma/ics/get?entity=calendar&id=cal-BQLkdX3Zkmfmu0U
+    # HKWeb3 (267 events) DISABLED 2026-06-02 for the initial ship: it's a
+    # crypto/web3 calendar (mostly off-thesis), and classifying ~400 events on
+    # the first run blew the timeout. Precision filter would drop most of it.
+    # Re-enable by uncommenting if you want web3/AI-crossover rooms back.
+    # - name: HKWeb3 Events Calendar  # lu.ma/hkweb3 — 267 events
+    #   url: https://api.lu.ma/ics/get?entity=calendar&id=cal-5ui6MCnj5wN7WVI
+
+  aitinkerers:
+    - name: AI Tinkerers Hong Kong
+      # CHECKED 2026-06-01: no public iCal/RSS feed — the site exposes only a
+      # blog-email "Subscribe" widget, not a calendar feed. Dylan is registered
+      # with the chapter and gets event emails directly. Left empty (skipped)
+      # unless a scraper for hong-kong.aitinkerers.org is added later.
+      url:
+
+# Scrape sources (documentation only — URLs live in the adapter modules):
+#   cyberport    → https://www.cyberport.hk/en/news/events/        (selectors TODO)
+#   startmeuphk  → https://www.startmeup.hk/upcoming-events/events-calendar/  (selectors TODO;
+#                  CHECKED 2026-06-01: ?ical=1 returns HTML not a calendar feed — no clean
+#                  iCal export available, so this stays a scraper.)
+#
+# Clean extension points (not yet wired — add an adapter + a feed/scrape entry):
+#   hktdc        → HKTDC event calendar
+#   hkstp        → HK Science & Technology Parks events
+#   aws_summit_hk→ AWS Summit Hong Kong
+
+# Relevance filter keywords. The LLM classifier in classifier.py is the primary
+# decision-maker; these lists feed the cheap hard-rule pass that runs before it.
+# Keep them TIGHT — precision bias means a borderline title should go to the LLM
+# (which itself defaults to drop), not get hard-classified here.
+filter_keywords:
+  hard_founder_ai:
+    - hackathon
+    - ai tinkerers
+    - demo day
+    - demo night
+    - genai
+    - llm
+    - vllm
+    - machine learning meetup
+    - founders
+    - founder mixer
+    - pitch night
+    - startup grind
+  hard_drop:
+    - career fair
+    - job fair
+    - recruitment
+    - info session
+    - open day
+    - mlm
+    - forex
+    - get rich
+    - passive income
+    - yoga
+    - wellness retreat
+    - wine tasting
+    - speed dating
