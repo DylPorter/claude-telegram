@@ -18,11 +18,17 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from signal_brief.config import LOG_DIR, assert_required
-from signal_brief.daily_note import upsert_signal_section
+from signal_brief.daily_note import upsert_signal_section, upsert_threads_section
 from signal_brief.exposure import record_digest
 from signal_brief.filter import filter_items
-from signal_brief.render import render_for_daily_note, render_for_telegram
+from signal_brief.render import (
+    render_for_daily_note,
+    render_for_telegram,
+    render_threads_for_daily_note,
+    render_threads_for_telegram,
+)
 from signal_brief.schema import Item
+from signal_brief.threads import reconcile_threads, save_threads
 from signal_brief.sources import (
     fetch_conferences,
     fetch_newsletters,
@@ -99,29 +105,51 @@ def main() -> int:
 
     digest = filter_items(items, today=today)
 
+    # Thread reconciliation: diff prior thread snapshot against what actually
+    # happened (daily-note live-capture + git) instead of regenerating stale
+    # state. Degrades cleanly — never crashes the brief.
+    try:
+        reconcile = reconcile_threads(today=today)
+    except Exception as e:  # belt-and-braces; reconcile_threads already degrades
+        log.exception("thread reconciliation crashed: %s — skipping threads", e)
+        reconcile = None
+
     telegram_messages = render_for_telegram(digest)
+    thread_messages = render_threads_for_telegram(reconcile) if reconcile else []
     daily_note_md = render_for_daily_note(digest)
+    threads_note_md = render_threads_for_daily_note(reconcile) if reconcile else ""
+
+    # Threads lead the brief (they're the "what do I owe today" frame), then signal.
+    all_messages = thread_messages + telegram_messages
 
     if args.dry_run:
         print("\n" + "=" * 60)
-        print(f"DRY RUN — would push {len(telegram_messages)} Telegram messages:")
+        print(f"DRY RUN — would push {len(all_messages)} Telegram messages:")
         print("=" * 60)
-        for i, msg in enumerate(telegram_messages, 1):
+        for i, msg in enumerate(all_messages, 1):
             print(f"\n--- message {i} ({len(msg)} chars) ---")
             print(msg)
         print("\n" + "=" * 60)
-        print("DAILY NOTE SECTION (would replace):")
+        print("DAILY NOTE SECTIONS (would replace):")
         print("=" * 60)
+        if threads_note_md:
+            print(threads_note_md)
         print(daily_note_md)
         return 0
 
     # Write daily note FIRST (audit trail) — if Telegram fails, we still have it.
     note_path = upsert_signal_section(today, daily_note_md)
     log.info("wrote daily note: %s", note_path)
+    if reconcile and threads_note_md:
+        upsert_threads_section(today, threads_note_md)
+        # Persist the reconciled snapshot so tomorrow reconciles against today,
+        # not a stale list. Only on a real run.
+        save_threads(reconcile.threads, date_str=today)
+        log.info("wrote thread reconciliation + saved snapshot")
 
     # Push to Telegram.
     try:
-        result = push_messages(telegram_messages)
+        result = push_messages(all_messages)
         log.info("telegram push: %d sent, %d failed",
                  len(result.get("sent", [])), len(result.get("failed", [])))
     except TelegramPushError as e:
