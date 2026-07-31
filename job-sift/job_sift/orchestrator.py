@@ -11,11 +11,24 @@ from datetime import date
 from job_sift import config
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
-from job_sift.render import render, render_vault_archive
+from job_sift.errors import SourceAuthError
+from job_sift.open_roles import (
+    OpenRole,
+    active_roles,
+    age_roles,
+    apply_status_overrides,
+    closing_within,
+    load_open_roles,
+    parse_status_overrides,
+    prune,
+    save_open_roles,
+    upsert_roles,
+)
+from job_sift.render import render, render_open_roles, render_vault_archive
 from job_sift.schema import ClassifierResult, JobListing
 from job_sift.sources import ashby, cedars, greenhouse, lever, linkedin
 from job_sift.telegram_client import push_messages
-from job_sift.vault_note import write_archive
+from job_sift.vault_note import read_open_roles_note, write_archive, write_open_roles
 
 log = logging.getLogger("job_sift")
 
@@ -33,35 +46,41 @@ def _setup_logging() -> None:
     )
 
 
-def _fetch_all_sources() -> list[JobListing]:
-    """Run every source adapter, swallow individual failures, return combined listings."""
+def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str]]:
+    """Run every source adapter, return (combined listings, per-source errors).
+
+    Individual failures are caught so one dead source never kills the run — but
+    they are recorded in the returned error map (keyed by source name) so the
+    digest + archive can surface a ⚠️ health line. An auth failure raising
+    SourceAuthError is the load-bearing case: it turns a silent "None today"
+    into a visible "this source did not run".
+    """
     listings: list[JobListing] = []
+    errors: dict[str, str] = {}
+
+    def _run(name: str, fetch_fn) -> None:
+        try:
+            listings.extend(fetch_fn())
+        except SourceAuthError as exc:
+            log.error("%s auth failure: %s", name, exc.message)
+            errors[name] = exc.message
+        except Exception as exc:
+            log.error("%s fetch failed: %s", name, exc)
+            errors[name] = f"fetch failed: {exc}"
 
     # CEDARS — uses seen-set for greedy pagination, so pre-load it
     cedars_seen = load_seen("cedars")
-    try:
-        listings.extend(cedars.fetch_cedars_listings(seen_ids=cedars_seen))
-    except Exception as exc:
-        log.error("cedars fetch failed: %s", exc)
+    _run("cedars", lambda: cedars.fetch_cedars_listings(seen_ids=cedars_seen))
 
     # Standardized-ATS sources — public JSON APIs, no pagination needed
-    for fetch_fn, name in [
-        (greenhouse.fetch_greenhouse_listings, "greenhouse"),
-        (lever.fetch_lever_listings, "lever"),
-        (ashby.fetch_ashby_listings, "ashby"),
-    ]:
-        try:
-            listings.extend(fetch_fn())
-        except Exception as exc:
-            log.error("%s fetch failed: %s", name, exc)
+    _run("greenhouse", greenhouse.fetch_greenhouse_listings)
+    _run("lever", lever.fetch_lever_listings)
+    _run("ashby", ashby.fetch_ashby_listings)
 
     # LinkedIn — gws CLI Gmail digest email parsing
-    try:
-        listings.extend(linkedin.fetch_linkedin_listings())
-    except Exception as exc:
-        log.error("linkedin fetch failed: %s", exc)
+    _run("linkedin", linkedin.fetch_linkedin_listings)
 
-    return listings
+    return listings, errors
 
 
 def _classify_one(listing: JobListing) -> ClassifierResult:
@@ -69,6 +88,53 @@ def _classify_one(listing: JobListing) -> ClassifierResult:
     if listing.source in _AUTO_PRESTIGE_SOURCES:
         return classify_scope_only(listing)
     return classify(listing)
+
+
+def _update_open_roles(
+    surfaced: list[tuple[JobListing, ClassifierResult]],
+    today: date,
+    *,
+    dry_run: bool,
+) -> list[OpenRole]:
+    """Fold this run's surfaced roles into the rolling register.
+
+    Runs even on a zero-surfaced day: ageing and pruning are time-driven, so the
+    register would go stale if we only touched it when something new landed.
+
+    Under --dry-run nothing is persisted — Dylan will dry-run this against a
+    21-day scrape backlog before letting it commit, so the deltas are logged
+    instead of written.
+    """
+    stored = load_open_roles()
+    overrides = parse_status_overrides(read_open_roles_note())
+    if overrides:
+        log.info("applying %d hand-edited status override(s) from the note", len(overrides))
+    existing = apply_status_overrides(stored, overrides)
+    known_keys = {r.dedup_key for r in existing}
+
+    merged = upsert_roles(existing, [(l, r.reason) for l, r in surfaced], today)
+    aged = age_roles(merged, today)
+    kept = prune(aged, today)
+
+    added = sum(1 for r in merged if r.dedup_key not in known_keys)
+    updated = len(surfaced) - added
+    expired = sum(1 for r in kept if r.status in ("expired", "stale"))
+    log.info(
+        "open-roles register: %d new, %d updated, %d open, %d expired/stale, %d closing this week",
+        added,
+        updated,
+        len(active_roles(kept)),
+        expired,
+        len(closing_within(kept, today)),
+    )
+
+    if dry_run:
+        log.info("dry-run — NOT writing open_roles.json or the Open Roles note")
+        return kept
+
+    save_open_roles(kept)
+    write_open_roles(render_open_roles(kept, today))
+    return kept
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -83,11 +149,16 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         config.assert_required()
 
     # 1. Fetch raw listings from all sources
-    listings = _fetch_all_sources()
+    listings, source_errors = _fetch_all_sources()
+    if source_errors:
+        log.warning("source health: %d source(s) did not run: %s", len(source_errors), ", ".join(sorted(source_errors)))
     if not listings:
         log.warning("no listings fetched from any source — pushing heartbeat")
+        # Ageing is time-driven, so the register still needs a pass on a dead day.
+        roles = _update_open_roles([], today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today))
+            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles))
+            write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors))
         return 0
 
     log.info("fetched %d listings across all sources", len(listings))
@@ -120,13 +191,19 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     log.info("%d surfaced, %d skipped", len(surfaced), len(skipped))
 
-    # 4. Push to Telegram
+    # 4. Roll the persistent register forward BEFORE rendering — the digest
+    #    reports standing state ("11 open, 2 closing"), not just today's delta.
+    open_roles = _update_open_roles(surfaced, today, dry_run=dry_run)
+
+    # 5. Push to Telegram
     messages = render(
         surfaced=surfaced,
         skipped=skipped,
         total_new=len(new_listings),
         total_processed=len(listings),
         today=today,
+        source_errors=source_errors,
+        open_roles=open_roles,
     )
 
     if dry_run:
@@ -138,12 +215,12 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         push_messages(messages)
         log.info("pushed %d messages", len(messages))
 
-    # 5. Vault archive
-    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today)
+    # 6. Vault archive
+    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today, source_errors=source_errors)
     if not dry_run:
         write_archive(today, archive_md)
 
-    # 6. Persist seen-set (only after successful push)
+    # 7. Persist seen-set (only after successful push)
     if not dry_run:
         for source, seen in seen_by_source.items():
             save_seen(source, seen)
