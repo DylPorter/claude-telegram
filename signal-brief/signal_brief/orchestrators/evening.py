@@ -59,6 +59,14 @@ EVENING_PROMPT = """You are running the evening vault sweep for an Obsidian-styl
 5. **Teaching Queue.** If a `Resources/Learning/Teaching Queue.md` exists, re-sort
    based on what the user engaged with today and what's surfaced in active projects.
 
+6. **Refresh gbrain.** After you have committed/pushed your changes (per `CLAUDE.md`),
+   re-index the gbrain knowledge backend so it doesn't drift from git HEAD: call the
+   `mcp__gbrain__sync_brain` MCP tool with `no_pull: true` and `repo: "/home/tdporter/Documents/Obsidian"`.
+   The `repo` param is required — the default source has no `local_path` configured (post-2026-06-13 reinit).
+   It runs inside your own `gbrain serve` (no PGLite lock contention) and syncs + embeds + extracts links for
+   the changed pages. Do NOT shell out to the `gbrain` CLI — a separate process would
+   deadlock against your serve's single-writer lock.
+
 **Constraints:**
 - ALL touched notes must be linked into the graph. Under-linking is failure.
 - Save memories aggressively for anything notable (preferences, decisions, new

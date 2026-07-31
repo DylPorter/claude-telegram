@@ -33,6 +33,9 @@ class VaultAgentResult:
     sections: list[DigestSection] = field(default_factory=list)
     rationale: str = ""
     raw: str = ""
+    # Optional structured payload the weekly agent emits to drive the
+    # deterministic Home.md refresh + Done Log sweep (see home_refresh.py).
+    home_refresh: dict | None = None
 
 
 def run_vault_agent(prompt: str) -> VaultAgentResult:
@@ -91,11 +94,13 @@ def run_vault_agent(prompt: str) -> VaultAgentResult:
         DigestSection(title=s.get("title", "").strip(), body=s.get("body", "").strip())
         for s in parsed.get("sections", [])
     ]
+    hr = parsed.get("home_refresh")
     return VaultAgentResult(
         headline=parsed.get("headline", "").strip(),
         sections=sections,
         rationale=parsed.get("rationale", "").strip(),
         raw=proc.stdout,
+        home_refresh=hr if isinstance(hr, dict) else None,
     )
 
 

@@ -37,11 +37,22 @@ PUSH_PORT = int(os.environ.get("PUSH_PORT", "7421"))
 PUSH_SECRET = os.environ.get("PUSH_SECRET", "")
 PUSH_URL = f"http://{PUSH_HOST}:{PUSH_PORT}/push"
 
-# Claude CLI for the LLM filter pass.
+# Anthropic API key — used by filter.py direct SDK call (off subscription pool).
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Direct SDK model for the filter pass (full model ID required by API).
+# Sonnet is more than enough for ranked summarisation; Opus was overkill.
+SIGNAL_BRIEF_FILTER_MODEL = os.environ.get(
+    "SIGNAL_BRIEF_FILTER_MODEL", "claude-sonnet-4-6"
+)
+
+# Claude CLI config for vault_agent (subprocess, needs tool access for file writes).
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
-# Use opus for the filter — this is intelligence work, not chat-from-phone.
-SIGNAL_BRIEF_MODEL = os.environ.get("SIGNAL_BRIEF_MODEL", "opus")
-SIGNAL_BRIEF_EFFORT = os.environ.get("SIGNAL_BRIEF_EFFORT", "high")
+SIGNAL_BRIEF_MODEL = os.environ.get("SIGNAL_BRIEF_MODEL", "sonnet")
+# "normal" was a valid claude --effort value historically; the CLI standardized
+# to low|medium|high|xhigh|max and now warns + ignores anything else. "medium"
+# is the equivalent of the old "normal" default.
+SIGNAL_BRIEF_EFFORT = os.environ.get("SIGNAL_BRIEF_EFFORT", "medium")
 
 # Vault layout — these are conventional paths for an Obsidian-style vault.
 # Override via env if your folders are named differently.
@@ -56,6 +67,11 @@ MEMORY_INDEX = MEMORY_DIR / "MEMORY.md" if MEMORY_DIR else None
 DAILY_NOTES_DIR = _vault_path("SIGNAL_BRIEF_DAILY_NOTES_DIR", "Daily Notes")
 REVIEWS_DIR = _vault_path("SIGNAL_BRIEF_REVIEWS_DIR", "Reviews")
 INBOX_DIR = _vault_path("SIGNAL_BRIEF_INBOX_DIR", "Inbox")
+
+# Home dashboard + Done Log — the weekly job refreshes the "This Week" block in
+# Home and sweeps completed items into the Done Log (newest-first).
+HOME_NOTE = _vault_path("SIGNAL_BRIEF_HOME_NOTE", "Home.md")
+DONE_LOG_NOTE = _vault_path("SIGNAL_BRIEF_DONE_LOG_NOTE", "Areas/Personal/Done Log.md")
 
 
 def assert_required() -> None:

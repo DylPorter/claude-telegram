@@ -18,6 +18,7 @@ import logging
 import re
 import subprocess
 from datetime import datetime, timezone
+from html import unescape
 
 import yaml
 
@@ -28,6 +29,30 @@ log = logging.getLogger(__name__)
 
 NEWSLETTERS_FILE = CONFIG_DIR / "newsletters.yaml"
 GWS_TIMEOUT = 30.0
+
+
+def _html_to_text(html: str) -> str:
+    """Minimal HTML → text for newsletter bodies (beehiiv/Substack emails are
+    HTML-only). Drops script/style blocks then strips tags. Good enough for an
+    excerpt the LLM filter reads — not a full renderer."""
+    if not html:
+        return ""
+    html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clean_excerpt(text: str) -> str:
+    """Strip the link/image boilerplate that dominates beehiiv/Substack plaintext
+    bodies so the LLM filter's excerpt window holds actual editorial content."""
+    if not text:
+        return ""
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)      # md links/images -> visible text
+    text = re.sub(r"(?i)(view image|follow image link|caption)\s*:", " ", text)
+    text = re.sub(r"\(?https?://\S+\)?", " ", text)             # bare / parenthesized urls
+    text = re.sub(r"[-=#*]{3,}", " ", text)                     # md rules / header runs
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _load_newsletters() -> list[dict]:
@@ -117,14 +142,21 @@ def _fetch_one_newsletter(cfg: dict) -> list[Item]:
         if not msg:
             continue
 
-        # Schema from gws +read --headers --format json:
-        #   { headers: {from, to, subject, date}, body: "...", id: ..., snippet: ... }
-        # Fall back to top-level keys if structure differs.
+        # Schema from gws +read --headers --format json (flat keys):
+        #   { subject, date, from, to, ..., body_text, body_html }
+        # Older/alt shapes nested under `headers` / used `body`|`snippet`;
+        # keep those as fallbacks so the source survives a gws schema change.
         headers = msg.get("headers", {}) if isinstance(msg.get("headers"), dict) else {}
-        subject = headers.get("subject") or msg.get("subject", "")
-        date_str = headers.get("date") or msg.get("date")
-        body = msg.get("body") or msg.get("snippet") or ""
-        snippet = re.sub(r"\s+", " ", body).strip()[:800]
+        subject = msg.get("subject") or headers.get("subject") or ""
+        date_str = msg.get("date") or headers.get("date")
+        body = (
+            msg.get("body_text")
+            or _html_to_text(msg.get("body_html", ""))
+            or msg.get("body")
+            or msg.get("snippet")
+            or ""
+        )
+        snippet = _clean_excerpt(body)[:800]
 
         url = f"https://mail.google.com/mail/u/0/#all/{msg_id}"
 

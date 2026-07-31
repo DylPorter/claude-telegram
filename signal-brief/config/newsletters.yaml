@@ -26,3 +26,11 @@ newsletters:
     name: Stratechery (Ben Thompson)
     query: "from:stratechery newer_than:2d"
     domain: career-industry
+
+  # Secondary aggregator — resummarizes news the RSS feeds already carry, with
+  # affiliate incentives shaping the editorial. Kept as one vote; the filter
+  # dedupes it against first-party RSS. Weekly (Fri).
+  - id: ai-debrief
+    name: The AI Debrief (Drew Collins)
+    query: "from:the-ai-debrief-news@mail.beehiiv.com newer_than:2d"
+    domain: ai-tech

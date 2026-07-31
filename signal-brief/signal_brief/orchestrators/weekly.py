@@ -22,6 +22,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from signal_brief.config import LOG_DIR, REVIEWS_DIR, assert_required
+from signal_brief.home_refresh import apply_home_refresh
 from signal_brief.render import render_for_telegram
 from signal_brief.telegram_client import TelegramPushError, push_messages
 from signal_brief.vault_agent import result_to_digest, run_vault_agent
@@ -72,16 +73,56 @@ WEEKLY_PROMPT_TEMPLATE = """You are running the weekly review for an Obsidian-st
    #active, or stale? Flag stale ideas (no updates in 30+ days) for kill/archive
    review.
 
-4. **Graph health.** Count: orphans (notes with no inbound or outbound links),
-   under-linked notes (only stub links), dangling wikilinks (link targets that
-   don't exist). Surface the worst offenders.
+4. **Graph health.** SKIP — handled by a dedicated fan-out link-health sweep that
+   runs immediately after this review (it finds under-linking, auto-applies
+   high-confidence wikilinks, and surfaces stub candidates). Do NOT count orphans
+   or links here, and do NOT emit a "Graph health" section — it is appended automatically.
 
-5. **Active threads review.** For each active project note or memory file not
-   marked KILLED/completed, is there forward motion? What's the next concrete step?
+5. **Active threads review — read before surfacing.**
+   For each item in the `.claude-memory/MEMORY.md` index that looks like an open
+   action or pending task (invoice, message to send, application to file, decision
+   pending, etc.):
+   a. **Open the underlying memory file** (the link in the index line). Do NOT
+      surface the item based on the index line alone — index lines decay and are
+      often stale.
+   b. **Scan the last 7 daily notes** (`Daily Notes/{date_range}`) for any entry
+      that marks this action done (e.g. "sent invoice", "replied to Adam", "submitted
+      application"). If found, update the memory file body to past-tense and rewrite
+      the MEMORY.md index line accordingly — then skip it from the Telegram surface.
+   c. Only surface an item in Telegram if both (a) the memory file body still reads
+      as open AND (b) there is no matching completion evidence in the daily notes.
+   d. For project/role memories (not action items), apply the same body-read check
+      before claiming a project is still active — the body may say CLOSED/KILLED
+      while the index line still reads as current.
 
 6. **Write the review note.** Save to `Reviews/{week_filename}.md` with full
    detail — this is the long-form record. The Telegram digest is the short
    surface-level skim.
+
+7. **Home dashboard refresh + Done Log sweep — emit STRUCTURED DATA, do NOT edit
+   `Home.md` or `Done Log.md` yourself.** Deterministic Python applies these edits
+   after you finish (it does a surgical block-replace so the rest of Home stays
+   byte-for-byte intact). Your job is only to DECIDE the contents from this review:
+
+   a. **Read `Home.md`.** Note its current `## 🎯 This Week (...) — ranked` block
+      AND its `## 🔭 Next / in the picture` backlog.
+   b. **`this_week`**: produce the new ranked immediate list — the few things that
+      matter THIS coming week — derived from this review's priorities + the current
+      Home state. Pull items up from `Next / in the picture` when they're ready.
+      Keep wikilinks (`[[...]]`) exactly as written. Each item: `text` (the bullet,
+      no leading number) + `status` emoji from the existing convention
+      (🔴 urgent / 🟠 important / 🟢 ready-but-not-urgent / ✍️ writing / etc.).
+      Order = rank (most important first). **Derive from reality — never invent a
+      task that isn't grounded in the vault/review.** Omit the field (or use the
+      same items) if nothing changed.
+   c. **`sweep_to_done`**: list every item currently in Home's `This Week` (or
+      elsewhere in Home) that is now DONE/SHIPPED/SENT/COMPLETED, to move into the
+      Done Log. Each: `date` (YYYY-MM-DD the thing completed; default today {today})
+      + `bullet` (a `✅ ...`-style one-liner with wikilinks). Only genuinely
+      completed items — the deterministic step skips duplicates, so it's safe to
+      include borderline ones, but do not fabricate completions.
+   d. **Do NOT delete the `Next / in the picture` backlog** and do NOT touch any
+      other Home section. You are only deciding `this_week` + `sweep_to_done`.
 
 **Constraints:**
 - Proactive suggestions, not passive summaries — flag what should change,
@@ -107,18 +148,61 @@ WEEKLY_PROMPT_TEMPLATE = """You are running the weekly review for an Obsidian-st
       "body": "Telegram markdown. <700 chars per bubble. Concise + sharp."
     }}
   ],
-  "rationale": "Long-form trace: what got reviewed, what shifted, what didn't. Goes to daily note, not Telegram."
+  "rationale": "Long-form trace: what got reviewed, what shifted, what didn't. Goes to daily note, not Telegram.",
+  "home_refresh": {{
+    "this_week": [
+      {{ "text": "The bullet text WITH [[wikilinks]], no leading number.", "status": "🔴" }}
+    ],
+    "sweep_to_done": [
+      {{ "date": "{today}", "bullet": "✅ One-liner of the completed item, with [[wikilinks]]." }}
+    ]
+  }}
 }}
 ```
+
+`home_refresh` is consumed by deterministic Python, NOT shown on Telegram. Emit it
+based on task 7. If nothing about Home should change, set `"this_week": []` and
+`"sweep_to_done": []` (or omit `home_refresh` entirely) — the Python step then
+leaves Home untouched.
 
 **Suggested sections (omit if empty):**
 1. **Week frame** — what was the dominant arc of this week
 2. **Patterns** — friction clusters / direction shifts noticed
 3. **Active threads — kill/commit calls** — explicit calls on stalled work
-4. **Graph health** — orphan / under-linked counts + worst offenders
+4. (Graph / link health is appended automatically by the link-health pass — do NOT produce it here)
 5. **Next week** — top 1-3 priorities going in
 
 Aim for 4-6 Telegram bubbles total including the headline.
+
+Output ONLY the JSON object. No fences. No prose around it.
+"""
+
+
+LINK_HEALTH_PROMPT = """You are running the weekly LINK-HEALTH sweep for the Obsidian vault (today {today}).
+
+Follow the procedure in `/home/tdporter/.claude/skills/vault-link-health/SKILL.md` EXACTLY. Mode: {mode}.
+
+Read that skill file first, then execute every step: precompute, fan out parallel scan
+subagents over the folder groups, synthesize + completeness-critic, apply per the mode,
+and return the result.
+
+**After applying (APPLY mode only):** once the link-health skill has committed + pushed
+its wikilink edits, re-index gbrain so it doesn't drift from HEAD — call the
+`mcp__gbrain__sync_brain` MCP tool with `no_pull: true`. It runs inside your own
+`gbrain serve` (no lock contention). Do NOT use the `gbrain` CLI (it would deadlock
+against your serve's PGLite lock). In REPORT-ONLY mode nothing was committed, so skip this.
+
+**Output (STRICT JSON for the digest, nothing else):**
+{{
+  "headline": "1-line link-health frame. <120 chars.",
+  "sections": [ {{ "title": "...", "body": "Telegram markdown, <700 chars" }} ],
+  "rationale": "Full trace: notes scanned, proposals, exactly what was auto-applied (with commit hash), stub candidates ranked, coverage gaps."
+}}
+
+Suggested sections (omit if empty):
+- **🔗 Link health** — notes scanned, N links auto-applied, M stub candidates
+- **Auto-applied** — the high-confidence links inserted this week (file → entity)
+- **Stub candidates** — top dangling entities with no backing note, ranked
 
 Output ONLY the JSON object. No fences. No prose around it.
 """
@@ -172,6 +256,56 @@ def main() -> int:
         ) + prompt
 
     result = run_vault_agent(prompt)
+
+    # Dedicated link-health sweep — replaces the old inline "graph health" step.
+    # Report-only on dry runs; auto-applies high-confidence links on live runs.
+    lh_mode = (
+        "REPORT-ONLY — do NOT edit, commit, or push any files"
+        if args.dry_run
+        else "APPLY mode ON — auto-apply HIGH-confidence first-mention links, then commit + push"
+    )
+    lh_prompt = LINK_HEALTH_PROMPT.format(today=today_iso, mode=lh_mode)
+    log.info("running link-health pass (mode=%s)",
+             "report-only" if args.dry_run else "apply")
+    lh_result = run_vault_agent(lh_prompt)
+
+    # Merge the link-health sections + rationale into the weekly digest.
+    result.sections.extend(lh_result.sections)
+    if lh_result.rationale:
+        result.rationale = (
+            f"{result.rationale}\n\n---\n## Link-health pass\n{lh_result.rationale}"
+        ).strip()
+
+    # Home dashboard refresh + Done Log sweep — deterministic, surgical. Driven by
+    # the `home_refresh` payload the review agent emitted (never fabricated here).
+    # On --dry-run this computes diffs and writes nothing.
+    if result.home_refresh:
+        hr = apply_home_refresh(
+            result.home_refresh, run_date=today_iso, dry_run=args.dry_run
+        )
+        log.info(
+            "home refresh: home_updated=%s done_swept=%s errors=%s",
+            hr.get("home_updated"), hr.get("done_swept"), hr.get("errors"),
+        )
+        if args.dry_run:
+            if hr.get("home_diff"):
+                print("\n" + "=" * 60)
+                print("DRY RUN — Home.md This Week block diff:")
+                print("=" * 60 + "\n" + hr["home_diff"])
+            if hr.get("done_diff"):
+                print("\n" + "=" * 60)
+                print("DRY RUN — Done Log sweep diff:")
+                print("=" * 60 + "\n" + hr["done_diff"])
+        # Surface a one-line summary into the long-form review rationale.
+        if hr.get("home_updated") or hr.get("done_swept"):
+            result.rationale = (
+                f"{result.rationale}\n\n---\n## Home refresh\n"
+                f"This Week block {'refreshed' if hr.get('home_updated') else 'unchanged'}; "
+                f"{hr.get('done_swept', 0)} item(s) swept to Done Log."
+            ).strip()
+    else:
+        log.info("home refresh: no home_refresh payload from review agent; skipping")
+
     digest = result_to_digest(result, date=today_iso)
 
     if digest.headline and not digest.headline.startswith("📊"):

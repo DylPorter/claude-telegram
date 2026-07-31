@@ -26,9 +26,19 @@ feeds:
   # ─────────────────────────────────────────────────────────────────
   - id: anthropic-news
     name: Anthropic News
-    url: https://www.anthropic.com/news/rss.xml
+    url: https://www.anthropic.com/rss.xml
     domain: ai-tech
     max_items: 5
+  - id: claude-code-releases
+    name: Claude Code Releases
+    url: https://github.com/anthropics/claude-code/releases.atom
+    domain: ai-tech
+    max_items: 3
+  - id: anthropic-sdk-releases
+    name: Anthropic SDK Releases
+    url: https://github.com/anthropics/anthropic-sdk-python/releases.atom
+    domain: ai-tech
+    max_items: 3
   - id: openai-blog
     name: OpenAI Blog
     url: https://openai.com/blog/rss.xml
@@ -80,6 +90,11 @@ feeds:
   - id: arxiv-cs-ai
     name: arXiv cs.AI
     url: http://export.arxiv.org/rss/cs.AI
+    domain: research-papers
+    max_items: 5
+  - id: google-research-blog
+    name: Google Research Blog
+    url: https://research.google/blog/rss/
     domain: research-papers
     max_items: 5
 
