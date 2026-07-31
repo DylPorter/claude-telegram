@@ -17,6 +17,10 @@ export interface StreamOptions {
   model?: string;
   /** Override the default effort for this single turn. */
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Abort signal — when aborted, the child's whole process group is killed. */
+  signal?: AbortSignal;
+  /** Invoked with the child PID once spawned (for the run registry). */
+  onSpawn?: (pid: number) => void;
 }
 
 /**
@@ -45,9 +49,14 @@ export async function* streamClaude(
     args.splice(2, 0, "--resume", opts.resumeSessionId);
   }
 
+  // `detached: true` makes the child its own process-group leader, so an
+  // interrupt can signal the whole tree (claude -> Bash tool -> curl, …) at
+  // once via the negative PID. A plain proc.kill() orphans those grandchildren
+  // — which is how a runaway kept mutating n8n after the parent looked idle.
   const proc = spawn(env.CLAUDE_BIN, args, {
     cwd: opts.cwd,
     env: { ...process.env },
+    detached: true,
   });
 
   const events: (StreamEvent | null)[] = [];
@@ -60,6 +69,31 @@ export async function* streamClaude(
       resolveNext = null;
     }
   };
+
+  if (proc.pid !== undefined) opts.onSpawn?.(proc.pid);
+
+  // External interrupt: SIGTERM the process group, then SIGKILL stragglers.
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
+  const onAbort = () => {
+    if (proc.pid === undefined) return;
+    try {
+      process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      // already gone
+    }
+    killTimer = setTimeout(() => {
+      try {
+        if (proc.pid !== undefined) process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // gone
+      }
+    }, 4000);
+    pushEvent(null); // end the stream now — don't wait for the child to die
+  };
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   let buffer = "";
 
@@ -85,7 +119,10 @@ export async function* streamClaude(
   });
 
   proc.on("close", (code) => {
-    if (code !== 0) {
+    if (killTimer) clearTimeout(killTimer);
+    opts.signal?.removeEventListener("abort", onAbort);
+    // A non-zero exit from an intentional interrupt isn't an error to report.
+    if (code !== 0 && !opts.signal?.aborted) {
       pushEvent({ kind: "error", error: `claude exited ${code}` });
     }
     pushEvent(null); // sentinel

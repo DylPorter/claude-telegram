@@ -5,6 +5,7 @@ import {
   handleReset,
   handleStart,
   handleStatus,
+  handleStop,
   handleVault,
 } from "./handlers/commands.js";
 import { handlePhoto } from "./handlers/photo.js";
@@ -31,6 +32,7 @@ bot.catch((err) => {
 
 // Commands
 bot.command("start", handleStart);
+bot.command("stop", handleStop);
 bot.command("reset", handleReset);
 bot.command("status", handleStatus);
 bot.command("vault", handleVault);
@@ -50,7 +52,9 @@ bot.command("deep", async (ctx) => {
     await ctx.reply("Usage: /deep <prompt>  (one turn at opus + high effort)");
     return;
   }
-  await handleText(ctx, prompt, { model: "opus", effort: "high" });
+  void handleText(ctx, prompt, { model: "opus", effort: "high" }).catch((e) =>
+    console.error("[deep]", e),
+  );
 });
 
 // One-shot run in a different directory at opus + chosen effort, fresh session.
@@ -81,21 +85,25 @@ bot.command("run", async (ctx) => {
     await ctx.reply("⚠️ Missing prompt after path/effort.");
     return;
   }
-  await handleText(ctx, prompt, {
+  void handleText(ctx, prompt, {
     model: "opus",
     effort,
     cwd,
     ephemeral: true,
-  });
+  }).catch((e) => console.error("[run]", e));
 });
 
 // Content handlers
 bot.on("message:photo", handlePhoto);
 bot.on("message:voice", handleVoice);
-bot.on("message:text", async (ctx) => {
+bot.on("message:text", (ctx) => {
   // Skip commands (they're handled above)
   if (ctx.message.text.startsWith("/")) return;
-  await handleText(ctx, ctx.message.text);
+  // Fire-and-forget so the bot stays responsive mid-run — this is what lets
+  // /stop (or a new message) be received while a turn is still streaming.
+  void handleText(ctx, ctx.message.text).catch((e) =>
+    console.error("[text]", e),
+  );
 });
 
 // Startup

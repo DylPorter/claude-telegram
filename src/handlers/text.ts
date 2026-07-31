@@ -1,6 +1,7 @@
 import type { Context } from "grammy";
 import { streamClaude, type StreamOptions } from "../lib/claude.js";
 import { getSession, updateSession } from "../lib/session.js";
+import { deregister, getRunning, register } from "../lib/running.js";
 
 type OverrideOpts = Pick<StreamOptions, "model" | "effort"> & {
   /** Override the chat's working dir for this one turn only. */
@@ -96,6 +97,17 @@ export async function handleText(
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
+  // A new turn supersedes whatever's already running for this chat: kill it,
+  // then take over. (Sending /stop instead halts without starting anything.)
+  const prev = getRunning(chatId);
+  if (prev) {
+    prev.abort();
+    deregister(chatId, prev.pid);
+  }
+
+  const controller = new AbortController();
+  let myPid: number | null = null;
+
   await ctx.replyWithChatAction("typing");
   const session = await getSession(chatId);
   const effectiveCwd = override.cwd ?? session.cwd;
@@ -161,6 +173,17 @@ export async function handleText(
       resumeSessionId: effectiveResume,
       model: override.model,
       effort: override.effort,
+      signal: controller.signal,
+      onSpawn: (pid) => {
+        myPid = pid;
+        register({
+          chatId,
+          pid,
+          startedAt: Date.now(),
+          abort: () => controller.abort(),
+          label: _text.slice(0, 60),
+        });
+      },
     })) {
       if (ev.kind === "assistant_text") {
         await renderAssistantText(ev.text);
@@ -193,5 +216,7 @@ export async function handleText(
   } catch (err) {
     await clearPlaceholder();
     await safeReply(ctx, `⚠️ Error: ${(err as Error).message}`);
+  } finally {
+    if (myPid !== null) deregister(chatId, myPid);
   }
 }
