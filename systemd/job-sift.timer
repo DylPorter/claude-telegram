@@ -1,0 +1,13 @@
+[Unit]
+Description=Trigger job-sift daily
+
+[Timer]
+# Daily 09:00 HKT — after morning brief at 07:00 lands, before workday starts.
+OnCalendar=*-*-* 09:00:00 Asia/Hong_Kong
+# Catch up if we missed a run (e.g. laptop was asleep).
+Persistent=true
+RandomizedDelaySec=60
+Unit=job-sift.service
+
+[Install]
+WantedBy=timers.target
