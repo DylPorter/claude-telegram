@@ -1,0 +1,28 @@
+[project]
+name = "job-sift"
+version = "0.1.0"
+description = "Daily job-sift digest. Scrapes HKU CEDARS NETJobs, LLM-classifies for prestige + scope (internships/contracts/1-year), pushes new matches to Telegram."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "python-dateutil>=2.9.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.32.0",
+    "anthropic>=0.40.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+job-sift = "job_sift.orchestrator:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["job_sift*"]

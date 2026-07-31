@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# On-demand job sift. Refreshes the CEDARS session cookie from your logged-in
+# browser, then runs a live sift (scrape → classify → push to Telegram + write
+# the vault archive). Run this whenever you want a fresh pull — just make sure
+# you're logged into CEDARS in one of your browsers first.
+#
+#   ./sift                 # live run (pushes to Telegram, saves state)
+#   ./sift --dry-run       # print what would push, no Telegram, no state save
+#   BROWSER=chrome ./sift  # force a specific browser for the cookie pull
+set -euo pipefail
+cd "$(dirname "$0")"
+PY=.venv/bin/python
+COOKIE=.data/cookies/cedars.json
+
+# Default is firefox — that's where the HKU Portal / CEDARS login actually
+# lives. It used to default to chrome, which produced a nasty failure mode: no
+# cookie in chrome → warn → silently fall back to the stale stored file →
+# CEDARS 302s to login → the error reads "session cookie expired", so it looks
+# like an expiry problem when it's really a wrong-browser one. That cost a full
+# debug cycle twice (2026-07-03, 2026-07-31) before being fixed here.
+BROWSER="${BROWSER:-firefox}"
+
+# Try the requested browser first, then the rest. The login has moved between
+# browsers before; guessing wrong shouldn't cost a debug cycle.
+refreshed=""
+tried=""
+for b in "$BROWSER" firefox chrome chromium brave; do
+  case " $tried " in *" $b "*) continue ;; esac
+  tried="$tried $b"
+  if "$PY" -m job_sift.refresh_cookie --browser "$b" >/dev/null 2>&1; then
+    refreshed="$b"
+    break
+  fi
+done
+
+if [ -n "$refreshed" ]; then
+  echo "→ CEDARS cookie refreshed from ${refreshed}"
+else
+  # Loud, not a shrug. We're about to run with a stored cookie that is very
+  # likely dead — say so plainly rather than letting CEDARS fail downstream
+  # with a misleading "expired" message.
+  age="never written"
+  if [ -f "$COOKIE" ]; then
+    mins=$(( ( $(date +%s) - $(stat -c %Y "$COOKIE") ) / 60 ))
+    age="${mins} min old"
+  fi
+  {
+    echo
+    echo "════════════════════════════════════════════════════════════"
+    echo " ⚠️  CEDARS COOKIE NOT REFRESHED — CEDARS WILL LIKELY FAIL"
+    echo "════════════════════════════════════════════════════════════"
+    echo " No live CEDARS session in any of:${tried}"
+    echo " Stored cookie: ${age}  (CEDARS sessions die in a few hours)"
+    echo
+    echo " Fix: open https://web2.cedars.hku.hk/jobs/ , log in via HKU"
+    echo " Portal, then re-run. Other sources will still run."
+    echo "════════════════════════════════════════════════════════════"
+    echo
+  } >&2
+fi
+
+echo "→ running sift…"
+exec "$PY" -m job_sift.orchestrator "$@"

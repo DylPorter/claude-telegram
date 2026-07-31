@@ -1,0 +1,71 @@
+# Curated list of prestige companies whose public ATS APIs we poll.
+# Each entry under a vendor key is the company's board slug.
+# Listings from these vendors bypass the prestige classifier — they're
+# prestige by curation.
+#
+# Verified live as of 2026-05-21. To add a new entry, hit the vendor's
+# public endpoint:
+#   Greenhouse: https://boards-api.greenhouse.io/v1/boards/{slug}/jobs
+#   Lever:      https://api.lever.co/v0/postings/{slug}?mode=json
+#   Ashby:      https://api.ashbyhq.com/posting-api/job-board/{slug}
+# 200 = valid slug; 404 = try a different vendor.
+
+greenhouse:
+  # AI labs / AI infra
+  - anthropic       # Anthropic — frontier AI lab
+  - databricks      # Databricks — ML platform, HK office
+  - scaleai         # Scale AI — data infra for AI
+  # Big tech-adjacent with HK presence or strong remote posture
+  - stripe          # Stripe — HK office
+  - airbnb          # Airbnb — HK office
+  - figma           # Figma — design platform
+  - vercel          # Vercel — infra, AI-adjacent
+  - dropbox         # Dropbox — historical AI investments
+  - discord         # Discord — consumer tech
+  - pinterest       # Pinterest — consumer tech
+
+lever:
+  - mistral         # Mistral AI — open-weights frontier lab
+  - plaid           # Plaid — fintech infra
+  - spotify         # Spotify
+
+ashby:
+  # AI labs / frontier model companies
+  - cohere          # Cohere — enterprise LLMs
+  - perplexity      # Perplexity — AI search
+  - elevenlabs      # ElevenLabs — voice AI
+  - character       # Character.AI — companion AI
+  - runway          # Runway ML — generative video
+  # AI-adjacent (devtools, ML infra, enterprise AI)
+  - sierra          # Sierra — AI customer support
+  - harvey          # Harvey — legal AI
+  - anyscale        # Anyscale — Ray, ML infra
+  # Strong-brand tech (mix of AI-related and devtools)
+  - linear          # Linear — devtools
+  - notion          # Notion — productivity
+  - vercel          # Vercel (also on Greenhouse — Ashby is primary now)
+  - ramp            # Ramp — fintech, AI-adjacent
+
+# NOT on any of these standardized ATSs (would need bespoke adapters):
+# - openai (Workday)
+# - google, microsoft, amazon, apple, nvidia (custom ATSs)
+# - bytedance, tencent, alibaba (custom ATSs)
+# - huggingface (uses... custom or moved?)
+# - HFT firms (Jane Street etc. — custom)
+# → LinkedIn email source covers these in the meantime.
+
+# Location filter — listings pass if location contains ANY of these
+# substrings (case-insensitive). Listings with no location at all pass
+# (manual review fallback).
+#
+# Bare "remote" intentionally OMITTED — most ATS entries marked "Remote"
+# mean "Remote, United States" which isn't useful from HK. To catch
+# genuinely-global remote roles, we match the explicit "Worldwide" / "Global"
+# phrasings.
+location_allowlist:
+  - hong kong
+  - remote, worldwide
+  - remote, global
+  - remote-friendly, worldwide
+  - global remote
+  - apac
