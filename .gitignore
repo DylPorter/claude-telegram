@@ -4,3 +4,9 @@ dist/
 .data/
 *.log
 tmp/
+
+# python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
