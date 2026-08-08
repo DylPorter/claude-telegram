@@ -53,6 +53,17 @@ HK_EVENTS_CALENDAR_ENABLED = os.environ.get("HK_EVENTS_CALENDAR_ENABLED", "0") =
 # Only look at events starting within this many days (rolling horizon).
 HK_EVENTS_HORIZON_DAYS = int(os.environ.get("HK_EVENTS_HORIZON_DAYS", "45"))
 
+# Push a "nothing today" heartbeat to Telegram on empty runs. Default OFF:
+# 56 of the first 64 runs surfaced nothing, and a daily no-op message is what
+# trains you to stop opening the digest. Silence is the signal; the vault
+# archive + journalctl remain the audit trail proving the run happened.
+HK_EVENTS_PUSH_EMPTY = os.environ.get("HK_EVENTS_PUSH_EMPTY", "0") == "1"
+
+# Re-surface an already-seen event this many days before it starts. Discovery
+# alone isn't enough: an event spotted 6 weeks out gets forgotten long before
+# it happens, so each event fires twice — once on discovery, once on approach.
+HK_EVENTS_REMINDER_DAYS = int(os.environ.get("HK_EVENTS_REMINDER_DAYS", "3"))
+
 
 # Vault layout
 def _vault_path(env_key: str, default_rel: str) -> Path | None:

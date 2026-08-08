@@ -29,8 +29,30 @@ ical_feeds:
     #   https://api.lu.ma/ics/get?entity=calendar&id=<cal-id>
     # Find <cal-id> by curling the calendar's public page, grepping cal-XXXX,
     # then confirming X-WR-CALNAME matches the intended calendar.
-    - name: Hong Kong Startup Events Calendar  # lu.ma/startupshk — 133 events @ verify
+    - name: Hong Kong Startup Events Calendar  # lu.ma/startupshk — 170 events @ verify
       url: https://api.lu.ma/ics/get?entity=calendar&id=cal-BQLkdX3Zkmfmu0U
+    # ADDED 2026-08-09 — root cause of "the bot catches nothing". startupshk was
+    # the ONLY live event source, so everything run by the Lunatechs/MooMeetup
+    # crowd (CodeChella Week, Vibe Coding Day, the Atlantis MegaYacht party) was
+    # invisible. Both VERIFIED 2026-08-09: X-WR-CALNAME matches, feeds return
+    # VEVENTs (17 and 4 respectively).
+    - name: Lunatechs Hong Kong  # lu.ma/lunatechs
+      url: https://api.lu.ma/ics/get?entity=calendar&id=cal-KLdDFNfwAsFSnWE
+    - name: MooMeetup  # lu.ma/moomeetup
+      url: https://api.lu.ma/ics/get?entity=calendar&id=cal-KxreALPD1BHk8vP
+    # lu.ma/codechella — the official CodeChella Week calendar. Returns 0 VEVENTs
+    # as of 2026-08-09 because the organisers published the week as STANDALONE
+    # Luma events (lu.ma/6j6b7ffj, lu.ma/wzxtnwux) rather than attaching them to
+    # this calendar. Wired anyway: it costs one HTTP call and starts working the
+    # moment they attach anything.
+    #
+    # ⚠️ KNOWN ARCHITECTURAL GAP — standalone Luma events belong to no calendar,
+    # so NO iCal feed can ever see them. Catching those needs a discovery-page
+    # scrape (Luma's public discover API 404s on the obvious endpoints, and the
+    # page is JS-rendered, so it'd need Playwright). Deliberately not bolted on
+    # here. This is why CodeChella never reached the digest.
+    - name: Codechella  # lu.ma/codechella
+      url: https://api.lu.ma/ics/get?entity=calendar&id=cal-MZrFS0AVVLJSPpy
     # HKWeb3 (267 events) DISABLED 2026-06-02 for the initial ship: it's a
     # crypto/web3 calendar (mostly off-thesis), and classifying ~400 events on
     # the first run blew the timeout. Precision filter would drop most of it.

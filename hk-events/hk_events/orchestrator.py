@@ -17,7 +17,14 @@ from datetime import date
 from hk_events import config
 from hk_events.calendar_sync import sync_events
 from hk_events.classifier import classify
-from hk_events.dedupe import filter_new, load_seen, log_classification, save_seen
+from hk_events.dedupe import (
+    STAGE_NEW,
+    STAGE_SOON,
+    filter_due,
+    log_classification,
+    record_verdict,
+    save_seen,
+)
 from hk_events.render import render, render_vault_archive
 from hk_events.schema import Event, RelevanceResult
 from hk_events.sources import (
@@ -52,10 +59,16 @@ def _fetch_all_sources() -> list[Event]:
         # Clean iCal/feed tier
         (meetup.fetch_meetup_events, "meetup"),
         (luma.fetch_luma_events, "luma"),
-        (aitinkerers.fetch_aitinkerers_events, "aitinkerers"),
-        # Brittle scrape tier
-        (cyberport.fetch_cyberport_events, "cyberport"),
-        (startmeuphk.fetch_startmeuphk_events, "startmeuphk"),
+        # DISABLED 2026-08-09 — these three returned 0 events on every run for
+        # two months and only added latency + log noise:
+        #   aitinkerers  — no public feed exists (email-only chapter)
+        #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
+        #   startmeuphk  — scraper selectors never landed, parses 0
+        # The adapters are kept so re-enabling is a one-line change once any of
+        # them has a real feed.
+        # (aitinkerers.fetch_aitinkerers_events, "aitinkerers"),
+        # (cyberport.fetch_cyberport_events, "cyberport"),
+        # (startmeuphk.fetch_startmeuphk_events, "startmeuphk"),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
     ]
     for fetch_fn, name in fetchers:
@@ -89,32 +102,42 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     log.info("fetched %d events across all sources", len(events))
 
-    # 2. Diff against seen-sets (per-source) — only SURFACE new ones
-    new_events, seen_by_source = filter_new(events)
-    log.info("%d new events (after dedupe)", len(new_events))
+    # 2. Diff against seen-sets (per-source). Two notification stages: newly
+    #    discovered, and starting within HK_EVENTS_REMINDER_DAYS.
+    due, seen_by_source = filter_due(events)
+    n_new = sum(1 for _, stage, _ in due if stage == STAGE_NEW)
+    n_soon = sum(1 for _, stage, _ in due if stage == STAGE_SOON)
+    log.info("%d due (%d newly discovered, %d starting soon)", len(due), n_new, n_soon)
 
-    # 3. Classify each new event (precision-biased: uncertain → drop)
-    surfaced: list[tuple[Event, RelevanceResult]] = []
-    dropped: list[tuple[Event, RelevanceResult]] = []
-    for event in new_events:
-        result = classify(event)
-        log_classification(event, result)
-        if result.surface:
-            surfaced.append((event, result))
+    # 3. Classify (precision-biased: uncertain → drop). Reminder-stage events
+    #    reuse the verdict cached at discovery — no second LLM call, and no risk
+    #    of a non-deterministic re-classify flipping a settled decision. A null
+    #    cached tag means legacy state, so fall back to classifying.
+    surfaced: list[tuple[Event, RelevanceResult, str]] = []
+    dropped: list[tuple[Event, RelevanceResult, str]] = []
+    for event, stage, cached_tag in due:
+        if stage == STAGE_SOON and cached_tag:
+            result = RelevanceResult(tag=cached_tag, reason="cached verdict from discovery run")
         else:
-            dropped.append((event, result))
-        log.info("[%s] %s — %s: %s", event.source, event.title[:50], result.tag, result.reason)
+            result = classify(event)
+            log_classification(event, result)
+        record_verdict(seen_by_source, event, result.tag)
+        if result.surface:
+            surfaced.append((event, result, stage))
+        else:
+            dropped.append((event, result, stage))
+        log.info("[%s/%s] %s — %s: %s", event.source, stage, event.title[:50], result.tag, result.reason)
 
     log.info("%d surfaced, %d dropped", len(surfaced), len(dropped))
 
     # 4. Calendar sync (idempotent; gated by HK_EVENTS_CALENDAR_ENABLED + dry_run)
-    calendar_stats = sync_events([e for e, _ in surfaced], dry_run=dry_run)
+    calendar_stats = sync_events([e for e, _, _ in surfaced], dry_run=dry_run)
     log.info("calendar sync: %s", calendar_stats)
 
     # 5. Push to Telegram
     messages = render(
         surfaced=surfaced,
-        total_new=len(new_events),
+        total_new=n_new,
         total_processed=len(events),
         calendar_stats=calendar_stats,
         today=today,
@@ -124,6 +147,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         for m in messages:
             print(m)
             print("---")
+    elif not surfaced and not config.HK_EVENTS_PUSH_EMPTY:
+        log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
     else:
         push_messages(messages)
         log.info("pushed %d messages", len(messages))

@@ -25,8 +25,26 @@ def _fmt_when(dt) -> str:
     return dt.astimezone(_HKT).strftime("%a %d %b, %H:%M") + " HKT"
 
 
-def _fmt_event(event: Event, result: RelevanceResult) -> str:
-    parts = [f"{_TAG_LABEL.get(result.tag, '')} — **{event.title}**".strip(" —")]
+def _days_until(event: Event) -> int | None:
+    if event.start is None:
+        return None
+    from datetime import datetime, timezone
+
+    start = event.start if event.start.tzinfo else event.start.replace(tzinfo=timezone.utc)
+    return (start.astimezone(_HKT).date() - datetime.now(_HKT).date()).days
+
+
+def _fmt_event(event: Event, result: RelevanceResult, stage: str = "new") -> str:
+    head = f"{_TAG_LABEL.get(result.tag, '')} — **{event.title}**".strip(" —")
+    if stage == "soon":
+        days = _days_until(event)
+        if days == 0:
+            head = f"⏰ **TODAY** — {event.title}"
+        elif days == 1:
+            head = f"⏰ **TOMORROW** — {event.title}"
+        elif days is not None:
+            head = f"⏰ **In {days} days** — {event.title}"
+    parts = [head]
     if event.start:
         parts.append(f"🗓 {_fmt_when(event.start)}")
     if event.location:
@@ -38,7 +56,7 @@ def _fmt_event(event: Event, result: RelevanceResult) -> str:
 
 def render(
     *,
-    surfaced: list[tuple[Event, RelevanceResult]],
+    surfaced: list[tuple[Event, RelevanceResult, str]],
     total_new: int,
     total_processed: int,
     calendar_stats: dict[str, int] | None,
@@ -46,7 +64,12 @@ def render(
 ) -> list[str]:
     """Build the chunked message list for /push. One event per bubble.
 
-    If nothing surfaced, returns a single quiet heartbeat bubble.
+    Reminders lead — an event starting in two days is more actionable than one
+    discovered six weeks out, so it goes at the top where he'll actually read it.
+
+    If nothing surfaced, returns a single quiet heartbeat bubble. The caller
+    decides whether to actually send that (see HK_EVENTS_PUSH_EMPTY) — pushing
+    "nothing today" every day is what trained him to stop opening the digest.
     """
     if not surfaced:
         return [
@@ -55,16 +78,24 @@ def render(
             f"Scanned {total_processed} events, {total_new} new."
         ]
 
-    founder = [s for s in surfaced if s[1].tag == "founder_ai"]
-    sme = [s for s in surfaced if s[1].tag == "sme_buyer"]
+    soon = [s for s in surfaced if s[2] == "soon"]
+    fresh = [s for s in surfaced if s[2] != "soon"]
+    founder = [s for s in fresh if s[1].tag == "founder_ai"]
+    sme = [s for s in fresh if s[1].tag == "sme_buyer"]
+
+    headline_bits = []
+    if soon:
+        headline_bits.append(f"{len(soon)} starting soon")
+    if fresh:
+        headline_bits.append(
+            f"{len(fresh)} new ({len(founder)} founder/AI · {len(sme)} SME-buyer)"
+        )
 
     messages: list[str] = [
-        f"🎟 *HK events — {today.isoformat()}*\n"
-        f"{len(surfaced)} new ↓  "
-        f"({len(founder)} founder/AI · {len(sme)} SME-buyer)"
+        f"🎟 *HK events — {today.isoformat()}*\n" + "  ·  ".join(headline_bits)
     ]
-    for event, result in surfaced:
-        messages.append(_fmt_event(event, result))
+    for event, result, stage in soon + fresh:
+        messages.append(_fmt_event(event, result, stage))
 
     footer = f"_Scanned {total_processed}, {total_new} new, {len(surfaced)} surfaced."
     if calendar_stats:
@@ -80,8 +111,8 @@ def render(
 
 def render_vault_archive(
     *,
-    surfaced: list[tuple[Event, RelevanceResult]],
-    dropped: list[tuple[Event, RelevanceResult]],
+    surfaced: list[tuple[Event, RelevanceResult, str]],
+    dropped: list[tuple[Event, RelevanceResult, str]],
     today: date,
 ) -> str:
     """Render the per-day Markdown archive that lands in the vault (audit trail)."""
@@ -99,9 +130,10 @@ def render_vault_archive(
     if surfaced:
         lines.append("## Surfaced")
         lines.append("")
-        for event, result in surfaced:
+        for event, result, stage in surfaced:
             when = _fmt_when(event.start) if event.start else "TBD"
-            lines.append(f"- **{event.title}** ({_TAG_LABEL.get(result.tag, result.tag)})")
+            marker = " ⏰ reminder" if stage == "soon" else ""
+            lines.append(f"- **{event.title}** ({_TAG_LABEL.get(result.tag, result.tag)}){marker}")
             lines.append(f"  - When: {when}")
             if event.location:
                 lines.append(f"  - Where: {event.location}")
@@ -117,7 +149,7 @@ def render_vault_archive(
     if dropped:
         lines.append("## Dropped (precision-biased filter)")
         lines.append("")
-        for event, result in dropped:
+        for event, result, _stage in dropped:
             lines.append(f"- {event.title} ({event.source}) — {result.reason}")
         lines.append("")
 
