@@ -1,6 +1,6 @@
 """Format classified listings into Telegram-friendly chunked messages.
 
-Per Dylan's delivery preferences (feedback_telegram_delivery_format):
+Per the operator's delivery preferences (feedback_telegram_delivery_format):
 short, chunked into multiple sub-messages — concision is the deliverable.
 """
 
@@ -42,7 +42,7 @@ def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
 def _fmt_near_misses(skipped: list[tuple[JobListing, ClassifierResult]]) -> str | None:
     """Format a 'near miss' digest for prestige companies that failed scope.
 
-    Only shows prestige=prestige entries — these are companies Dylan cares about
+    Only shows prestige=prestige entries — these are companies the operator cares about
     but that had the wrong role type (FT, non-HK, senior, etc.).
     """
     near_misses = [
@@ -76,7 +76,7 @@ def _fmt_rolling_state(
 ) -> str | None:
     """One-line rolling-state chip: what's live right now, not just today's delta.
 
-    The whole point of the register is that a role Dylan didn't act on yesterday
+    The whole point of the register is that a role the operator didn't act on yesterday
     is still his problem today, so the digest has to report the standing total
     and the ones about to close — not only the new arrivals.
     """
@@ -207,7 +207,7 @@ def render_vault_archive(
 
 
 def _fmt_open_role_entry(role: OpenRole, today: date) -> list[str]:
-    """One register entry, plus the status marker Dylan can hand-edit."""
+    """One register entry, plus the status marker the operator can hand-edit."""
     lines = [f"- **{role.employer}** — {role.title}"]
     lines.append(f"  <!-- status:{role.status} {role.dedup_key} -->")
     if role.deadline:

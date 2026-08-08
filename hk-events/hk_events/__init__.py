@@ -1,4 +1,4 @@
-"""hk-events: daily Hong Kong tech/startup/AI + SME-buyer event digest for Dylan.
+"""hk-events: daily Hong Kong tech/startup/AI + SME-buyer event digest for the operator.
 
 Aggregates events from iCal/feed sources (Meetup per-group .ics, Luma calendars,
 AI Tinkerers) plus brittle scrape sources (Cyberport, StartmeupHK), dedupes,

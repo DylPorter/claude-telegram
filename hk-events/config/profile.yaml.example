@@ -1,0 +1,20 @@
+# Operator profile — parameterises the hk-events classifier prompt.
+#
+# Copy to `config/profile.yaml` (gitignored) and edit. This example is the
+# fallback when no profile.yaml exists, so a fresh clone runs immediately.
+#
+# Keep this file GENERIC. Your real networking strategy belongs in profile.yaml.
+
+# One clause describing who the digest is for.
+identity: >
+  a technologist who attends events for peer network and business development
+
+# What counts as the "founder / AI room" — your peer + signal surface.
+founder_ai: >
+  funded startups, AI builders, founders, VCs, hackathons, technical AI/ML
+  meetups, demo nights, accelerator events
+
+# What counts as the "buyer room" — where your potential customers gather.
+sme_buyer: >
+  small and medium businesses, traditional industry, trade and import/export
+  operators, non-technical company owners

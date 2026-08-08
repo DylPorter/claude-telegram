@@ -156,7 +156,7 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
         # Link priority: VEVENT URL → an http(s) LOCATION (some Luma events put
         # the real registration URL there, e.g. leapeast.com) → a lu.ma link
         # mined from the DESCRIPTION. NEVER a plain-text address — a street
-        # address rendered as a [register] link is the dead link Dylan hit.
+        # address rendered as a [register] link is the dead link the operator hit.
         loc_link = location if (location and location.lower().startswith("http")) else ""
         link = url or loc_link or _link_from_description(description)
 

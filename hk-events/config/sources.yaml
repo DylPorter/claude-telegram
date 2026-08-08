@@ -63,8 +63,8 @@ ical_feeds:
   aitinkerers:
     - name: AI Tinkerers Hong Kong
       # CHECKED 2026-06-01: no public iCal/RSS feed — the site exposes only a
-      # blog-email "Subscribe" widget, not a calendar feed. Dylan is registered
-      # with the chapter and gets event emails directly. Left empty (skipped)
+      # blog-email "Subscribe" widget, not a calendar feed. the operator is subscribed
+      # to the chapter and gets event emails directly. Left empty (skipped)
       # unless a scraper for hong-kong.aitinkerers.org is added later.
       url:
 

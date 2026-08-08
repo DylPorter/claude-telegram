@@ -29,7 +29,7 @@ GATING
 ------
 Calendar writes are OFF unless HK_EVENTS_CALENDAR_ENABLED=1 in the env. When
 disabled (the default) this module logs what it WOULD insert and records nothing
-— so a fresh checkout never silently mutates Dylan's real calendar.
+— so a fresh checkout never silently mutates the operator's real calendar.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # hk-events
 
-Daily Hong Kong **events** digest for Dylan — sibling to `job-sift`, same
+Daily Hong Kong **events** digest for the operator — sibling to `job-sift`, same
 architecture. Aggregates HK tech/startup/AI events **plus the right SME-buyer
 events**, dedupes, LLM-classifies each for relevance (precision-biased: uncertain
 → drop), pushes a chunked Telegram digest via the same `/push` endpoint

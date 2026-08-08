@@ -11,7 +11,7 @@ This module keeps a deduplicated, deadline-sorted register in
 decision logic here is pure and unit-tested; the only I/O is load/save at the
 bottom.
 
-Status is Dylan's, not ours: once he marks a role `applied` or `dismissed`, no
+Status is the operator's, not ours: once he marks a role `applied` or `dismissed`, no
 later run may resurrect it to `open`.
 """
 
@@ -27,7 +27,7 @@ from job_sift.schema import JobListing
 
 log = logging.getLogger(__name__)
 
-# Statuses that encode a decision Dylan made by hand. Nothing automatic may
+# Statuses that encode a decision the operator made by hand. Nothing automatic may
 # overwrite them — not an upsert, not the ager, not the pruner.
 STICKY_STATUSES = frozenset({"applied", "dismissed"})
 
@@ -162,7 +162,7 @@ def age_roles(
     - no deadline at all and not seen for > `stale_after_days` → `stale`
       (nothing left to judge it by, and the source stopped listing it)
 
-    `applied`/`dismissed` are Dylan's marks and are left alone.
+    `applied`/`dismissed` are the operator's marks and are left alone.
     """
     aged = [OpenRole(**r.to_dict()) for r in roles]
     for role in aged:
@@ -214,7 +214,7 @@ def closing_within(roles: list[OpenRole], today: date, days: int = 7) -> list[Op
 def prune(roles: list[OpenRole], today: date, keep_days: int = 60) -> list[OpenRole]:
     """Drop closed-out records older than `keep_days` past `last_seen`.
 
-    `applied` records are kept forever — they are Dylan's application history,
+    `applied` records are kept forever — they are the operator's application history,
     not clutter. Anything still `open` is kept by definition.
     """
     kept = []
@@ -231,7 +231,7 @@ def prune(roles: list[OpenRole], today: date, keep_days: int = 60) -> list[OpenR
 def parse_status_overrides(md: str) -> dict[str, str]:
     """Extract `<!-- status:applied cedars:12345 -->` markers from the note.
 
-    We emit one marker per entry so Dylan can flip a role to applied/dismissed
+    We emit one marker per entry so the operator can flip a role to applied/dismissed
     by editing the markdown directly rather than the JSON state file. Only the
     sticky statuses are honoured — letting the markdown set `open`/`expired`
     would just fight the ager.

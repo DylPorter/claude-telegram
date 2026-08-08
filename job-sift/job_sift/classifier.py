@@ -1,7 +1,7 @@
 """LLM-driven prestige + scope classification for each new listing.
 
 Uses the Claude CLI as a subprocess (same convention as signal-brief), so we
-inherit auth/quota from Dylan's existing setup. Single call per listing
+inherit auth/quota from the operator's existing setup. Single call per listing
 returns both verdicts in one structured response.
 """
 
@@ -13,23 +13,25 @@ import subprocess
 from textwrap import dedent
 
 from job_sift.config import CLAUDE_BIN, JOB_SIFT_MODEL
+from job_sift.profile import profile_block
 from job_sift.schema import ClassifierResult, JobListing
 
 log = logging.getLogger(__name__)
 
 
-CLASSIFIER_SYSTEM_PROMPT = dedent("""
-    You are a job-listing classifier for Dylan Porter, a 2nd-year HKU Computer
-    Science undergrad who works as a contract AI engineer at Collective Global.
-    He's looking for **prestige-tier internships or short-term contracts only**.
+_PROFILE = profile_block()
+
+CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
+    You are a job-listing classifier for {_PROFILE['identity']}.
+    They are looking for **{_PROFILE['seeking']}**.
 
     For each listing, return STRICT JSON with three fields:
 
-    {
+    {{
       "prestige": "prestige" | "marginal" | "skip",
       "scope":    "in_scope" | "out_of_scope",
       "reason":   "<one short sentence, max 20 words>"
-    }
+    }}
 
     PRESTIGE rules:
     - "prestige": the employer is globally recognisable in **tech, software, AI, quantitative finance, or
@@ -44,19 +46,14 @@ CLASSIFIER_SYSTEM_PROMPT = dedent("""
       whose primary industry is fashion, luxury goods, retail, hospitality, FMCG, real estate, or
       manufacturing. Global brand recognition in a non-tech sector does NOT make a company prestige here.
 
-    SCOPE rules — Dylan accepts:
-    - Internships (any length)
-    - Short-term contracts up to ~1 year
-    - Rotational / co-op / graduate trainee programs that are explicitly time-boxed to ≤1 year
-    - Summer / winter programs
+    SCOPE rules — ACCEPT:
+{_PROFILE['accepts']}
 
-    Dylan REJECTS:
-    - Permanent full-time roles (he's still in school, won't graduate till 2028)
-    - "Graduate Engineer" or "Associate" hires that are clearly permanent
-    - Anything requiring a degree he doesn't yet have
+    REJECT:
+{_PROFILE['rejects']}
 
-    If the role type is unclear from the title (e.g. just "Software Engineer"), assume permanent FT and mark
-    "out_of_scope" UNLESS the title contains intern/contract/rotational/co-op/summer/winter/trainee keywords.
+    If the role type is unclear from the title (e.g. just "Software Engineer"),
+    {_PROFILE['unclear_role_default']}.
 
     Return ONLY the JSON — no prose, no markdown fences.
 """).strip()
@@ -226,28 +223,22 @@ def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
     return None
 
 
-SCOPE_SYSTEM_PROMPT = dedent("""
-    You are a scope classifier for Dylan Porter, a 2nd-year HKU Computer Science
-    undergrad. The employer is already confirmed as a prestige target — you only
-    need to classify SCOPE.
+SCOPE_SYSTEM_PROMPT = dedent(f"""
+    You are a scope classifier for {_PROFILE['identity']}.
+    The employer is already confirmed as a prestige target — you only need to
+    classify SCOPE.
 
     Return STRICT JSON:
-      { "scope": "in_scope" | "out_of_scope", "reason": "<one short sentence, max 20 words>" }
+      {{ "scope": "in_scope" | "out_of_scope", "reason": "<one short sentence, max 20 words>" }}
 
-    Dylan accepts:
-    - Internships (any length)
-    - Short-term contracts up to ~1 year
-    - Rotational / co-op / graduate trainee programs explicitly ≤1 year
-    - Summer / winter programs
+    ACCEPT:
+{_PROFILE['accepts']}
 
-    Dylan REJECTS:
-    - Permanent full-time roles (he's still in school until 2028)
-    - "Graduate Engineer" or "Associate" titles that are clearly permanent
-    - Anything requiring a degree he doesn't yet have
+    REJECT:
+{_PROFILE['rejects']}
 
     If the role type is unclear from the title (e.g. just "Software Engineer"),
-    assume permanent FT and mark "out_of_scope" UNLESS the title contains
-    intern/contract/rotational/co-op/summer/winter/trainee keywords.
+    {_PROFILE['unclear_role_default']}.
 
     Return ONLY the JSON — no prose, no markdown fences.
 """).strip()

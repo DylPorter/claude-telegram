@@ -10,3 +10,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+
+# Operator profiles — personal, never committed (see job-sift/config/profile.yaml.example)
+config/profile.yaml
+*/config/profile.yaml

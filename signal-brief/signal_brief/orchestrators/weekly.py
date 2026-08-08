@@ -58,7 +58,7 @@ WEEKLY_PROMPT_TEMPLATE = """You are running the weekly review for an Obsidian-st
         This is deterministic — do it, do NOT ask permission.
       - If the body still reads future-tense but the trigger date has passed:
         flag it in the Telegram digest with one sentence stating the contradiction
-        and the question Dylan needs to answer to resolve it.
+        and the question the operator needs to answer to resolve it.
    c. For any memory file whose frontmatter has `status: completed` or whose
       name has `(CLOSED)` suffix: also check if downstream vault notes still
       claim the project/role as current. If so, surface as a one-line "needs

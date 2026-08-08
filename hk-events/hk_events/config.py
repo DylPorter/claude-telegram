@@ -43,11 +43,11 @@ HK_EVENTS_MODEL = os.environ.get("HK_EVENTS_MODEL", "haiku")
 # signal-brief uses for Gmail. On PATH by default; override if needed.
 GWS_BIN = os.environ.get("GWS_BIN", "gws")
 
-# Target calendar for auto-created events. "primary" = Dylan's main calendar.
-# Set to a dedicated secondary calendar ID if he wants events kept separate.
+# Target calendar for auto-created events. "primary" = the operator's main calendar.
+# Set to a dedicated secondary calendar ID to keep events separate.
 HK_EVENTS_CALENDAR_ID = os.environ.get("HK_EVENTS_CALENDAR_ID", "primary")
 # Master switch for calendar writes. Default OFF so a first run (or a forgotten
-# --dry-run) never silently writes to his real calendar. Set to "1" to enable.
+# --dry-run) never silently writes to a real calendar. Set to "1" to enable.
 HK_EVENTS_CALENDAR_ENABLED = os.environ.get("HK_EVENTS_CALENDAR_ENABLED", "0") == "1"
 
 # Only look at events starting within this many days (rolling horizon).

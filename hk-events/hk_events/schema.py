@@ -22,7 +22,7 @@ Source = Literal[
 ]
 
 # Relevance bucket. job-sift uses prestige+scope; here the analogue is which
-# "room" the event is — the two tiers Dylan cares about.
+# "room" the event is — the two tiers the operator cares about.
 #   founder_ai : funded-startup / AI / founder room (his peer network + signal)
 #   sme_buyer  : SME-buyer room (the right rooms to sell into / find clients)
 #   drop       : not relevant — precision bias means uncertain → drop

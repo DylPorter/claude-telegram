@@ -4,7 +4,7 @@ Key behaviours under test:
   - upsert is idempotent on `first_seen` and never resurrects a hand-set status
   - ageing closes out past deadlines / undated roles we stopped seeing
   - the active-roles sort puts undated roles LAST (the whole point of the note)
-  - pruning keeps `applied` forever (it's Dylan's application history)
+  - pruning keeps `applied` forever (it's the operator's application history)
 """
 
 from __future__ import annotations
@@ -221,7 +221,7 @@ def test_parse_status_overrides_reads_markers():
 def test_status_override_round_trip_through_rendered_note():
     roles = [_role("cedars:1", deadline="2026-08-20", status="open")]
     md = render_open_roles(roles, TODAY)
-    # Dylan hand-edits the emitted marker
+    # the operator hand-edits the emitted marker
     edited = md.replace("<!-- status:open cedars:1 -->", "<!-- status:applied cedars:1 -->")
 
     overrides = parse_status_overrides(edited)

@@ -20,32 +20,29 @@ from textwrap import dedent
 import yaml
 
 from hk_events.config import CLAUDE_BIN, HK_EVENTS_MODEL, PROJECT_ROOT
+from hk_events.profile import profile_block
 from hk_events.schema import Event, RelevanceResult
 
 log = logging.getLogger(__name__)
 
 
-CLASSIFIER_SYSTEM_PROMPT = dedent("""
-    You are an event-relevance classifier for Dylan Porter, a Hong Kong-based
-    full-stack + AI engineer, founding-team AI dev at an Antler startup, and
-    aspiring entrepreneur. He attends HK events for exactly two reasons:
+_PROFILE = profile_block()
 
-    1. FOUNDER / AI ROOM — funded startups, AI builders, founders, VCs,
-       hackathons, technical AI/ML meetups, demo nights, accelerator events.
-       (His peer network + technical signal + co-founder/hiring surface.)
-    2. SME-BUYER ROOM — events where Hong Kong SMEs, traditional businesses,
-       trade/import-export operators, or non-technical company owners gather.
-       (These are the rooms where he can find customers for software/AI
-       services — the right buyers, not the builders.)
+CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
+    You are an event-relevance classifier for {_PROFILE['identity']}.
+    They attend events for exactly two reasons:
+
+    1. FOUNDER / AI ROOM — {_PROFILE['founder_ai']}
+    2. SME-BUYER ROOM — {_PROFILE['sme_buyer']}
 
     Everything else is noise and must be DROPPED.
 
     For each event, return STRICT JSON with two fields:
 
-    {
+    {{
       "tag":    "founder_ai" | "sme_buyer" | "drop",
       "reason": "<one short sentence, max 20 words>"
-    }
+    }}
 
     "founder_ai" — clearly an AI/tech/startup/founder/VC/hackathon event.
       Examples: AI Tinkerers meetup, a GenAI talk, a YC/Antler demo day, a
@@ -68,9 +65,9 @@ CLASSIFIER_SYSTEM_PROMPT = dedent("""
       - anything where you genuinely can't tell which room it is
 
     PRECISION BIAS — this is the most important rule: when you are UNSURE which
-    bucket an event falls in, return "drop". A missed good event costs Dylan
-    almost nothing (events recur, sources overlap). A false-positive clutters
-    his calendar and erodes his trust in this digest. DROP when uncertain.
+    bucket an event falls in, return "drop". A missed good event costs almost
+    nothing (events recur, sources overlap). A false positive clutters the
+    calendar and erodes trust in the digest. DROP when uncertain.
 
     Return ONLY the JSON — no prose, no markdown fences.
 """).strip()
@@ -102,7 +99,7 @@ def _build_user_prompt(event: Event) -> str:
 AUTO_FOUNDER_SOURCES: set[str] = {"aitinkerers"}
 
 # Hard keyword lists. Defaults below; overridden by config/sources.yaml
-# filter_keywords if present (so Dylan can tune without touching code). Keep
+# filter_keywords if present (so the operator can tune without touching code). Keep
 # these tight: precision bias means a borderline title should go to the LLM
 # (which itself defaults to drop), not get hard-classified here.
 _DEFAULT_HARD_DROP = {

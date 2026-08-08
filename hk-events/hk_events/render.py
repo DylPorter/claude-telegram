@@ -1,6 +1,6 @@
 """Format classified events into Telegram-friendly chunked messages.
 
-Mirrors job-sift/render.py. Per Dylan's delivery preferences
+Mirrors job-sift/render.py. Per the operator's delivery preferences
 (feedback_telegram_delivery_format): short, chunked into multiple sub-messages —
 concision is the deliverable, one event per bubble.
 """
@@ -65,11 +65,11 @@ def render(
     """Build the chunked message list for /push. One event per bubble.
 
     Reminders lead — an event starting in two days is more actionable than one
-    discovered six weeks out, so it goes at the top where he'll actually read it.
+    discovered six weeks out, so it goes at the top where it will actually be read.
 
     If nothing surfaced, returns a single quiet heartbeat bubble. The caller
     decides whether to actually send that (see HK_EVENTS_PUSH_EMPTY) — pushing
-    "nothing today" every day is what trained him to stop opening the digest.
+    "nothing today" every day is what trains you to stop opening the digest.
     """
     if not surfaced:
         return [

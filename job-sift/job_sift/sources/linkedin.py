@@ -1,7 +1,7 @@
 """LinkedIn job-alert email parser.
 
 LinkedIn doesn't expose a usable jobs API and aggressively blocks scrapers,
-so we use LinkedIn's *own* delivery channel: digest emails. Dylan sets up
+so we use LinkedIn's *own* delivery channel: digest emails. the operator sets up
 saved searches on LinkedIn, LinkedIn emails digests to a dedicated Gmail
 label, and this module reads/parses them via the gws CLI.
 
@@ -14,7 +14,7 @@ Email format (confirmed 2026-05-21 with a real sample):
     - Right: <a>{Job Title}</a>  +  text "{Company} · {Location} [badges]"
   - All anchors point to https://www.linkedin.com/comm/jobs/view/{id}?...
     with heavy tracking-param noise. We extract the {id} and canonicalize.
-  - Confirmation emails ("Dylan: your job alert for ... has been created")
+  - Confirmation emails ("the operator: your job alert for ... has been created")
     have NO job-view links and are skipped by the parser naturally.
 
 Listings from LinkedIn run through the FULL classifier path (prestige + scope)

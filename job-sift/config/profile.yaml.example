@@ -1,0 +1,36 @@
+# Operator profile — parameterises the job-sift classifier prompts.
+#
+# Copy to `config/profile.yaml` (gitignored) and edit. This example file is the
+# fallback when no profile.yaml exists, so a fresh clone runs immediately.
+#
+# Keep this example GENERIC. Your real criteria belong in profile.yaml, which is
+# never committed — the whole point of the split is that the framework is public
+# and your candidacy isn't.
+
+# One clause describing the candidate, dropped into the classifier prompt.
+# Keep it short; it exists to give the model enough context to judge fit.
+identity: >
+  a university computer science student who also works as a contract engineer
+
+# What you actually want. This drives the prestige/scope framing.
+seeking: >
+  prestige-tier internships or short-term contracts only
+
+# Role types to mark in_scope.
+accepts:
+  - Internships (any length)
+  - Short-term contracts up to ~1 year
+  - Rotational / co-op / graduate trainee programs explicitly time-boxed to <= 1 year
+  - Summer / winter programs
+
+# Role types to mark out_of_scope.
+rejects:
+  - Permanent full-time roles
+  - '"Graduate Engineer" or "Associate" hires that are clearly permanent'
+  - Roles requiring credentials the candidate does not yet hold
+
+# What to do when the title alone doesn't reveal the role type
+# (e.g. a bare "Software Engineer").
+unclear_role_default: >
+  assume permanent full-time and mark "out_of_scope" UNLESS the title contains
+  intern / contract / rotational / co-op / summer / winter / trainee keywords

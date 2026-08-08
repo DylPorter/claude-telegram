@@ -101,7 +101,7 @@ def _update_open_roles(
     Runs even on a zero-surfaced day: ageing and pruning are time-driven, so the
     register would go stale if we only touched it when something new landed.
 
-    Under --dry-run nothing is persisted — Dylan will dry-run this against a
+    Under --dry-run nothing is persisted — the operator will dry-run this against a
     21-day scrape backlog before letting it commit, so the deltas are logged
     instead of written.
     """

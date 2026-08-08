@@ -5,10 +5,10 @@ snapshot, so it drifted from reality (BOCHK shown as "due" after it was
 submitted, Ricci RN18 "to-send" after it was sent, Tracy a "today" action after
 it was deferred). Spec: `.claude-memory/feedback_daily_thread_reconciliation.md`.
 
-This module instead **reconciles** the prior thread snapshot against what Dylan
+This module instead **reconciles** the prior thread snapshot against what the operator
 actually said/did — recent daily-note live-capture sections and recent vault git
 commits — marking threads done/deferred/dropped, never re-surfacing a resolved
-thread. Where a thread's status is genuinely ambiguous, it asks Dylan a SHORT
+thread. Where a thread's status is genuinely ambiguous, it asks the operator a SHORT
 question rather than guessing.
 
 Design:
@@ -279,7 +279,7 @@ You are NOT regenerating an open-threads list from scratch. You are RECONCILING 
 prior snapshot of the user's open threads / action items against what the user
 ACTUALLY said and did since — so the list reflects reality, not stale state.
 
-The user (Dylan) has been burned by threads that drift from reality: a thread shown
+The user (the operator) has been burned by threads that drift from reality: a thread shown
 as "due" after he already submitted it, "to-send" after he already sent it, a
 "today" action after he deferred it. That erodes his trust in the whole brief.
 
