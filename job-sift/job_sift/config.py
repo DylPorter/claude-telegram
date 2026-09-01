@@ -79,8 +79,9 @@ def fetch_budget_s() -> float:
 
 # CEDARS portal — set in .env once you know the exact URL.
 CEDARS_PORTAL_URL = os.environ.get("CEDARS_PORTAL_URL", "")
-# Path to a JSON file containing the cookie jar exported from logged-in Chrome.
-# See README for the manual cookie-export flow.
+# Path to a JSON file containing the CEDARS session cookie(s). Written
+# automatically by `refresh_cookie.py` (pulled from Firefox's cookies.sqlite by
+# default; see README's "Cookie refresh" section) before each scheduled run.
 CEDARS_COOKIES_PATH = COOKIE_DIR / "cedars.json"
 
 # Vault layout

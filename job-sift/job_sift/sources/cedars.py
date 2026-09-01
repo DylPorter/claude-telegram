@@ -1,14 +1,15 @@
 """HKU CEDARS NETJobs scraper.
 
-**v0 STATUS: stub** — returns hardcoded sample listings for end-to-end pipeline
-testing. The real implementation needs:
+Live scraper: fetches the CEDARS listings page with `httpx` using a stored
+session cookie (`CEDARS_COOKIES_PATH`, refreshed daily by `refresh_cookie.py`
+— see README's "Cookie refresh" section) and parses the `table.tablesorter`
+results table with BeautifulSoup. Paginates greedily — see
+`fetch_cedars_listings` for the stop conditions and the `JOB_SIFT_CEDARS_*`
+env overrides.
 
-1. `CEDARS_PORTAL_URL` set in .env (the listings page URL you actually browse)
-2. `.data/cookies/cedars.json` exported from logged-in Chrome (see README)
-3. HTML structure inspection of the listings table to write the parser
-
-Switching from stub to real scraper is a 30-60 minute job once both inputs
-are in hand. Stub mode is gated by the `JOB_SIFT_STUB` env var.
+`_stub_listings()` returns hardcoded sample data instead of scraping, for
+end-to-end pipeline testing without live CEDARS access. It is reachable only
+when `JOB_SIFT_STUB=1` is set — every other invocation hits the real portal.
 """
 
 from __future__ import annotations
@@ -30,9 +31,12 @@ log = logging.getLogger(__name__)
 
 
 def _load_cookies() -> dict[str, str]:
-    """Load cookies exported from Chrome as a JSON list-of-objects.
+    """Load the stored CEDARS session cookie(s) from `CEDARS_COOKIES_PATH`.
 
-    Expected format (EditThisCookie export):
+    Normal path: `refresh_cookie.py` writes a JSON object of name → value
+    (e.g. `{"PHPSESSID": "...", "esd_from_sys": "..."}`), pulled from a
+    locally logged-in browser — see README. Also accepts the legacy
+    list-of-objects shape from a manual EditThisCookie-style export:
         [
           {"name": "...", "value": "...", "domain": "...", ...},
           ...

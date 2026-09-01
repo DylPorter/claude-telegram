@@ -10,14 +10,19 @@ signal-brief + job-sift use, and **idempotently creates Google Calendar events**
 ## Architecture
 
 ```
- iCal feeds (clean)            scrape sources (brittle, degrade per-source)
- ├─ Meetup .ics                ├─ Cyberport (cyberport.hk)
- ├─ Luma .ics                  └─ StartmeupHK (startmeup.hk)
- └─ AI Tinkerers feed
-        │                              │
-        └──────────────┬───────────────┘
-                       ▼
-        parse → dedupe (per-source seen-set) → LLM relevance classifier
+ iCal feeds (clean)      structured pages (JSON island in     scrape sources (brittle,
+ ├─ Meetup .ics           initial HTML — no feed needed)        degrade per-source)
+ └─ Luma .ics             ├─ AI Tinkerers (schema.org JSON-LD)  ├─ Cyberport (cyberport.hk)
+                          └─ Luma discovery (__NEXT_DATA__,     └─ StartmeupHK (startmeup.hk)
+                             lu.ma/hong-kong — standalone events)
+        │                              │                                    │
+        └──────────────────────────────┴────────────────────────────────────┘
+                                       ▼
+        collapse_cross_source — merge duplicates on the Luma `evt-…` api_id
+        (luma and luma_discover both see the same event; continuity with an
+        existing per-source seen-set beats fixed source precedence, see dedupe.py)
+                                       ▼
+        dedupe (per-source seen-set) → LLM relevance classifier
                        │                              │
                        │                              ▼
                        │                       JSONL relevance log
@@ -28,6 +33,11 @@ signal-brief + job-sift use, and **idempotently creates Google Calendar events**
                        ▼
         /push to claude-telegram bot  +  daily Markdown archive to vault
 ```
+
+`mirror_collapsed` runs after classification and writes the winner's seen-record
+into the loser's seen-set too, so a source that stops reporting an event it once
+shared with another source doesn't re-notify it later (see `dedupe.py` and the
+"Two long-standing holes" note below).
 
 Two relevance buckets (the analogue of job-sift's prestige+scope):
 - **founder_ai** — funded-startup / AI / founder / hackathon / VC room.
