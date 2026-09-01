@@ -3,6 +3,10 @@ Description=hk-events daily — aggregate HK tech/startup/AI + SME-buyer events,
 After=network-online.target claude-telegram.service
 Wants=network-online.target
 Requires=claude-telegram.service
+# Cap self-heal retries at 3 attempts (RestartSec=300 apart -> ~15min span);
+# after that systemd marks the unit failed rather than retrying forever.
+StartLimitIntervalSec=1200
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -10,8 +14,11 @@ WorkingDirectory=%h/Documents/Programming/claude-telegram/hk-events
 ExecStart=%h/Documents/Programming/claude-telegram/hk-events/.venv/bin/python -m hk_events.orchestrator
 StandardOutput=journal
 StandardError=journal
-# 10-minute cap — classifier is fast (haiku, per-event), most time is feed fetch + gws calls.
-TimeoutStartSec=600
+# Backstop behind Task 2's 240s in-process fetch budget — 900s leaves ~11min
+# of headroom above budget+classify+push+save for a normal run.
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=300
 
 [Install]
 WantedBy=default.target
