@@ -469,14 +469,15 @@ class TestDropNoticeUnit:
 
     def test_one_below_the_threshold_says_nothing(self):
         """A source pruned while merely wobbling is not news — it never had a
-        standing alarm to lose. The three DISABLED adapters are pruned every
+        standing alarm to lose. The two DISABLED adapters are pruned every
         run and must stay silent."""
         prior = {"meetup": {"consecutive_failures": source_health.ALARM_THRESHOLD - 1}}
         assert source_health.render_drop_notice(prior, {}) is None
 
     def test_the_disabled_adapters_never_produce_a_notice(self):
-        """aitinkerers/cyberport/startmeuphk are commented out of _source_tasks
-        and carry no record at all — pruning nothing says nothing."""
+        """cyberport/startmeuphk are commented out of _source_tasks and carry
+        no record at all — pruning nothing says nothing. (aitinkerers was in
+        that list until 2026-09-01; it is live now and DOES accrue failures.)"""
         assert source_health.render_drop_notice({}, {}) is None
 
     def test_a_source_that_is_still_tracked_is_not_a_drop(self):

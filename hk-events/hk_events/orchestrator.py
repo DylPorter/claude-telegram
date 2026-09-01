@@ -81,12 +81,17 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
         # months and only added latency + log noise:
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
-        # The adapters are kept so re-enabling is a one-line change once either
-        # has a real feed — and as of 2026-09-02 that is TRUE rather than
-        # aspirational: both were ported to the SourceFetchError contract, so
-        # uncommenting a line no longer reintroduces the silent zero (they used
-        # to `return []` on an HTTP 403 and on any exception, which
-        # source_health scores as a success). Being absent from this list also
+        # The adapters are kept, and as of 2026-09-02 both were ported to the
+        # SourceFetchError contract — but re-enabling is NOT a one-line change,
+        # and the previous wording here said it was. The port fixed the
+        # TRANSPORT half only (a 403 or a network error now raises instead of
+        # returning [], which source_health scored as a success). The PARSERS
+        # still return [] when their placeholder selectors match nothing, which
+        # is precisely startmeuphk's recorded failure mode — "selectors never
+        # landed, parses 0" — so a 200 carrying the real DOM would still be
+        # scored a clean success. Fix the selectors AND the parser's
+        # empty-vs-unreadable signal before uncommenting either line.
+        # Being absent from this list also
         # keeps them out of the staleness counters: they never run, so they
         # never land in the error map or the succeeded list, and update_health
         # prunes them.
