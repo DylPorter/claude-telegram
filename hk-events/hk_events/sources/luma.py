@@ -48,7 +48,11 @@ from hk_events.sources.luma_discover import canonical_id
 #
 # Both shapes confirmed against the live startupshk feed 2026-09-01: 142 `evt-`
 # and 35 `calev-` UIDs.
-_EVT_UID_RE = re.compile(r"^(evt-[A-Za-z0-9]+)@", re.IGNORECASE)
+# CASE-SENSITIVE on purpose. `re.IGNORECASE` here would be worse than inert:
+# api_ids are case-sensitive, so matching `EVT-AbC@` would mint the key
+# `luma-evt:EVT-AbC`, which can never collide with the city page's
+# `luma-evt:evt-AbC` — a dedupe key that silently does not dedupe.
+_EVT_UID_RE = re.compile(r"^(evt-[A-Za-z0-9]+)@")
 
 
 def _uid_canonical_id(uid: str) -> str | None:

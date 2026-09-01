@@ -501,6 +501,70 @@ def test_the_two_luma_sources_share_an_identity_key():
     assert from_ics.dedup_key != from_page.dedup_key
 
 
+class TestOnlyTheLumaAdaptersMayClaimTheLumaNamespace:
+    """`identity_key` is the one place in the pipeline where an event can be
+    silently DROPPED rather than duplicated.
+
+    `collapse_cross_source` keeps one row per `identity_key` and
+    `_SOURCE_PRECEDENCE` picks the winner — so an event carrying
+    `canonical_id="luma-evt:evt-X"` from a source that is not a Luma adapter
+    would collide with the real Luma event and, outranking it, take its place.
+    Nothing logs a drop; the digest is just one event short. Unreachable today
+    (only `luma` and `luma_discover` write the key), which is exactly why it
+    needs a guard: the next adapter's author has no reason to know.
+
+    Rejection always falls back to `dedup_key`, the safe direction — worst case
+    the event is reported twice, never zero times.
+    """
+
+    def _impostor(self, source, canonical):
+        return Event(
+            source=source,
+            external_id="whatever",
+            title="Impostor",
+            url="https://example.com/impostor",
+            raw={"canonical_id": canonical},
+        )
+
+    def test_a_foreign_source_cannot_squat_the_luma_namespace(self):
+        ev = self._impostor("meetup", f"luma-evt:{_OVERLAP_API_ID}")
+        assert ev.identity_key == ev.dedup_key
+        assert ev.identity_key != f"luma-evt:{_OVERLAP_API_ID}"
+
+    def test_the_squatter_no_longer_displaces_the_real_luma_event(self):
+        """The consequence, through the real collapse.
+
+        `meetup` outranks BOTH luma sources in `_SOURCE_PRECEDENCE`, so without
+        the guard the impostor won the merge and the genuine event vanished from
+        `kept` entirely — the digest silently one event short. The luma pair
+        must still collapse into one another, so the correct outcome is exactly
+        two survivors: the impostor, standing alone, and one real Luma row.
+        """
+        from_ics, from_page = _luma_pair()
+        impostor = self._impostor("meetup", f"luma-evt:{_OVERLAP_API_ID}")
+        kept, collapsed = collapse_cross_source([from_ics, from_page, impostor])
+
+        assert impostor in kept, "the impostor must survive as its own event"
+        real = [e for e in kept if e.source in {"luma", "luma_discover"}]
+        assert len(real) == 1, f"the genuine Luma event was dropped: {kept}"
+        assert len(kept) == 2, f"expected impostor + one Luma row, got {kept}"
+        # The only merge is the legitimate one, between the two Luma adapters.
+        assert [(w.source, d.source) for w, d in collapsed] == [("luma", "luma_discover")]
+
+    def test_both_genuine_luma_adapters_still_collide(self):
+        """Premise. A guard that rejected the owners too would silently undo the
+        cross-source dedupe this branch built."""
+        from_ics, from_page = _luma_pair()
+        assert from_ics.identity_key == from_page.identity_key
+
+    @pytest.mark.parametrize("value", [True, 1, ["luma-evt:x"], {"a": 1}])
+    def test_a_non_string_canonical_id_is_refused_not_coerced(self, value):
+        """`str(True)` is `"True"`, and every event carrying it would merge into
+        one. There is no legitimate non-string canonical_id."""
+        ev = self._impostor("luma", value)
+        assert ev.identity_key == ev.dedup_key
+
+
 def test_collapse_merges_the_overlapping_pair_into_one():
     from_ics, from_page = _luma_pair()
     kept, collapsed = collapse_cross_source([from_ics, from_page], seen_lookup=lambda s: {})

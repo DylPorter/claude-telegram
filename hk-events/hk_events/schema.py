@@ -6,6 +6,7 @@ Mirrors job-sift/schema.py — same dataclass + Literal + dedup_key idiom.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -29,6 +30,17 @@ Source = Literal[
 #   sme_buyer  : SME-buyer room (the right rooms to sell into / find clients)
 #   drop       : not relevant — precision bias means uncertain → drop
 RelevanceTag = Literal["founder_ai", "sme_buyer", "drop"]
+
+log = logging.getLogger(__name__)
+
+# Who is allowed to write each cross-source identity namespace into
+# `raw["canonical_id"]`. See `Event.identity_key` for why this is guarded at all.
+# Add a namespace here when a NEW pair of adapters genuinely covers one
+# real-world event from two directions — not to make an unrelated source dedupe
+# against an existing one.
+_CANONICAL_NAMESPACE_OWNERS: dict[str, frozenset[str]] = {
+    "luma-evt:": frozenset({"luma", "luma_discover"}),
+}
 
 
 @dataclass
@@ -71,9 +83,41 @@ class Event:
 
         Sources with no cross-source twin fall back to `dedup_key`, which is
         source-prefixed and therefore can never collide with anything else.
+
+        GUARDED, because this is the only place in the pipeline where one event
+        can silently REPLACE another. `collapse_cross_source` keeps one row per
+        `identity_key`, and `_SOURCE_PRECEDENCE` decides which — so a source that
+        wrote `canonical_id="luma-evt:evt-X"` without being a Luma adapter would
+        collide with the real Luma event and, outranking it, drop it. Nothing
+        would log; the digest would just be one event short. So a namespace is
+        only honoured for the sources that OWN it, and a non-string value is
+        refused outright rather than `str()`-coerced (`str(True)` → `"True"`,
+        and every event carrying it would merge into one). Anything rejected
+        falls back to `dedup_key`, which is the safe direction: at worst the
+        event is reported twice, never zero times.
         """
         canonical = (self.raw or {}).get("canonical_id")
-        return str(canonical) if canonical else self.dedup_key
+        if not canonical:
+            return self.dedup_key
+        if not isinstance(canonical, str):
+            log.warning(
+                "%s: ignoring non-string canonical_id %r — falling back to dedup_key",
+                self.dedup_key,
+                canonical,
+            )
+            return self.dedup_key
+        for namespace, owners in _CANONICAL_NAMESPACE_OWNERS.items():
+            if canonical.startswith(namespace) and self.source not in owners:
+                log.warning(
+                    "%s: source %r claimed the %r identity namespace, which belongs to "
+                    "%s — ignoring it so it cannot displace the real event",
+                    self.dedup_key,
+                    self.source,
+                    namespace,
+                    sorted(owners),
+                )
+                return self.dedup_key
+        return canonical
 
     @property
     def stable_hash(self) -> str:
