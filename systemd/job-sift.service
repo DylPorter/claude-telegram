@@ -3,16 +3,27 @@ Description=job-sift daily — scrape CEDARS, classify, push prestige matches to
 After=network-online.target claude-telegram.service
 Wants=network-online.target
 Requires=claude-telegram.service
-# Cap self-heal retries at 3 attempts, then let systemd mark the unit failed
-# rather than retrying forever. NOTE: the naive "(burst-1) x (Timeout+Restart)
-# ~= 2400s" arithmetic is NOT sufficient in practice and was proven wrong by
-# reproduction (see task-3-report.md fix-round-1): a scaled systemd-run --user
-# transient unit (9s-fail/3s-RestartSec cycle, burst=3) still restarted past
-# 9 times with a 2x-cycle interval (36s) and only actually tripped
-# ("Start request repeated too quickly") at a 5x-cycle interval (60s).
-# Scaling that verified 5x ratio to the real 900s+300s=1200s cycle gives:
-StartLimitIntervalSec=6000
-StartLimitBurst=3
+# DELIBERATELY no Restart / RestartSec / StartLimit* directives here. Do not
+# re-add them without reading this first.
+#
+# They were added so a transient network blip would self-heal. It does not work,
+# and it is not free:
+#
+#  * It cannot fire for the outage it was added for. The in-process fetch budget
+#    turns a DNS outage into a run that COMPLETES and exits 0 — a restart never
+#    triggers there.
+#  * It duplicates the digest. The push is not idempotent: a failure in the
+#    archive write exits non-zero AFTER a successful push, so every restart
+#    re-classified and re-pushed the same items. (Ordering has since been fixed
+#    so the seen-set commits right after the push — that is the precondition
+#    below — but a push that itself half-succeeds is still not idempotent.)
+#  * It manufactures a false alarm. save_health() runs once per process, so N
+#    restarts write N increments; with a burst cap of 3 numerically equal to
+#    source_health.ALARM_THRESHOLD=3, one 15-minute blip drove a source from 0
+#    to "SOURCE DEAD — 3 consecutive failed runs".
+#
+# The daily timer IS the retry mechanism. One timer beats three interacting
+# ones. Re-add a restart only once the push is genuinely idempotent.
 
 [Service]
 Type=oneshot
@@ -29,11 +40,10 @@ WorkingDirectory=%h/Documents/Programming/claude-telegram/job-sift
 ExecStart=%h/Documents/Programming/claude-telegram/job-sift/sift
 StandardOutput=journal
 StandardError=journal
-# Backstop behind Task 2's 240s in-process fetch budget — 900s leaves ~11min
-# of headroom above budget+classify+push+save for a normal run.
+# Backstop behind the 240s in-process fetch budget — 900s leaves ~11min of
+# headroom above budget+classify+push+save for a normal run. This is the only
+# time-based guard on the unit; see the [Unit] comment above.
 TimeoutStartSec=900
-Restart=on-failure
-RestartSec=300
 
 [Install]
 WantedBy=default.target

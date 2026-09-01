@@ -23,7 +23,7 @@ import pytest
 
 from job_sift import config, orchestrator
 from job_sift.errors import SourceAuthError
-from job_sift.schema import JobListing
+from job_sift.schema import ClassifierResult as _ClassifierResult, JobListing
 
 _SOURCES = ("cedars", "greenhouse", "lever", "ashby", "linkedin")
 
@@ -72,7 +72,7 @@ def test_sources_are_fetched_concurrently(monkeypatch):
     _patch_sources(monkeypatch, **{s: _sleeper(s, _SLOW) for s in _SOURCES})
 
     started = time.monotonic()
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
     elapsed = time.monotonic() - started
 
     assert errors == {}
@@ -107,7 +107,7 @@ def test_a_slow_source_does_not_delay_a_fast_one(monkeypatch):
         greenhouse=_timed("greenhouse", 0.0),
     )
 
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
 
     assert errors == {}
     assert {l.source for l in listings} == {"cedars", "greenhouse"}
@@ -128,7 +128,7 @@ def test_source_over_budget_lands_in_the_error_map(monkeypatch):
     )
 
     started = time.monotonic()
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
     elapsed = time.monotonic() - started
 
     # The run is bounded by the budget, not by the straggler.
@@ -147,7 +147,7 @@ def test_over_budget_partial_result_is_discarded(monkeypatch):
     monkeypatch.setenv(config.FETCH_BUDGET_ENV, "0.2")
     _patch_sources(monkeypatch, cedars=_sleeper("cedars", 30))
 
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
 
     assert listings == []
     assert set(errors) == {"cedars"}
@@ -215,7 +215,7 @@ def test_auth_failure_still_distinguished_from_a_generic_crash(monkeypatch):
 
     _patch_sources(monkeypatch, cedars=_expired, lever=_boom)
 
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
 
     assert listings == []
     assert errors == {
@@ -227,7 +227,7 @@ def test_auth_failure_still_distinguished_from_a_generic_crash(monkeypatch):
 def test_healthy_run_has_an_empty_error_map(monkeypatch):
     _patch_sources(monkeypatch, greenhouse=lambda *a, **k: [_listing("greenhouse")])
 
-    listings, errors = orchestrator._fetch_all_sources()
+    listings, errors, _ok = orchestrator._fetch_all_sources()
 
     assert errors == {}
     assert [l.source for l in listings] == ["greenhouse"]
@@ -246,3 +246,73 @@ class TestFetchBudgetConfig:
     def test_unusable_values_fall_back_to_the_default(self, monkeypatch, raw):
         monkeypatch.setenv(config.FETCH_BUDGET_ENV, raw)
         assert config.fetch_budget_s() == config.FETCH_BUDGET_DEFAULT_S
+
+
+# ---------------------------------------------------------------------------
+# Commit ordering: the seen-set is what makes the push non-repeatable, so it
+# must be persisted as soon as the push succeeds — before anything that can
+# still fail. Previously the archive write sat in between, so an OSError there
+# exited non-zero AFTER a successful push and BEFORE the seen-set landed, and a
+# re-run reclassified and re-pushed the same listings.
+# ---------------------------------------------------------------------------
+
+
+class _OrderHarness:
+    def __init__(self, monkeypatch, tmp_path, *, archive_raises=False):
+        from job_sift import source_health
+
+        self.calls: list[str] = []
+        self.saved: dict[str, set] = {}
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+
+        listing = _listing("greenhouse")
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: ([listing], {}, ["greenhouse"])
+        )
+        monkeypatch.setattr(orchestrator, "filter_new", lambda ls: (ls, {"greenhouse": {"1"}}))
+        monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "classify_batch",
+            lambda ls: [_ClassifierResult("skip", "out_of_scope", "nope") for _ in ls],
+        )
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: self.calls.append("push"))
+
+        def save_seen(source, seen):
+            self.calls.append("save_seen")
+            self.saved[source] = seen
+
+        def write_archive(*a, **k):
+            self.calls.append("write_archive")
+            if archive_raises:
+                raise OSError("vault volume is full")
+
+        monkeypatch.setattr(orchestrator, "save_seen", save_seen)
+        monkeypatch.setattr(orchestrator, "write_archive", write_archive)
+        self.source_health = source_health
+
+
+def test_seen_set_is_committed_between_the_push_and_the_archive(monkeypatch, tmp_path):
+    h = _OrderHarness(monkeypatch, tmp_path)
+    assert orchestrator.run() == 0
+    assert h.calls == ["push", "save_seen", "write_archive"]
+    assert h.saved == {"greenhouse": {"1"}}
+
+
+def test_an_archive_failure_can_no_longer_undeliver_the_seen_set(monkeypatch, tmp_path):
+    """The re-push bug: the run still dies, but the listings stay delivered."""
+    h = _OrderHarness(monkeypatch, tmp_path, archive_raises=True)
+    with pytest.raises(OSError):
+        orchestrator.run()
+    assert h.calls == ["push", "save_seen", "write_archive"]
+    assert h.saved == {"greenhouse": {"1"}}
+
+
+def test_dry_run_still_writes_nothing(monkeypatch, tmp_path):
+    h = _OrderHarness(monkeypatch, tmp_path)
+    assert orchestrator.run(dry_run=True) == 0
+    assert h.calls == []
+    assert not list(tmp_path.iterdir())

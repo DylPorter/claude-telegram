@@ -50,7 +50,7 @@ def test_failing_source_recorded_in_error_map_and_does_not_abort_run(monkeypatch
         orchestrator.luma, "fetch_luma_events", lambda: [_event("luma", "1")]
     )
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert errors == {"meetup": "fetch failed: connection reset"}
     # The run continues — luma's events still come back despite meetup's crash.
@@ -65,7 +65,7 @@ def test_healthy_source_still_returns_its_events(monkeypatch):
         orchestrator.luma, "fetch_luma_events", lambda: [_event("luma", "l1")]
     )
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert errors == {}
     assert {e.external_id for e in events} == {"m1", "l1"}
@@ -75,7 +75,7 @@ def test_error_map_empty_when_all_sources_succeed(monkeypatch):
     monkeypatch.setattr(orchestrator.meetup, "fetch_meetup_events", lambda: [])
     monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", lambda: [])
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert events == []
     assert errors == {}
@@ -91,7 +91,7 @@ def test_both_sources_failing_are_both_recorded(monkeypatch):
     monkeypatch.setattr(orchestrator.meetup, "fetch_meetup_events", _meetup_boom)
     monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", _luma_boom)
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert events == []
     assert errors == {
@@ -122,7 +122,7 @@ def test_sources_are_fetched_concurrently(monkeypatch):
     )
 
     started = time.monotonic()
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
     elapsed = time.monotonic() - started
 
     assert errors == {}
@@ -155,7 +155,7 @@ def test_a_slow_source_does_not_delay_a_fast_one(monkeypatch):
         luma=_timed("luma", 0.0),
     )
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert errors == {}
     assert {e.source for e in events} == {"meetup", "luma"}
@@ -175,7 +175,7 @@ def test_source_over_budget_lands_in_the_error_map(monkeypatch):
     )
 
     started = time.monotonic()
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
     elapsed = time.monotonic() - started
 
     assert elapsed < 5, f"budget not enforced: {elapsed:.2f}s"
@@ -192,7 +192,7 @@ def test_over_budget_partial_result_is_discarded(monkeypatch):
     monkeypatch.setenv(config.FETCH_BUDGET_ENV, "0.2")
     _patch_sources(monkeypatch, meetup=_sleeper("meetup", 30))
 
-    events, errors = orchestrator._fetch_all_sources()
+    events, errors, _ok = orchestrator._fetch_all_sources()
 
     assert events == []
     assert set(errors) == {"meetup"}
@@ -237,3 +237,88 @@ class TestFetchBudgetConfig:
     def test_unusable_values_fall_back_to_the_default(self, monkeypatch, raw):
         monkeypatch.setenv(config.FETCH_BUDGET_ENV, raw)
         assert config.fetch_budget_s() == config.FETCH_BUDGET_DEFAULT_S
+
+
+# ---------------------------------------------------------------------------
+# Commit ordering: the seen-set is what makes the push non-repeatable, so it
+# must be persisted as soon as delivery has settled — before anything that can
+# still fail. Previously the archive write sat in between, so an OSError there
+# exited non-zero AFTER a successful push and BEFORE the seen-set landed, and a
+# re-run reclassified and re-pushed the same events.
+# ---------------------------------------------------------------------------
+
+
+class _OrderHarness:
+    def __init__(self, monkeypatch, tmp_path, *, archive_raises=False, surface=True):
+        from hk_events.schema import RelevanceResult
+
+        self.calls: list[str] = []
+        self.saved: dict[str, set] = {}
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("HK_EVENTS_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+
+        event = _event("meetup", "m1")
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: ([event], {}, ["meetup"])
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "filter_due",
+            lambda evs: ([(e, orchestrator.STAGE_NEW, None) for e in evs], {"meetup": {"m1"}}),
+        )
+        monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "record_verdict", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "sync_events", lambda *a, **k: None)
+        monkeypatch.setattr(
+            orchestrator,
+            "classify",
+            lambda e: RelevanceResult("founder_ai" if surface else "drop", "test verdict"),
+        )
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: self.calls.append("push"))
+
+        def save_seen(source, seen):
+            self.calls.append("save_seen")
+            self.saved[source] = seen
+
+        def write_archive(*a, **k):
+            self.calls.append("write_archive")
+            if archive_raises:
+                raise OSError("vault volume is full")
+
+        monkeypatch.setattr(orchestrator, "save_seen", save_seen)
+        monkeypatch.setattr(orchestrator, "write_archive", write_archive)
+
+
+def test_seen_set_is_committed_between_the_push_and_the_archive(monkeypatch, tmp_path):
+    h = _OrderHarness(monkeypatch, tmp_path)
+    assert orchestrator.run() == 0
+    assert h.calls == ["push", "save_seen", "write_archive"]
+    assert h.saved == {"meetup": {"m1"}}
+
+
+def test_an_archive_failure_can_no_longer_undeliver_the_seen_set(monkeypatch, tmp_path):
+    """The re-push bug: the run still dies, but the events stay delivered."""
+    h = _OrderHarness(monkeypatch, tmp_path, archive_raises=True)
+    with pytest.raises(OSError):
+        orchestrator.run()
+    assert h.calls == ["push", "save_seen", "write_archive"]
+    assert h.saved == {"meetup": {"m1"}}
+
+
+def test_a_deliberate_empty_day_silence_still_commits_the_seen_set(monkeypatch, tmp_path):
+    """HK_EVENTS_PUSH_EMPTY=0 suppresses the push. That is a settled delivery
+    decision, not a failure — the seen-set must still advance, or the same
+    dropped events are reclassified every day forever."""
+    monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)
+    h = _OrderHarness(monkeypatch, tmp_path, surface=False)
+    assert orchestrator.run() == 0
+    assert h.calls == ["save_seen", "write_archive"]
+    assert h.saved == {"meetup": {"m1"}}
+
+
+def test_dry_run_still_writes_nothing(monkeypatch, tmp_path):
+    h = _OrderHarness(monkeypatch, tmp_path)
+    assert orchestrator.run(dry_run=True) == 0
+    assert h.calls == []
+    assert not list(tmp_path.iterdir())
