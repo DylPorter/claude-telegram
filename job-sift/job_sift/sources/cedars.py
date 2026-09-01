@@ -24,7 +24,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from job_sift.config import CEDARS_COOKIES_PATH, CEDARS_PORTAL_URL
-from job_sift.errors import SourceAuthError
+from job_sift.errors import SourceAuthError, SourceFetchError
 from job_sift.schema import JobListing
 
 log = logging.getLogger(__name__)
@@ -76,9 +76,11 @@ def _fetch_listings_page(page: int = 1) -> str:
             raise RuntimeError(f"cedars fetch failed: HTTP {resp.status_code} for page {page}")
         # Detect the logged-out bounce: an expired PHPSESSID makes the search
         # page 302 → login.php → main.php, landing on a 200 landing page with
-        # no results table. Without this guard the parser sees a tableless page
-        # and misreports it as a "structure change" (see _parse_listings_html),
-        # and the whole run silently degrades to "None today".
+        # no results table. This guard names the cause; without it the tableless
+        # page still escalates (see _parse_listings_html), but as a generic
+        # "structure change" that does not tell the operator to log back in.
+        # The whitelist is deliberately NOT the only defence — it is two
+        # filenames, and a third bounce target must not go quiet.
         final_page = resp.url.path.rsplit("/", 1)[-1]
         if final_page in {"login.php", "main.php"}:
             raise SourceAuthError(
@@ -104,19 +106,38 @@ def _safe_date(s: str) -> date | None:
         return None
 
 
-def _parse_listings_html(html: str) -> list[JobListing]:
+def _parse_listings_html(html: str) -> list[JobListing] | None:
     """Parse the CEDARS listings table into JobListing objects.
 
     Table layout (inferred from live page):
       - <table class="tablesorter"> with 1 header row + 20 data rows per page
       - 5 cells: Job ID, Employer, Title (with optional STEM badge img), Deadline, Posted
       - Every cell wraps the same <a href="job_detail.php?job_id=GXXXXXXX">
+
+    RETURNS None vs `[]`, and the difference is the whole point:
+
+      * `None` — there is NO results table on this page at all. We did not read
+        a listings page; we read *something else*. A maintenance notice, a WAF
+        interstitial, a bounce to a landing page whose filename is not in
+        `_fetch_listings_page`'s two-name redirect whitelist, or a renamed
+        `tablesorter` class (the layout above is inferred, not contracted).
+        This is "I could not look", and the caller escalates it.
+      * `[]` — the table IS there and holds zero data rows. That is a real,
+        observed "nothing open today", and the caller scores it a success.
+
+    Returning `[]` for both is the sixth variant of the bug that killed CEDARS
+    for fifty days: `fetch_cedars_listings` read the empty list as "0 listings,
+    stop", the orchestrator saw a clean return and put `cedars` in `succeeded`,
+    and `source_health` zeroed the failure streak and stamped `last_success`.
     """
     soup = BeautifulSoup(html, "lxml")
     table = soup.select_one("table.tablesorter")
     if table is None:
-        log.warning("no .tablesorter found — page structure may have changed")
-        return []
+        log.warning(
+            "no .tablesorter found — this is not a CEDARS listings page "
+            "(maintenance/interstitial page, or the table markup changed)"
+        )
+        return None
 
     listings: list[JobListing] = []
     for row in table.select("tr"):
@@ -216,6 +237,22 @@ def fetch_cedars_listings(
         every page up to the cap even when the newest pages are all-seen. This
         is REQUIRED to reach the older backlog (pages 6+) once a normal run has
         already marked pages 1-5 as seen — otherwise greedy stops at page 1.
+
+    PARTIAL degrade, TOTAL escalation — the same rule `_ical_common
+    .fetch_feed_group` follows in the sibling bot:
+
+      * A tableless PAGE 1 raises `SourceFetchError`. Page 1 is the only page a
+        healthy portal must always render with a table (even with zero open
+        listings the header row is there), so no table on page 1 means we never
+        reached the listings at all. Escalating it is what stops a
+        maintenance/interstitial page from being scored a success and reported
+        as "Surfaced: none today".
+      * A tableless PAGE 2+ stops pagination and keeps what pages 1..N-1
+        returned. By then we hold POSITIVE evidence the source is alive and the
+        run reports real listings, so this is a partial degrade, not a silent
+        zero — and paginating past the last page is a legitimate way to get a
+        page the parser does not recognise. Escalating it would turn a normal
+        end-of-results into a failed source.
     """
     if os.environ.get("JOB_SIFT_STUB") == "1":
         log.info("cedars: STUB mode — returning sample listings")
@@ -230,6 +267,26 @@ def fetch_cedars_listings(
         log.info("cedars: fetching page %d", page)
         html = _fetch_listings_page(page)
         page_listings = _parse_listings_html(html)
+
+        if page_listings is None:
+            # No results table — we did not read a listings page.
+            if page == 1:
+                raise SourceFetchError(
+                    "cedars",
+                    "the CEDARS listings page carried no results table "
+                    f"(no `table.tablesorter` at {CEDARS_PORTAL_URL}). Either the "
+                    "portal served a maintenance/interstitial page, the session "
+                    "bounced somewhere other than login.php/main.php, or the "
+                    "results-table markup changed. Open the URL in a browser to "
+                    "tell those apart — this is NOT 'no jobs today'.",
+                )
+            log.warning(
+                "cedars: page %d carried no results table — stopping after %d listing(s) "
+                "from the earlier page(s)",
+                page,
+                len(all_listings),
+            )
+            break
 
         if not page_listings:
             log.info("cedars: page %d returned 0 listings — stopping", page)
