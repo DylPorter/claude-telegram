@@ -84,6 +84,170 @@ def save_seen(source: str, seen: dict[str, dict]) -> None:
     _seen_path(source).write_text(json.dumps(seen, indent=2, sort_keys=True))
 
 
+# Which source wins when two of them carry the same real-world event and NEITHER
+# has been seen before. Earlier = preferred. `luma` outranks `luma_discover`
+# because the .ics carries a description and an organizer, which the city-page
+# listing card does not, and the classifier reads both.
+#
+# This ordering is only ever the TIE-BREAK. Continuity outranks it — see
+# collapse_cross_source.
+_SOURCE_PRECEDENCE = ["meetup", "luma", "aitinkerers", "luma_discover", "cyberport", "startmeuphk"]
+
+
+def _precedence(event: Event) -> tuple[int, str]:
+    try:
+        rank = _SOURCE_PRECEDENCE.index(event.source)
+    except ValueError:
+        rank = len(_SOURCE_PRECEDENCE)
+    return (rank, event.source)
+
+
+def collapse_cross_source(
+    events: list[Event], *, seen_lookup=load_seen
+) -> tuple[list[Event], list[tuple[Event, Event]]]:
+    """Collapse events that two sources both reported, BEFORE the seen-set diff.
+
+    Returns `(kept, collapsed)`, where each `collapsed` pair is `(kept, dropped)`
+    so the caller can log what it merged.
+
+    WHY THIS EXISTS. Nothing in this pipeline used to compare events across
+    sources. `dedup_key` is source-prefixed, `stable_hash` mixes the source into
+    the digest, and `filter_due` loads a SEPARATE seen-set per source — so two
+    adapters holding one event produced two "new event" notifications, two
+    classifier calls, and two Google Calendar inserts. That was latent until
+    `luma_discover` landed: the city page and the calendar .ics feeds genuinely
+    overlap, and a standalone event getting attached to a followed calendar puts
+    it in both. Verified in live data 2026-09-01 — `evt-cuDFACZOa8zGKRu`
+    ("Paperclip-maxxing Capitalism") was on the startupshk .ics and on
+    lu.ma/hong-kong simultaneously.
+
+    The collision key is `Event.identity_key`; for the Luma pair that resolves to
+    `luma-evt:<api_id>`, which both adapters derive independently.
+
+    CONTINUITY BEATS PRECEDENCE, and that is the subtle half. Picking a winner by
+    a fixed source ranking alone would trade a same-run double-report for a
+    across-run one: an event first found by `luma_discover` is recorded in
+    `seen_luma_discover.json`, so if a later run switched the winner to `luma`,
+    that run would look the event up in `seen_luma.json`, miss, and notify it a
+    second time — plus write a second calendar entry, since `stable_hash` mixes
+    the source in. So a candidate whose OWN source has already seen it wins. The
+    fixed ranking only decides a genuinely first sighting, where no seen-set has
+    an opinion and either choice is equally new.
+
+    `seen_lookup` is injected so tests can drive this without touching
+    `.data/state/`.
+    """
+    by_identity: dict[str, list[Event]] = {}
+    order: list[str] = []
+    for event in events:
+        key = event.identity_key
+        if key not in by_identity:
+            by_identity[key] = []
+            order.append(key)
+        by_identity[key].append(event)
+
+    seen_cache: dict[str, dict[str, dict]] = {}
+
+    def _already_seen(event: Event) -> bool:
+        if event.source not in seen_cache:
+            seen_cache[event.source] = seen_lookup(event.source)
+        return event.external_id in seen_cache[event.source]
+
+    kept: list[Event] = []
+    collapsed: list[tuple[Event, Event]] = []
+    for key in order:
+        group = by_identity[key]
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        # sorted() is stable, so equal keys preserve fetch order — the result is
+        # deterministic even when two candidates tie on both criteria.
+        winner = sorted(group, key=lambda e: (not _already_seen(e), _precedence(e)))[0]
+        kept.append(winner)
+        for other in group:
+            if other is not winner:
+                collapsed.append((winner, other))
+                log.info(
+                    "collapsed duplicate %s: keeping %s/%s, dropping %s/%s (%s)",
+                    key, winner.source, winner.external_id,
+                    other.source, other.external_id, winner.title[:60],
+                )
+    return kept, collapsed
+
+
+def mirror_collapsed(
+    seen_by_source: dict[str, dict[str, dict]],
+    collapsed: list[tuple[Event, Event]],
+) -> None:
+    """Write the winner's seen-record into every LOSER's seen-set too.
+
+    THE BUG THIS FIXES (found in review, and it was live, not theoretical).
+    `collapse_cross_source` picks one survivor, so only the winner's source ever
+    reaches `filter_due` — and `filter_due` populates `seen_by_source` from the
+    events it iterates, so the loser's state file is never written. The winner is
+    stable only while BOTH sources keep reporting the event. They don't:
+
+        run 1  city page only            → notified, recorded in seen_luma_discover
+        run 2  both sources              → luma_discover wins (continuity), luma
+                                           still never recorded
+        run 3  ages off the city page,   → luma wins by default, finds nothing in
+               still on the .ics            seen_luma, and RE-NOTIFIES
+
+    Run 3 re-pushes to Telegram and writes a SECOND calendar entry, because
+    `stable_hash` mixes the source into the digest. The trigger is routine, not
+    exotic: the city page is a bounded listing of the next ~12 events while the
+    .ics horizon is 45 days (config.HK_EVENTS_HORIZON_DAYS), so an event ageing
+    off the listing while still on a followed calendar is the NORMAL life cycle.
+
+    THE FIX, and why this one. The alternative was to key the seen-sets on
+    `identity_key` instead of `external_id`. Rejected: most events have no
+    canonical id, so their key would change from `<external_id>` to
+    `<source>:<external_id>`, every record in the existing `seen_luma.json` /
+    `seen_meetup.json` would stop matching, and the first run after deploy would
+    re-push the entire backlog as newly discovered. Mirroring is additive — it
+    only ever writes keys that were missing — so it needs no migration and cannot
+    invalidate existing state.
+
+    Call this AFTER `record_verdict`, so the mirrored record carries the
+    classifier tag. That matters beyond bookkeeping: a mirrored `"drop"` verdict
+    means the loser's source will not resurface an event the filter already
+    rejected.
+
+    RESIDUAL, stated so nobody assumes otherwise: this can only mirror an overlap
+    a run actually observed. If an event were on the city page in one run and
+    on the .ics in a later run with NO run in between seeing both, there is
+    nothing to mirror and it would still be re-notified once. In practice the
+    .ics window (45 days) strictly contains the city-page window (~12 nearest
+    events), so a run that sees both is near-certain.
+    """
+    for winner, loser in collapsed:
+        winner_rec = seen_by_source.get(winner.source, {}).get(winner.external_id)
+        if winner_rec is None:
+            continue
+        if loser.source not in seen_by_source:
+            seen_by_source[loser.source] = load_seen(loser.source)
+        seen = seen_by_source[loser.source]
+        existing = seen.get(loser.external_id)
+        if existing is None:
+            seen[loser.external_id] = {
+                "stages": list(winner_rec.get("stages") or [STAGE_NEW]),
+                "tag": winner_rec.get("tag"),
+            }
+            log.info(
+                "mirrored seen-record to %s/%s from winner %s/%s",
+                loser.source, loser.external_id, winner.source, winner.external_id,
+            )
+            continue
+        # Already tracked on the loser's side: merge rather than overwrite, so a
+        # reminder already fired there is not re-armed.
+        stages = existing.setdefault("stages", [STAGE_NEW])
+        for stage in winner_rec.get("stages") or []:
+            if stage not in stages:
+                stages.append(stage)
+        if existing.get("tag") is None:
+            existing["tag"] = winner_rec.get("tag")
+
+
 def _is_soon(event: Event, *, now: datetime | None = None) -> bool:
     """True if the event starts within the reminder window and hasn't started yet.
 

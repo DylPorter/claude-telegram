@@ -10,7 +10,7 @@ must override it.
 What is pinned here:
   * the counter increments on failure and resets on success;
   * the alarm fires at EXACTLY 3 consecutive failed runs and not at 2;
-  * the three DISABLED adapters can never accrue a counter or alarm;
+  * the two DISABLED adapters can never accrue a counter or alarm;
   * a budget timeout counts as a failure;
   * the alarm overrides HK_EVENTS_PUSH_EMPTY=0 and reaches Telegram;
   * --dry-run persists nothing.
@@ -154,11 +154,19 @@ class TestAbsenceIsNotFailure:
         ]
 
     def test_the_disabled_adapters_are_not_attempted(self):
-        """aitinkerers/cyberport/startmeuphk are commented out of the fetch
-        list. They must never accrue a counter, let alone alarm."""
+        """cyberport/startmeuphk are commented out of the fetch list. They must
+        never accrue a counter, let alone alarm.
+
+        aitinkerers used to be on this list. It was un-disabled 2026-09-01: the
+        403 that justified parking it is gone, and its events are readable as
+        schema.org JSON-LD, so it is now a live source that SHOULD accrue
+        counters. Asserted below rather than just dropped from the tuple, so
+        nobody quietly re-parks it."""
         enabled = orchestrator.enabled_sources()
-        for dead in ("aitinkerers", "cyberport", "startmeuphk"):
+        for dead in ("cyberport", "startmeuphk"):
             assert dead not in enabled
+        for live in ("aitinkerers", "luma_discover"):
+            assert live in enabled
 
         health: dict = {}
         for _ in range(10):
@@ -429,3 +437,157 @@ class TestOrchestratorPersistence:
 
         assert source_health.load_health()["meetup"]["consecutive_failures"] == 0
         assert h.pushed == []
+
+
+class TestDropNoticeUnit:
+    """Pruning is right, but it is also the one way to make a LIVE alarm vanish
+    without fixing anything: drop the source's config key and the record goes
+    with it. The digest cannot show that — the ⚠️ health line is driven by the
+    error map and a pruned source is in neither map — and the drop resets the
+    re-arm clock, so the source comes back looking brand new and needs another
+    ALARM_THRESHOLD runs before it can shout again. One line in the push, no
+    schema change, no accrual."""
+
+    _STALE = {"meetup": {"consecutive_failures": 12, "last_success": "2026-07-04"}}
+
+    def test_a_pruned_source_at_the_threshold_produces_the_line(self):
+        current = source_health.update_health(
+            dict(self._STALE), succeeded=[], errors={}, today=_DAY
+        )
+        assert current == {}, "premise: the record really was pruned"
+
+        notice = source_health.render_drop_notice(self._STALE, current)
+
+        assert notice is not None
+        assert "meetup" in notice
+        assert "12-run failure streak" in notice
+        assert "dropped from health tracking" in notice
+
+    def test_exactly_at_the_threshold_counts(self):
+        prior = {"meetup": {"consecutive_failures": source_health.ALARM_THRESHOLD}}
+        assert source_health.render_drop_notice(prior, {}) is not None
+
+    def test_one_below_the_threshold_says_nothing(self):
+        """A source pruned while merely wobbling is not news — it never had a
+        standing alarm to lose. The two DISABLED adapters are pruned every
+        run and must stay silent."""
+        prior = {"meetup": {"consecutive_failures": source_health.ALARM_THRESHOLD - 1}}
+        assert source_health.render_drop_notice(prior, {}) is None
+
+    def test_the_disabled_adapters_never_produce_a_notice(self):
+        """cyberport/startmeuphk are commented out of _source_tasks and carry
+        no record at all — pruning nothing says nothing. (aitinkerers was in
+        that list until 2026-09-01; it is live now and DOES accrue failures.)"""
+        assert source_health.render_drop_notice({}, {}) is None
+
+    def test_a_source_that_is_still_tracked_is_not_a_drop(self):
+        current = source_health.update_health(
+            dict(self._STALE), succeeded=[], errors={"meetup": "still dead"}, today=_DAY
+        )
+        assert source_health.render_drop_notice(self._STALE, current) is None
+        assert source_health.render_alarm(current) is not None
+
+    def test_it_claims_neither_failure_nor_success(self):
+        notice = source_health.render_drop_notice(self._STALE, {})
+        assert "🚨" not in notice
+        assert _DAY.isoformat() not in notice
+
+    def test_worst_streak_leads(self):
+        prior = {
+            "luma": {"consecutive_failures": 4},
+            "meetup": {"consecutive_failures": 20},
+            "cyberport": {"consecutive_failures": 1},
+        }
+        lines = source_health.render_drop_notice(prior, {}).splitlines()
+        assert len(lines) == 2, "the sub-threshold source must not get a line"
+        assert "meetup" in lines[0]
+        assert "luma" in lines[1]
+
+
+class TestDropNoticeOverridesThePushEmptyGate:
+    """HK_EVENTS_PUSH_EMPTY=0 must not silence this either.
+
+    Same argument as the staleness alarm one step removed: the gate exists so a
+    daily "nothing today" doesn't train the reader to stop opening the digest,
+    but on the day a source carrying a live alarm leaves the counters because
+    its config vanished, that silence is how the alarm gets deleted by a YAML
+    edit nobody meant to make.
+    """
+
+    def test_the_notice_reaches_the_push_on_an_empty_digest(self, monkeypatch):
+        """THE gate case: events were fetched, none surfaced, so
+        HK_EVENTS_PUSH_EMPTY=0 would normally suppress the push entirely.
+
+        `test_a_sub_threshold_drop_lets_the_gate_win` below is the control — it
+        is the same setup with a smaller streak, and it stays silent, so the
+        push here is the notice overriding the gate and not the harness pushing
+        unconditionally.
+        """
+        monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)
+        source_health.save_health(
+            {"meetup": {"consecutive_failures": 12, "last_success": "2026-07-04"}}
+        )
+        # meetup in NEITHER set — exactly what an unconfigured source produces.
+        h = _Harness(monkeypatch, events=[_event("luma")], errors={}, succeeded=["luma"])
+
+        assert orchestrator.run() == 0
+
+        assert len(h.pushed) == 1, "the drop notice did not reach Telegram"
+        assert any("dropped from health tracking" in m for m in h.pushed[0])
+        assert any("12-run failure streak" in m for m in h.pushed[0])
+
+    def test_the_zero_events_path_carries_it_too(self, monkeypatch):
+        """`no events fetched at all` is a separate render call site, and it
+        pushes its heartbeat regardless of the gate. The notice must ride it."""
+        monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)
+        source_health.save_health({"meetup": {"consecutive_failures": 12}})
+        h = _Harness(monkeypatch, events=[], errors={}, succeeded=["luma"])
+
+        assert orchestrator.run() == 0
+
+        assert len(h.pushed) == 1
+        assert any("dropped from health tracking" in m for m in h.pushed[0])
+
+    def test_a_sub_threshold_drop_lets_the_gate_win(self, monkeypatch):
+        monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)
+        source_health.save_health({"meetup": {"consecutive_failures": 1}})
+        h = _Harness(monkeypatch, events=[_event("luma")], errors={}, succeeded=["luma"])
+
+        assert orchestrator.run() == 0
+
+        assert h.pushed == [], "a wobble that got pruned is not worth breaking silence"
+
+    def test_the_notice_is_self_clearing(self, monkeypatch):
+        """A deliberate disable costs one line, ONCE. The record is gone from
+        the state file after run one, so run two is silent again."""
+        monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)
+        source_health.save_health({"meetup": {"consecutive_failures": 12}})
+
+        first = _Harness(monkeypatch, events=[_event("luma")], errors={}, succeeded=["luma"])
+        assert orchestrator.run() == 0
+        assert len(first.pushed) == 1
+
+        second = _Harness(monkeypatch, events=[_event("luma")], errors={}, succeeded=["luma"])
+        assert orchestrator.run() == 0
+        assert second.pushed == [], "the notice must not nag"
+
+    def test_dry_run_writes_nothing_and_pushes_nothing(self, monkeypatch, _isolated_state):
+        source_health.save_health({"meetup": {"consecutive_failures": 12}})
+        before = (_isolated_state / "source_health.json").read_text()
+        h = _Harness(monkeypatch, events=[], errors={}, succeeded=["luma"])
+
+        assert orchestrator.run(dry_run=True) == 0
+
+        assert (_isolated_state / "source_health.json").read_text() == before
+        assert h.pushed == []
+
+    def test_the_notice_also_lands_in_the_vault_archive(self):
+        md = render_vault_archive(
+            surfaced=[],
+            dropped=[],
+            today=_DAY,
+            source_errors=None,
+            drop_notice="ℹ️ *meetup* — dropped from health tracking",
+        )
+        assert "## ℹ️ Dropped from health tracking" in md
+        assert "> ℹ️ *meetup* — dropped from health tracking" in md

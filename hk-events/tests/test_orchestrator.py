@@ -18,9 +18,10 @@ sum(t), not to measure anything precisely.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -322,3 +323,107 @@ def test_dry_run_still_writes_nothing(monkeypatch, tmp_path):
     assert orchestrator.run(dry_run=True) == 0
     assert h.calls == []
     assert not list(tmp_path.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# `succeeded` wiring: run() must forward what the fetch phase OBSERVED.
+#
+# `update_health` is only as honest as what run() hands it, and its unit tests
+# call it directly — so re-introducing the original defect at the CALL SITE
+# (`succeeded=enabled_sources()`, a static list) left every other test in both
+# suites green. These read the state file back off disk after a real run(),
+# which is the only place that inference shows up.
+# ---------------------------------------------------------------------------
+
+
+_SEEDED_HEALTH = {
+    name: {
+        "consecutive_failures": 12,
+        "last_success": "2026-08-20",
+        "last_failure": "2026-08-31",
+        "last_error": "fetch failed: connection reset",
+        "first_seen": "2026-06-01",
+    }
+    for name in ("meetup", "luma")
+}
+
+
+def _health_after_run(monkeypatch, tmp_path, *, fetched, seeded=None):
+    """Run the real run() over a stubbed fetch phase; return the saved state."""
+    from hk_events import source_health
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HK_EVENTS_STUB", "0")
+    monkeypatch.setattr(config, "assert_required", lambda: None)
+    state = tmp_path / source_health.STATE_FILENAME
+    state.write_text(json.dumps(_SEEDED_HEALTH if seeded is None else seeded))
+
+    monkeypatch.setattr(orchestrator, "_fetch_all_sources", lambda: fetched)
+    monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+    monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
+
+    assert orchestrator.run() == 0
+    return json.loads(state.read_text())
+
+
+class TestSucceededComesFromTheFetchPhase:
+    """Not from `enabled_sources()`. The list of sources a run ATTEMPTS is a
+    different fact from the list that REPORTED, and conflating them is the
+    original bug: it manufactured a success for every source during a total
+    outage. Since an unconfigured source now lands in neither returned set, the
+    two lists differ on healthy runs too — a static list would fabricate there
+    as well."""
+
+    def test_a_run_that_observed_nothing_records_nothing(self, monkeypatch, tmp_path):
+        """Both feeds unconfigured/unattempted: no successes, no errors."""
+        saved = _health_after_run(monkeypatch, tmp_path, fetched=([], {}, []))
+
+        assert saved == {}, "sources that reported nothing must be pruned, not scored"
+
+    def test_no_source_is_stamped_successful_today_without_reporting(
+        self, monkeypatch, tmp_path
+    ):
+        """The fabricated fact itself, named: today as `last_success`."""
+        saved = _health_after_run(monkeypatch, tmp_path, fetched=([], {}, []))
+
+        assert date.today().isoformat() not in json.dumps(saved)
+
+    def test_only_the_sources_that_reported_get_a_record(self, monkeypatch, tmp_path):
+        """A mixed run: one succeeded, one reported nothing at all."""
+        saved = _health_after_run(monkeypatch, tmp_path, fetched=([], {}, ["luma"]))
+
+        assert set(saved) == {"luma"}
+        assert saved["luma"]["consecutive_failures"] == 0
+        assert saved["luma"]["last_success"] == date.today().isoformat()
+
+    def test_a_failing_source_still_increments(self, monkeypatch, tmp_path):
+        saved = _health_after_run(
+            monkeypatch, tmp_path, fetched=([], {"meetup": "fetch failed: 403"}, [])
+        )
+
+        assert set(saved) == {"meetup"}
+        assert saved["meetup"]["consecutive_failures"] == 13
+        assert saved["meetup"]["last_success"] == "2026-08-20"
+
+    def test_dry_run_forwards_the_same_signal_but_persists_nothing(
+        self, monkeypatch, tmp_path
+    ):
+        """--dry-run must not write state — including a pruning write."""
+        from hk_events import source_health
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("HK_EVENTS_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+        state = tmp_path / source_health.STATE_FILENAME
+        state.write_text(json.dumps(_SEEDED_HEALTH))
+
+        monkeypatch.setattr(orchestrator, "_fetch_all_sources", lambda: ([], {}, []))
+        monkeypatch.setattr(
+            orchestrator, "push_messages", lambda msgs: pytest.fail("dry-run pushed")
+        )
+        monkeypatch.setattr(
+            orchestrator, "write_archive", lambda *a, **k: pytest.fail("dry-run wrote")
+        )
+
+        assert orchestrator.run(dry_run=True) == 0
+        assert json.loads(state.read_text()) == _SEEDED_HEALTH

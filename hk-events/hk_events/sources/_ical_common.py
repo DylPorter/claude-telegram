@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import yaml
 from icalendar import Calendar
 
 from hk_events.config import HK_EVENTS_HORIZON_DAYS, PROJECT_ROOT
-from hk_events.errors import SourceFetchError
+from hk_events.errors import SourceFetchError, SourceNotConfiguredError
 from hk_events.schema import Event, Source
 
 log = logging.getLogger(__name__)
@@ -102,7 +103,19 @@ def _to_datetime(value) -> datetime | None:
 
 def _within_horizon(start: datetime | None) -> bool:
     """Keep events starting from yesterday up to the rolling horizon. Events with
-    no start time are kept (let the classifier / human decide)."""
+    no start time are kept (let the classifier / human decide).
+
+    ⚠️ `start is None` therefore returns True, and that policy is now reachable
+    from a HISTORY-SHAPED source. It was written for .ics feeds, where a dateless
+    VEVENT is rare and usually imminent. The AI Tinkerers homepage is mostly an
+    archive of past meetups, so an entry with a missing or unparseable `startDate`
+    never ages out: it is kept every run, and `Event.stable_hash` buckets it under
+    "nodate". It still only notifies ONCE (the seen-set is keyed on the schema.org
+    @id, which is stable), and `_is_soon` returns False for it so it never fires a
+    reminder — so this is a permanent classifier cost, not a repeat-push bug.
+    Left as-is deliberately: dropping dateless events would silently discard a
+    real upcoming event whose date we merely failed to parse, which is worse.
+    """
     if start is None:
         return True
     now = datetime.now(timezone.utc)
@@ -124,18 +137,50 @@ def _link_from_description(description: str | None) -> str:
     return m.group(0) if m else ""
 
 
-def parse_ics(text: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
+def parse_ics(
+    text: str,
+    *,
+    source: Source,
+    organizer_default: str | None = None,
+    canonical_id: Callable[[str], str | None] | None = None,
+) -> list[Event] | None:
     """Parse VEVENTs from an .ics document into horizon-filtered Event objects.
 
     The VEVENT UID is used as the stable per-source external_id. Past events and
     events beyond the horizon are filtered out here so downstream stages only see
     relevant candidates.
+
+    `canonical_id`, when given, maps a UID to a CROSS-source identity for the same
+    real-world event (or None when it cannot). It is how the Luma .ics feeds
+    collide with the Luma city-page adapter instead of double-reporting — see
+    `Event.identity_key`. Feeds with no twin (Meetup) pass nothing and fall back
+    to the source-prefixed `dedup_key`.
+
+    RETURNS None vs `[]`, and the difference is load-bearing:
+
+      * `None` — the document is not a calendar. `Calendar.from_ical` refused
+        it, which in practice means the feed host answered HTTP **200** with an
+        HTML error page, a Cloudflare interstitial, or a login wall. `fetch_ics`
+        cannot catch that by construction: the failure IS a 200.
+      * `[]` — it parsed as a calendar and held no VEVENT inside the horizon.
+        A real, observed "nothing on this feed".
+
+    Collapsing the two is the same bug that killed CEDARS: `fetch_feed_group`
+    never counted an unparseable feed toward `failed`, so four Luma feeds all
+    serving interstitials gave `failed == 0`, skipped the total-failure raise,
+    and returned `[]` — which the orchestrator scored a SUCCESS, zeroing the
+    failure streak and stamping a `last_success` nobody observed.
     """
     try:
         cal = Calendar.from_ical(text)
     except Exception as exc:
-        log.warning("%s: failed to parse ics: %s", source, exc)
-        return []
+        log.warning(
+            "%s: response did not parse as a calendar (%s) — treating as a failed "
+            "feed, not an empty one",
+            source,
+            exc,
+        )
+        return None
 
     events: list[Event] = []
     for comp in cal.walk("VEVENT"):
@@ -161,6 +206,12 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
         loc_link = location if (location and location.lower().startswith("http")) else ""
         link = url or loc_link or _link_from_description(description)
 
+        raw: dict = {"uid": uid}
+        if canonical_id is not None:
+            canon = canonical_id(uid)
+            if canon:
+                raw["canonical_id"] = canon
+
         events.append(
             Event(
                 source=source,
@@ -172,7 +223,7 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
                 location=location,
                 description=description,
                 organizer=organizer,
-                raw={"uid": uid},
+                raw=raw,
             )
         )
 
@@ -180,13 +231,25 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
     return events
 
 
-def fetch_feed_group(group: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
+def fetch_feed_group(
+    group: str,
+    *,
+    source: Source,
+    organizer_default: str | None = None,
+    canonical_id: Callable[[str], str | None] | None = None,
+) -> list[Event]:
     """Fetch + parse every configured feed for a group.
 
     PARTIAL degrade, TOTAL escalation. One dead feed out of four is a partial
     success: it is logged, skipped, and the other three still report. But if
     EVERY configured feed failed we raise `SourceFetchError` instead of
     returning `[]`.
+
+    A feed counts as FAILED whether it failed to fetch (`fetch_ics` → None) or
+    fetched and did not parse as a calendar (`parse_ics` → None). The second
+    half matters more than it looks: `fetch_ics` only checks the status code,
+    so a host answering 200 with an HTML error page or a Cloudflare
+    interstitial is invisible to it — the failure IS a 200.
 
     That distinction is the whole point of this branch. `fetch_ics` swallows
     `httpx.HTTPError`, and `httpx` wraps `socket.gaierror` in `ConnectError`,
@@ -196,8 +259,23 @@ def fetch_feed_group(group: str, *, source: Source, organizer_default: str | Non
     fetch, reset an accumulated failure streak to 0, and write today as
     `last_success`. A fabricated fact, persisted to disk, later rendered to a
     human as "nothing today". Returning zero must mean we looked.
+
+    NOT CONFIGURED is a THIRD outcome. With no usable feed URL for the group —
+    the key is missing, the list is empty, or every entry is still marked TODO —
+    there is nothing to fetch, so the run learnt nothing about this source
+    either way. The old escalation guard read `if urls and failed == len(urls)`,
+    so that case skipped the raise and returned `[]`, which `source_health`
+    scored as a success exactly like the outage above. It now raises
+    `SourceNotConfiguredError`, which the orchestrator scores as neither a
+    success nor a failure and therefore PRUNES — see errors.py.
     """
     urls = load_feed_urls(group)
+    if not urls:
+        raise SourceNotConfiguredError(
+            str(source),
+            f"no usable feed URL configured under ical_feeds.{group} "
+            "(missing, empty, or every entry still marked TODO)",
+        )
     events: list[Event] = []
     failed = 0
     for url in urls:
@@ -205,11 +283,25 @@ def fetch_feed_group(group: str, *, source: Source, organizer_default: str | Non
         if text is None:
             failed += 1
             continue
-        events.extend(parse_ics(text, source=source, organizer_default=organizer_default))
-    if urls and failed == len(urls):
+        parsed = parse_ics(
+            text,
+            source=source,
+            organizer_default=organizer_default,
+            canonical_id=canonical_id,
+        )
+        # A 200 that is not a calendar is a FAILED feed, not an empty one. It
+        # has to increment the same counter as a transport failure, or the
+        # total-failure raise below can never fire on the realistic outage
+        # (every feed answering 200 with an HTML interstitial).
+        if parsed is None:
+            failed += 1
+            continue
+        events.extend(parsed)
+    if failed == len(urls):
         raise SourceFetchError(
             str(source),
-            f"all {len(urls)} configured feed(s) failed to fetch — "
-            "network/DNS outage or every feed URL is dead (see log for per-feed detail)",
+            f"all {len(urls)} configured feed(s) failed to fetch or parse — "
+            "network/DNS outage, every feed URL is dead, or every host answered "
+            "200 with something that is not a calendar (see log for per-feed detail)",
         )
     return events

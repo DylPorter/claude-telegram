@@ -71,19 +71,36 @@ Sources are fetched in parallel, so the fetch phase costs `max(t)` rather than
 `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s fetches against a
 configured 25s timeout), so it has to be enforced from outside the fetch call.
 
-## Cookie export (one-time, repeat when session expires)
+## Cookie refresh (automatic, runs before every scheduled sift)
 
-The CEDARS portal needs HKU SSO. We avoid handling credentials by reusing the
-session cookies from your already-logged-in Chrome:
+The CEDARS portal needs HKU SSO. We avoid handling credentials by pulling the
+session cookie straight out of a browser you're already logged into, via
+`job_sift/refresh_cookie.py` (uses `browser_cookie3`):
 
-1. Log into the CEDARS NETJobs portal in Chrome.
-2. Install the "EditThisCookie" extension (or any cookie exporter).
-3. Export cookies for the portal's domain as a JSON file.
-4. Save it to `.data/cookies/cedars.json` inside this project.
+```bash
+.venv/bin/python -m job_sift.refresh_cookie            # pull from Firefox (default)
+.venv/bin/python -m job_sift.refresh_cookie --browser chrome
+```
 
-The scraper reads that file each run. When the session expires (usually 1–2 weeks
-for HKU SSO), re-export. Future: a Chrome-cookies-DB direct reader could automate
-the refresh, but manual is fine for v0.
+It writes `.data/cookies/cedars.json`, which the scraper reads each run. The
+`./sift` wrapper (and `job-sift.service`, which runs it daily) calls this
+automatically before scraping, trying Firefox first and falling through
+chrome/chromium/brave.
+
+**Firefox is the default, not an arbitrary pick.** Chromium-family browsers
+decrypt their cookie DB via an OS keyring (SecretService/KWallet), which needs
+an unlocked session and does not work from a headless systemd unit. Firefox's
+`cookies.sqlite` is plaintext SQLite — `browser_cookie3` reads it directly, no
+keyring involved, so it's the only option that reliably works headless.
+
+**Residual limit, stated plainly:** this only helps while Firefox itself still
+holds a *live* CEDARS session. The refresh can report success and still hand
+the scraper a cookie that's already dead — it copies whatever's in Firefox's
+jar, it doesn't validate that CEDARS still accepts it. CEDARS sessions expire
+in **hours, not weeks** — if you haven't touched CEDARS in Firefox recently,
+re-log-in there (`https://web2.cedars.hku.hk/jobs/` via HKU Portal) before the
+next run, or the daily sift will fail with a session-expired error regardless
+of how recently the cookie file was refreshed.
 
 ## Run
 

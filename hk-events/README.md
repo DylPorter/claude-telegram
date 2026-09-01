@@ -10,14 +10,19 @@ signal-brief + job-sift use, and **idempotently creates Google Calendar events**
 ## Architecture
 
 ```
- iCal feeds (clean)            scrape sources (brittle, degrade per-source)
- ├─ Meetup .ics                ├─ Cyberport (cyberport.hk)
- ├─ Luma .ics                  └─ StartmeupHK (startmeup.hk)
- └─ AI Tinkerers feed
-        │                              │
-        └──────────────┬───────────────┘
-                       ▼
-        parse → dedupe (per-source seen-set) → LLM relevance classifier
+ iCal feeds (clean)      structured pages (JSON island in     scrape sources (brittle,
+ ├─ Meetup .ics           initial HTML — no feed needed)        degrade per-source)
+ └─ Luma .ics             ├─ AI Tinkerers (schema.org JSON-LD)  ├─ Cyberport (cyberport.hk)
+                          └─ Luma discovery (__NEXT_DATA__,     └─ StartmeupHK (startmeup.hk)
+                             lu.ma/hong-kong — standalone events)
+        │                              │                                    │
+        └──────────────────────────────┴────────────────────────────────────┘
+                                       ▼
+        collapse_cross_source — merge duplicates on the Luma `evt-…` api_id
+        (luma and luma_discover both see the same event; continuity with an
+        existing per-source seen-set beats fixed source precedence, see dedupe.py)
+                                       ▼
+        dedupe (per-source seen-set) → LLM relevance classifier
                        │                              │
                        │                              ▼
                        │                       JSONL relevance log
@@ -28,6 +33,11 @@ signal-brief + job-sift use, and **idempotently creates Google Calendar events**
                        ▼
         /push to claude-telegram bot  +  daily Markdown archive to vault
 ```
+
+`mirror_collapsed` runs after classification and writes the winner's seen-record
+into the loser's seen-set too, so a source that stops reporting an event it once
+shared with another source doesn't re-notify it later (see `dedupe.py` and the
+"Two long-standing holes" note below).
 
 Two relevance buckets (the analogue of job-sift's prestige+scope):
 - **founder_ai** — funded-startup / AI / founder / hackathon / VC room.
@@ -101,19 +111,44 @@ If newsletter/Gmail in signal-brief works, gws auth is good. On
 
 ## Sources — status
 
+Three tiers. **iCal** = a real `.ics` feed. **structured page** = an HTML page
+that server-renders its events as machine-readable JSON (schema.org JSON-LD, or
+Next.js `__NEXT_DATA__`) — one `<script>` lookup and a `json.loads`, no CSS
+selectors to rot, so it is nearly as durable as a feed. **scrape** = a brittle
+DOM scraper.
+
 | Source | Tier | Status |
 |---|---|---|
-| Data Science & Generative AI HK (Meetup) | iCal | slug CONFIRMED; `/events/ical/` URL needs a one-time `curl` sanity-check |
-| vLLM Hong Kong (Meetup) | iCal | **TODO** — slug unverified |
-| Luma calendars (startupshk, hkweb3) | iCal | **TODO** — exact `.ics` URL shape unverified |
-| AI Tinkerers Hong Kong | feed | **TODO** — feed URL unverified (site 403s bare fetch) |
-| Cyberport | scrape | **stub** — selectors are placeholders, gated by `HK_EVENTS_STUB` |
-| StartmeupHK | scrape | **stub** — selectors placeholders; may expose a `?ical=1` export → promote to iCal tier |
+| Data Science & Generative AI HK (Meetup) | iCal | LIVE |
+| vLLM Hong Kong (Meetup) | iCal | LIVE |
+| Luma calendars (startupshk, lunatechs, moomeetup, codechella) | iCal | LIVE — hkweb3 deliberately off, see `sources.yaml` |
+| AI Tinkerers Hong Kong | structured page | **LIVE 2026-09-01** — schema.org JSON-LD on the chapter homepage |
+| Luma discovery (`lu.ma/hong-kong`) | structured page | **LIVE 2026-09-01** — catches STANDALONE Luma events |
+| Cyberport | scrape | **disabled** — HTTP 403 on every fetch; adapter kept, commented out of `_source_tasks` |
+| StartmeupHK | scrape | **disabled** — selectors never landed; may expose a `?ical=1` export → promote to iCal tier |
 
-All feed URLs live in `config/sources.yaml`. Entries whose URL starts with
-`TODO` are skipped automatically, so the pipeline runs end-to-end with whatever
-is confirmed. **Extension points** (add an adapter + config entry): HKTDC,
-HKSTP, AWS Summit HK.
+Two long-standing holes closed on 2026-09-01, both of which the repo had written
+off in comments:
+
+- **AI Tinkerers** was parked as "no feed exists, and the site 403s a bare
+  fetch". The 403 is gone, and no feed is needed — the homepage publishes the
+  chapter's events as schema.org `Event` objects.
+- **Standalone Luma events** belong to no calendar, so no `.ics` feed can ever
+  see them (this is why CodeChella Week never reached a digest). The old note
+  said catching them needed Playwright. It does not: `lu.ma` is a Next.js app,
+  so the city page's event list is in `<script id="__NEXT_DATA__">` in the
+  initial HTML. `luma_discover` reads it with one `httpx` GET.
+
+`luma_discover` and `luma` overlap on purpose — an event can be standalone today
+and attached to a followed calendar tomorrow. `dedupe.collapse_cross_source`
+merges the duplicates on the Luma `evt-…` api_id before the seen-set diff, so an
+overlapping event is notified once, classified once, and calendared once.
+
+All URLs live in `config/sources.yaml` (`ical_feeds` and `scrape_pages`). Entries
+whose URL is empty or starts with `TODO` are treated as UNCONFIGURED — the source
+is skipped and its health record pruned, which is deliberately different from
+"fetched and found nothing". **Extension points** (add an adapter + config
+entry): HKTDC, HKSTP, AWS Summit HK.
 
 ## systemd (NOT enabled — install manually)
 

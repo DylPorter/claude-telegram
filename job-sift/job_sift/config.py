@@ -79,8 +79,9 @@ def fetch_budget_s() -> float:
 
 # CEDARS portal — set in .env once you know the exact URL.
 CEDARS_PORTAL_URL = os.environ.get("CEDARS_PORTAL_URL", "")
-# Path to a JSON file containing the cookie jar exported from logged-in Chrome.
-# See README for the manual cookie-export flow.
+# Path to a JSON file containing the CEDARS session cookie(s). Written
+# automatically by `refresh_cookie.py` (pulled from Firefox's cookies.sqlite by
+# default; see README's "Cookie refresh" section) before each scheduled run.
 CEDARS_COOKIES_PATH = COOKIE_DIR / "cedars.json"
 
 # Vault layout
@@ -107,7 +108,8 @@ def assert_required() -> None:
     if not CEDARS_COOKIES_PATH.exists():
         raise SystemExit(
             f"CEDARS cookies not found at {CEDARS_COOKIES_PATH}. "
-            "Export from Chrome — see README."
+            "Log into https://web2.cedars.hku.hk/jobs/ in Firefox, then run "
+            "./sift to refresh."
         )
     if VAULT_ROOT and not VAULT_ROOT.exists():
         raise SystemExit(f"VAULT_ROOT does not exist: {VAULT_ROOT}")

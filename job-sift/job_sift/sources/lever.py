@@ -22,7 +22,7 @@ from datetime import date, datetime, timezone
 
 import httpx
 
-from job_sift.errors import SourceFetchError
+from job_sift.errors import SourceFetchError, SourceNotConfiguredError
 from job_sift.schema import JobListing
 from job_sift.sources._ats_common import load_slugs, location_matches
 
@@ -87,10 +87,19 @@ def fetch_lever_listings() -> list[JobListing]:
     orchestrator's error map, and is scored by `source_health` as a SUCCESS —
     zeroing the failure streak and writing a fabricated `last_success`.
     Returning zero must mean we looked.
+
+    A THIRD outcome sits alongside those two: with no slugs configured there is
+    nothing to poll, so the run learnt nothing about this source either way.
+    That raises `SourceNotConfiguredError`, which the orchestrator scores as
+    neither a success nor a failure — see errors.py.
     """
     slugs = load_slugs("lever")
     if not slugs:
-        return []
+        # NOT `return []`. An empty return is scored a SUCCESS by source_health
+        # — it resets the streak and stamps today as `last_success` — and with
+        # no slugs we polled nothing and learnt nothing. "No config" is neither
+        # success nor failure, so escalate and let the orchestrator prune it.
+        raise SourceNotConfiguredError("lever", "companies.yaml has no `lever:` slugs — nothing to poll")
     log.info("lever: polling %d companies", len(slugs))
 
     listings: list[JobListing] = []

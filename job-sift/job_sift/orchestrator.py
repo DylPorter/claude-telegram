@@ -13,7 +13,7 @@ from job_sift import config, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
-from job_sift.errors import SourceAuthError
+from job_sift.errors import SourceAuthError, SourceNotConfiguredError
 from job_sift.open_roles import (
     OpenRole,
     active_roles,
@@ -86,7 +86,9 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str], list[str]]:
     that actually completed a fetch. That third value is a POSITIVE success
     signal for `source_health` — see `update_health`. It is not derivable from
     the other two: "in the task list and not in the error map" is exactly the
-    inference that let a total network outage reset every failure streak.
+    inference that let a total network outage reset every failure streak, and a
+    source can legitimately land in NEITHER (see SourceNotConfiguredError
+    below), so the two returned sets do not partition the task list.
 
     Individual failures are caught so one dead source never kills the run — but
     they are recorded in the returned error map (keyed by source name) so the
@@ -124,6 +126,16 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str], list[str]]:
             # look now raises (SourceAuthError / SourceFetchError), so an empty
             # list here honestly means "I looked, there was nothing".
             succeeded.append(name)
+        except SourceNotConfiguredError as exc:
+            # NEITHER list. A source with no config was never asked anything,
+            # so this run is no evidence about it — scoring it a success would
+            # reset a real failure streak and stamp a `last_success` we never
+            # observed (reproduced: with companies.yaml removed, a seeded
+            # 12-run streak went to 0). Absent from both `succeeded` and
+            # `errors`, update_health PRUNES it, the same as a source that is
+            # commented out of the fetch list. Not a digest health line either:
+            # nothing failed.
+            log.warning("%s not configured — skipped, health record pruned: %s", name, exc.message)
         except SourceAuthError as exc:
             log.error("%s auth failure: %s", name, exc.message)
             errors[name] = exc.message
@@ -212,8 +224,9 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #     whether anything has been dead long enough to escalate. Computed
     #     BEFORE either render path so the alarm rides on the empty digest too
     #     — that is the run where "none today" is most likely to be believed.
+    prior_health = source_health.load_health()
     health = source_health.update_health(
-        source_health.load_health(),
+        prior_health,
         succeeded=fetched_ok,
         errors=source_errors,
         today=today,
@@ -227,6 +240,26 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
                 rec["consecutive_failures"],
                 rec["last_success"] or "never",
             )
+    # 1c. A source can also leave the counters entirely: pruned because it
+    #     reported nothing this run. That is correct — you cannot be stale if
+    #     nobody asked you anything — but it is the one way to make a STANDING
+    #     alarm disappear without fixing anything, and the digest cannot show it
+    #     (the ⚠️ health line is driven by the error map, and a pruned source is
+    #     in neither map). Worse, the drop resets the re-arm clock: restore the
+    #     config and the source comes back with no `first_seen` and no
+    #     `last_success`, needing another ALARM_THRESHOLD runs before it can
+    #     shout again. So a drop that took a live alarm with it gets one line in
+    #     the push — not an alarm, because nothing failed; a statement of what
+    #     stopped being watched. Self-clearing: the record is gone from the
+    #     state file after this run, so the next run says nothing.
+    drop_notice = source_health.render_drop_notice(prior_health, health)
+    for name, rec in source_health.dropped_while_stale(prior_health, health):
+        log.error(
+            "DROPPED WHILE STALE %s: pruned with %d consecutive failed runs on the clock",
+            name,
+            rec["consecutive_failures"],
+        )
+
     # Persisted before the push, not after: if the push itself blows up, the
     # failure that caused the alarm still happened and must survive the run.
     #
@@ -245,8 +278,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         # Ageing is time-driven, so the register still needs a pass on a dead day.
         roles = _update_open_roles([], today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm))
-            write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
+            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
+            write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
     log.info("fetched %d listings across all sources", len(listings))
@@ -293,6 +326,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         source_errors=source_errors,
         open_roles=open_roles,
         staleness_alarm=staleness_alarm,
+        drop_notice=drop_notice,
     )
 
     if dry_run:
@@ -317,7 +351,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             save_seen(source, seen)
 
     # 7. Vault archive (audit trail — after delivery is committed)
-    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
+    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
     if not dry_run:
         write_archive(today, archive_md)
 

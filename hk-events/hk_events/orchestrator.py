@@ -22,17 +22,21 @@ from hk_events.concurrency import run_with_budget
 from hk_events.dedupe import (
     STAGE_NEW,
     STAGE_SOON,
+    collapse_cross_source,
     filter_due,
+    mirror_collapsed,
     log_classification,
     record_verdict,
     save_seen,
 )
+from hk_events.errors import SourceNotConfiguredError
 from hk_events.render import render, render_vault_archive
 from hk_events.schema import Event, RelevanceResult
 from hk_events.sources import (
     aitinkerers,
     cyberport,
     luma,
+    luma_discover,
     meetup,
     startmeuphk,
 )
@@ -60,16 +64,37 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
         # Clean iCal/feed tier
         ("meetup", meetup.fetch_meetup_events),
         ("luma", luma.fetch_luma_events),
-        # DISABLED 2026-08-09 — these three returned 0 events on every run for
-        # two months and only added latency + log noise:
-        #   aitinkerers  — no public feed exists (email-only chapter)
+        # Server-rendered structured-data tier (2026-09-01). Not DOM scraping:
+        # both read a JSON island the server already ships in the initial HTML
+        # (schema.org JSON-LD, and Next.js __NEXT_DATA__), so there are no CSS
+        # selectors to rot. Each closes a hole the repo had written off:
+        #   aitinkerers    — the recorded 403 is gone; the homepage serves the
+        #                    chapter's events as schema.org Event objects.
+        #   luma_discover  — standalone Luma events belong to no calendar and so
+        #                    reach NO .ics feed (this is why CodeChella Week was
+        #                    invisible). The city page lists them.
+        # luma_discover overlaps `luma` on purpose — collapse_cross_source below
+        # merges the duplicates.
+        ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        ("luma_discover", luma_discover.fetch_luma_discover_events),
+        # DISABLED 2026-08-09 — these two returned 0 events on every run for two
+        # months and only added latency + log noise:
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
-        # The adapters are kept so re-enabling is a one-line change once any of
-        # them has a real feed. Being absent from this list also keeps them out
-        # of the staleness counters: they never run, so they never land in the
-        # error map or the succeeded list, and update_health prunes them.
-        # ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        # The adapters are kept, and as of 2026-09-02 both were ported to the
+        # SourceFetchError contract — but re-enabling is NOT a one-line change,
+        # and the previous wording here said it was. The port fixed the
+        # TRANSPORT half only (a 403 or a network error now raises instead of
+        # returning [], which source_health scored as a success). The PARSERS
+        # still return [] when their placeholder selectors match nothing, which
+        # is precisely startmeuphk's recorded failure mode — "selectors never
+        # landed, parses 0" — so a 200 carrying the real DOM would still be
+        # scored a clean success. Fix the selectors AND the parser's
+        # empty-vs-unreadable signal before uncommenting either line.
+        # Being absent from this list also
+        # keeps them out of the staleness counters: they never run, so they
+        # never land in the error map or the succeeded list, and update_health
+        # prunes them.
         # ("cyberport", cyberport.fetch_cyberport_events),
         # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
@@ -96,7 +121,9 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
     that actually completed a fetch. That third value is a POSITIVE success
     signal for `source_health` — see `update_health`. It is not derivable from
     the other two: "in the task list and not in the error map" is exactly the
-    inference that let a total network outage reset every failure streak.
+    inference that let a total network outage reset every failure streak, and a
+    source can legitimately land in NEITHER (see SourceNotConfiguredError
+    below), so the two returned sets do not partition the task list.
 
     Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
     are caught so one dead source never kills the run — but they are recorded
@@ -128,6 +155,15 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
             # look now raises SourceFetchError, so an empty list here honestly
             # means "I looked, there was nothing".
             succeeded.append(name)
+        except SourceNotConfiguredError as exc:
+            # NEITHER list. A source with no usable feed URL was never asked
+            # anything, so this run is no evidence about it — scoring it a
+            # success would reset a real failure streak and stamp a
+            # `last_success` we never observed. Absent from both `succeeded`
+            # and `errors`, update_health PRUNES it, the same as the two
+            # adapters commented out of _source_tasks. Not a digest health line
+            # either: nothing failed.
+            log.warning("%s not configured — skipped, health record pruned: %s", name, exc.message)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
             errors[name] = f"fetch failed: {exc}"
@@ -162,8 +198,9 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #     whether anything has been dead long enough to escalate. Computed
     #     BEFORE either render path so the alarm rides on the empty digest too
     #     — that is the run where "nothing today" is most likely to be believed.
+    prior_health = source_health.load_health()
     health = source_health.update_health(
-        source_health.load_health(),
+        prior_health,
         succeeded=fetched_ok,
         errors=source_errors,
         today=today,
@@ -177,12 +214,33 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
                 rec["consecutive_failures"],
                 rec["last_success"] or "never",
             )
+    # 1c. A source can also leave the counters entirely: pruned because it
+    #     reported nothing this run. That is correct — you cannot be stale if
+    #     nobody asked you anything — but it is the one way to make a STANDING
+    #     alarm disappear without fixing anything, and the digest cannot show it
+    #     (the ⚠️ health line is driven by the error map, and a pruned source is
+    #     in neither map). Worse, the drop resets the re-arm clock: restore the
+    #     config and the source comes back with no `first_seen` and no
+    #     `last_success`, needing another ALARM_THRESHOLD runs before it can
+    #     shout again. So a drop that took a live alarm with it gets one line in
+    #     the push — not an alarm, because nothing failed; a statement of what
+    #     stopped being watched. Self-clearing: the record is gone from the
+    #     state file after this run, so the next run says nothing.
+    drop_notice = source_health.render_drop_notice(prior_health, health)
+    for name, rec in source_health.dropped_while_stale(prior_health, health):
+        log.error(
+            "DROPPED WHILE STALE %s: pruned with %d consecutive failed runs on the clock",
+            name,
+            rec["consecutive_failures"],
+        )
+
     # Persisted before the push, not after: if the push itself blows up, the
     # failure that caused the alarm still happened and must survive the run.
     #
     # NOT under --stub, mirroring job-sift. hk-events is not vulnerable TODAY
     # — its two stub adapters (cyberport, startmeuphk) are both commented out
-    # of _source_tasks, so a stub run still fetches meetup/luma for real — but
+    # of _source_tasks, so a stub run still fetches all four live sources
+    # (meetup, luma, aitinkerers, luma_discover) for real — but
     # the hazard is latent: re-enabling either is a documented one-line change,
     # and it would silently start resetting counters from canned data. A stub
     # run is not evidence about the real world, so it does not get to write the
@@ -193,11 +251,21 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     if not events:
         log.warning("no events fetched from any source — pushing heartbeat")
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
-            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
+            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
+            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
     log.info("fetched %d events across all sources", len(events))
+
+    # 1d. Collapse events that two sources both reported. MUST run before the
+    #     seen-set diff: `filter_due` keeps a separate seen-set per source, so a
+    #     duplicate that survives to that point is notified twice, classified
+    #     twice, and written to the calendar twice. `luma` and `luma_discover`
+    #     really do overlap — see dedupe.collapse_cross_source.
+    events, collapsed = collapse_cross_source(events)
+    if collapsed:
+        log.info("collapsed %d cross-source duplicate(s) — %d events remain",
+                 len(collapsed), len(events))
 
     # 2. Diff against seen-sets (per-source). Two notification stages: newly
     #    discovered, and starting within HK_EVENTS_REMINDER_DAYS.
@@ -227,6 +295,14 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     log.info("%d surfaced, %d dropped", len(surfaced), len(dropped))
 
+    # 3b. Propagate each surviving event's seen-record back to the source(s) that
+    #     lost the collapse. Without this the loser's state file never learns the
+    #     event exists, so the run where the winner stops reporting it — the city
+    #     page is a ~12-event listing, the .ics horizon is 45 days, so this is the
+    #     normal life cycle, not an edge case — re-pushes it and writes a second
+    #     calendar entry. AFTER record_verdict so the tag rides along.
+    mirror_collapsed(seen_by_source, collapsed)
+
     # 4. Calendar sync (idempotent; gated by HK_EVENTS_CALENDAR_ENABLED + dry_run)
     calendar_stats = sync_events([e for e, _, _ in surfaced], dry_run=dry_run)
     log.info("calendar sync: %s", calendar_stats)
@@ -240,6 +316,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         today=today,
         source_errors=source_errors,
         staleness_alarm=staleness_alarm,
+        drop_notice=drop_notice,
     )
     if dry_run:
         log.info("dry-run — would push %d messages:", len(messages))
@@ -247,7 +324,12 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             print(m)
             print("---")
     else:
-        if not surfaced and not config.HK_EVENTS_PUSH_EMPTY and staleness_alarm is None:
+        if (
+            not surfaced
+            and not config.HK_EVENTS_PUSH_EMPTY
+            and staleness_alarm is None
+            and drop_notice is None
+        ):
             log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
         else:
             # A staleness alarm OVERRIDES the empty-digest silence above. The
@@ -256,6 +338,11 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             # for three runs, that same silence is the bug: "nothing found" and
             # "I could not look" would render identically, which is exactly how
             # CEDARS stayed broken for fifty days in the sibling bot.
+            #
+            # A drop notice overrides it for the same reason, one step removed:
+            # a source that was carrying a live alarm has just left the counters
+            # because it had no config. Staying silent about that is how a real
+            # alarm gets deleted by a YAML edit that nobody meant to make.
             push_messages(messages)
             log.info("pushed %d messages", len(messages))
 
@@ -272,7 +359,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             save_seen(source, seen)
 
     # 7. Vault archive (audit trail — after delivery is committed)
-    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
+    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
     if not dry_run:
         write_archive(today, archive_md)
 
