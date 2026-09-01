@@ -34,3 +34,92 @@ rejects:
 unclear_role_default: >
   assume permanent full-time and mark "out_of_scope" UNLESS the title contains
   intern / contract / rotational / co-op / summer / winter / trainee keywords
+
+# ---------------------------------------------------------------------------
+# Scope guard — the cheap, pre-LLM sanity check on a job title.
+#
+# An intern/summer/contract keyword in the title is a CANDIDATE, never an
+# admission: it still has to pass the scope classifier. This block is the other
+# half of that — titles naming a non-technical business function are rejected
+# with no LLM call at all. "Morgan Stanley IED Summer Analyst" contains
+# "summer" and is not an engineering role.
+#
+# BOTH KEYS ARE OPTIONAL. Omit either and job-sift uses its built-in default,
+# which is a generic engineering-vs-business role taxonomy — the authoritative
+# lists are `_DEFAULT_NEGATIVE_TITLES` and `_DEFAULT_TECHNICAL_QUALIFIERS` in
+# job_sift/profile.py. They are deliberately NOT copied here: a second copy of
+# a list is a second thing to keep in step, and this one had already drifted
+# from the code once before it was ever shipped.
+#
+# Setting a key REPLACES the default wholesale rather than adding to it.
+# Terms match on word boundaries; a trailing `*` means prefix, so
+# `business develop*` covers "Business Development" and "Business Developer".
+#
+# Two traps worth knowing if you write your own lists:
+#   - a qualifier must be NARROWER than the negatives it overrides. Bare
+#     "developer" cancels "business develop*".
+#   - "programm*" matches "Programme", so a graduate trainee PROGRAMME reads as
+#     technical. Use "programmer*" / "programming".
+# ---------------------------------------------------------------------------
+# scope_guard:
+#   # Non-technical business functions. Never admitted by the quick path.
+#   negative_titles:
+#     - sales
+#     - business develop*
+#     - talent acquisition
+#     - analyst
+#
+#   # Any of these anywhere in the title CANCELS a negative match above.
+#   # "Analyst" is a finance role; "Technology Analyst" is not.
+#   technical_qualifiers:
+#     - technolog*
+#     - engineer*
+#     - software
+
+# ---------------------------------------------------------------------------
+# Floor lane — a second, brand-agnostic admission lane running in parallel with
+# the prestige lane.
+#
+# The prestige lane asks "would this employer move the resume bullet?" and
+# discards everything that fails. The floor lane asks a different question — is
+# this technical, reachable, and short-term? — and does not care who is hiring.
+# Recruiter- and agency-posted contract roles are its main catch. The two
+# render under separate headings, and a listing qualifying for both stays in
+# the prestige lane, so nothing is ever listed twice.
+#
+# `locations` is the load-bearing field. Leave it empty (or set enabled: false)
+# and the lane admits NOTHING — the safe default, because a floor lane with no
+# geography is a firehose rather than a second net. If the key is absent
+# entirely, job-sift falls back to `location_allowlist` in
+# config/companies.yaml, which is where the ATS sources already read the same
+# information from; an existing deployment therefore picks the lane up without
+# editing a second file.
+#
+# `technical_terms` and `engagement_terms` are optional and default to the
+# built-in lists in job_sift/profile.py. Same rule as above: setting one
+# replaces the default rather than extending it.
+# ---------------------------------------------------------------------------
+floor_lane:
+  enabled: true
+
+  # Where you can actually take the work. Substring match, case-insensitive.
+  # A listing with NO location at all passes — an unstated location is a
+  # question for you, not a rejection.
+  #
+  # Kept deliberately generic here. Add your own city in config/profile.yaml.
+  locations:
+    - remote, worldwide
+    - global remote
+    # - hong kong
+
+  # What counts as technical is judged on the TITLE only: a sales listing whose
+  # body mentions "our engineering team" is still a sales listing.
+  #
+  # What counts as a flexible engagement (part time / contract / rolling /
+  # temporary / RA) is read from the title OR the body. A named monthly rate in
+  # the TITLE — "30-50K P/M", "HK$25,000/month" — also satisfies it on its own:
+  # in practice that is a contract-posting convention, and it is the strongest
+  # positive signal this lane has.
+  #
+  # technical_terms:  [engineer*, software, data scien*, ai, research assistant]
+  # engagement_terms: [part time, contract, rolling, temporary, intern]

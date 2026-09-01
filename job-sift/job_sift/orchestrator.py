@@ -20,6 +20,7 @@ from job_sift.open_roles import (
     age_roles,
     apply_status_overrides,
     closing_within,
+    in_lane,
     load_open_roles,
     parse_status_overrides,
     prune,
@@ -179,18 +180,24 @@ def _update_open_roles(
     existing = apply_status_overrides(stored, overrides)
     known_keys = {r.dedup_key for r in existing}
 
-    merged = upsert_roles(existing, [(l, r.reason) for l, r in surfaced], today)
+    # The lane travels with the role so the register can keep the two headings
+    # apart on days a listing's source does not re-list it.
+    merged = upsert_roles(existing, [(l, r.reason, r.lane) for l, r in surfaced], today)
     aged = age_roles(merged, today)
     kept = prune(aged, today)
 
     added = sum(1 for r in merged if r.dedup_key not in known_keys)
     updated = len(surfaced) - added
     expired = sum(1 for r in kept if r.status in ("expired", "stale"))
+    active = active_roles(kept)
     log.info(
-        "open-roles register: %d new, %d updated, %d open, %d expired/stale, %d closing this week",
+        "open-roles register: %d new, %d updated, %d open (%d prestige / %d floor), "
+        "%d expired/stale, %d closing this week",
         added,
         updated,
-        len(active_roles(kept)),
+        len(active),
+        len(in_lane(active, "prestige")),
+        len(in_lane(active, "floor")),
         expired,
         len(closing_within(kept, today)),
     )

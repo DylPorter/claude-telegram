@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
+from dataclasses import replace
+from functools import lru_cache
 from textwrap import dedent
 
 from job_sift.config import CLAUDE_BIN, JOB_SIFT_MODEL
-from job_sift.profile import profile_block
+from job_sift.profile import (
+    FloorLaneConfig,
+    ScopeGuardConfig,
+    floor_lane_config,
+    profile_block,
+    scope_guard_config,
+)
 from job_sift.schema import ClassifierResult, JobListing
 
 log = logging.getLogger(__name__)
@@ -150,6 +159,17 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
     if _boost_check(listing.employer):
         log.debug("boost-list hit for %s — running scope-only path", listing.employer)
         return classify_scope_only(listing, timeout=timeout)
+    negative = negative_title(listing.title)
+    if negative is not None:
+        # Same free rejection the batched path applies in `_route` — kept in
+        # step deliberately, because the two entry points must not disagree
+        # about what the sift admits.
+        log.debug("negative-title hit (%s) for %s", negative, listing.title)
+        return ClassifierResult(
+            prestige="skip",
+            scope="out_of_scope",
+            reason=f"non-technical function in title ({negative})",
+        )
 
     user_prompt = _build_user_prompt(listing)
     cmd = [
@@ -185,10 +205,13 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
 
     try:
         data = json.loads(stdout)
-        return ClassifierResult(
-            prestige=data["prestige"],
-            scope=data["scope"],
-            reason=data.get("reason", ""),
+        return assign_lane(
+            listing,
+            ClassifierResult(
+                prestige=data["prestige"],
+                scope=data["scope"],
+                reason=data.get("reason", ""),
+            ),
         )
     except (json.JSONDecodeError, KeyError) as exc:
         log.warning("classifier returned non-JSON for %s: %s", listing.employer, stdout[:200])
@@ -213,13 +236,135 @@ _SCOPE_KEYWORDS_OUT = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Term matching
+#
+# Every term list in this module is matched with a leading word boundary, and a
+# trailing one unless the term ends in `*`. Plain substring matching was not
+# good enough once the lists grew short tokens: "ai" hits "aid", "Retail" and
+# "Maintenance"; "ml" hits "HTML". A term class that fires on a third of the
+# corpus is not a signal.
+#
+# `*` means prefix — "engineer*" covers engineer / engineers / engineering,
+# "business develop*" covers development / developer — which is how a list stays
+# readable without enumerating every inflection.
+# ---------------------------------------------------------------------------
+
+_BOUNDARY_BEFORE = r"(?<![a-z0-9])"
+_BOUNDARY_AFTER = r"(?![a-z0-9])"
+
+
+@lru_cache(maxsize=512)
+def _term_pattern(term: str) -> re.Pattern[str]:
+    t = term.strip().lower()
+    prefix = t.endswith("*")
+    if prefix:
+        t = t[:-1]
+    return re.compile(_BOUNDARY_BEFORE + re.escape(t) + ("" if prefix else _BOUNDARY_AFTER))
+
+
+def _first_term(text: str, terms) -> str | None:
+    """The first term in `terms` that matches `text`, or None."""
+    if not text:
+        return None
+    low = text.lower()
+    for term in terms:
+        if _term_pattern(term).search(low):
+            return term
+    return None
+
+
+# A named monthly rate in the title — "30-50K P/M", "HK$25,000/month". In the
+# observed CEDARS corpus this is a recruiter/contract posting convention, and it
+# is the single strongest positive signal the floor lane has: an employer who
+# publishes the rate up front is quoting for a defined engagement.
+_RATE_RE = re.compile(
+    r"(?<![a-z0-9])"
+    r"(?:hk\$|us\$|\$)?\s*"
+    r"\d[\d,]*(?:\.\d+)?\s*k?"
+    r"(?:\s*(?:[-\u2013\u2014]|to)\s*\d[\d,]*(?:\.\d+)?\s*k?)?"
+    r"\s*(?:p\s*/\s*m|/\s*month|per\s+month|pm(?![a-z])|monthly)",
+    re.IGNORECASE,
+)
+# A match must look like MONEY, not like a clock. A currency symbol, a "k"
+# suffix or a four-figure sum all qualify; "interviews at 3pm" does not.
+_RATE_MONEY_RE = re.compile(
+    r"[$\u00a3\u20ac]"      # a currency symbol
+    r"|\d\s*k(?![a-z])"     # a "k" suffix \u2014 30K, 50 k
+    r"|\d{4}"               # a four-figure sum \u2014 25000
+    r"|\d,\d{3}",           # ...or its comma-grouped spelling \u2014 25,000
+    re.IGNORECASE,
+)
+
+
+def named_monthly_rate(text: str) -> str | None:
+    """Return the matched rate snippet if `text` quotes a monthly rate."""
+    if not text:
+        return None
+    for m in _RATE_RE.finditer(text):
+        snippet = m.group(0).strip()
+        if _RATE_MONEY_RE.search(snippet):
+            return snippet
+    return None
+
+
+def negative_title(title: str, cfg: ScopeGuardConfig | None = None) -> str | None:
+    """The non-technical business function this title names, or None.
+
+    A negative term is CANCELLED by any technical qualifier anywhere in the
+    title. That carve-out is what separates "Summer Analyst" (finance, out) from
+    "Technology Summer Analyst" (in), and it is applied to every negative term
+    rather than to "analyst" alone — "Software Engineer, Trading Systems" and
+    "Risk Engineering" are real engineering roles that a bare substring match on
+    "trading" / "risk" would have discarded.
+    """
+    cfg = cfg or scope_guard_config()
+    hit = _first_term(title, cfg.negative_titles)
+    if hit is None:
+        return None
+    if _first_term(title, cfg.technical_qualifiers) is not None:
+        return None
+    return hit
+
+
 def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
-    """Cheap keyword heuristic for obvious scope cases. Returns None if ambiguous."""
+    """Cheap keyword heuristic for obvious scope cases. Returns None if ambiguous.
+
+    Returning None means "ask the LLM" — it is a CANDIDATE verdict, not an
+    admission. That is the asymmetry this function is built around, and it was
+    not always here: an intern/summer/contract keyword in the title used to
+    return `in_scope` outright, so any title containing "Summer" at a boosted
+    employer was surfaced with nothing ever asking whether the role was
+    technical. Twenty of thirty-five entries in the live register were finance,
+    BD and sales roles admitted exactly that way.
+
+    So the two directions are deliberately NOT symmetric:
+
+    - REJECTING for free is safe and stays. A negative title (sales, BD, talent
+      acquisition, an unqualified "Analyst") and a seniority marker both resolve
+      `out_of_scope` here with no LLM call. Being wrong costs one missed
+      listing; the operator is not applying to a sales role either way.
+    - ADMITTING for free is not. A false admit lands in the digest and the
+      rolling register, and the whole point of the bot is to remove hand-
+      scanning. So the admit direction returns None and pays for the LLM.
+
+    Net cost is roughly a wash: the new free rejections roughly cancel the
+    demoted free admits, which is why the quick path still earns its place.
+    """
     title_l = listing.title.lower()
-    if any(k in title_l for k in _SCOPE_KEYWORDS_IN):
-        return ClassifierResult(prestige="prestige", scope="in_scope", reason="title contains intern/contract keyword")
+
+    negative = negative_title(listing.title)
+    if negative is not None:
+        return ClassifierResult(
+            prestige="prestige",
+            scope="out_of_scope",
+            reason=f"non-technical function in title ({negative})",
+        )
+
     if any(k in title_l for k in _SCOPE_KEYWORDS_OUT):
         return ClassifierResult(prestige="prestige", scope="out_of_scope", reason="title indicates senior/perm role")
+
+    # An intern/contract keyword is a CANDIDATE only — fall through to the LLM.
     return None
 
 
@@ -287,6 +432,122 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
 
 
 # ---------------------------------------------------------------------------
+# The floor lane
+#
+# The prestige lane answers "would this employer move the resume bullet?", and
+# it was the only question the sift asked. Over 87 digests that discarded 269
+# listings which were IN SCOPE and failed on brand alone — a staffing firm
+# advertising three AI platform engineers on a 12-month contract with the
+# monthly rate printed in the title, a university hiring a temporary research
+# assistant in data science, a small shop wanting a junior automation engineer
+# on a rolling contract. None of them are resume bullets. All of them are paid
+# technical work available now, which is a different thing the operator also
+# wants, and the strict-prestige heuristic had no way to express it.
+#
+# So the floor lane runs in PARALLEL and asks a brand-agnostic question:
+# technical, reachable, and a short/flexible engagement. It does not soften the
+# prestige lane by one point — that lane is untouched — and the two render under
+# separate headings so a floor match can never be mistaken for a prestige one.
+#
+# Deliberately looser than the prestige lane. A false positive here costs one
+# extra line under a clearly-labelled heading; a false negative costs a job the
+# operator could actually have taken.
+# ---------------------------------------------------------------------------
+
+
+def floor_reason(listing: JobListing, cfg: FloorLaneConfig | None = None) -> str | None:
+    """Why this listing qualifies for the floor lane, or None if it does not.
+
+    Three criteria, all required:
+
+    (a) TECHNICAL — judged on the title alone. A sales listing whose body
+        mentions "you'll work with our engineering team" is still a sales
+        listing, so the description does not get a vote here. A title naming a
+        non-technical business function (see `negative_title`) is disqualified
+        outright, whatever else it says.
+    (b) REACHABLE — the location matches the operator's configured geography,
+        or the listing carries no location at all. Empty-location passes
+        because that is already the convention upstream in the ATS adapters:
+        an unstated location is a question for the human, not a rejection.
+    (c) FLEXIBLE ENGAGEMENT — part-time / contract / rolling / temporary / RA,
+        read from the title OR the body, since a title like "AI &
+        Bioinformatics" often leaves the shape to the body.
+
+    A named monthly rate in the title satisfies (c) on its own. That is a
+    judgement call and worth stating: a permanent role can quote a monthly
+    salary too. But in the corpus this lane was built from, a rate in the TITLE
+    is a recruiter-posting convention for a defined engagement, and it is the
+    one signal that reliably separates the contract listings a brand filter was
+    throwing away. It is only ever an admission to the floor lane, never to the
+    prestige one.
+    """
+    cfg = cfg or floor_lane_config()
+    if not cfg.active:
+        return None
+
+    title = listing.title or ""
+
+    # (a) technical
+    if negative_title(title) is not None:
+        return None
+    tech = _first_term(title, cfg.technical_terms)
+    if tech is None:
+        return None
+
+    # (b) reachable
+    location = (listing.location or "").strip()
+    if location and _first_term(location, cfg.locations) is None:
+        return None
+
+    # (c) flexible engagement
+    rate = named_monthly_rate(title)
+    body = f"{title}\n{listing.description or ''}"[:4000]
+    engagement = _first_term(body, cfg.engagement_terms)
+    if engagement is None and rate is None:
+        return None
+
+    shape = engagement or "named monthly rate"
+    detail = f", {rate}" if rate else ""
+    where = location or "location unstated"
+    return f"floor lane: technical ({tech}) · {where} · {shape}{detail}"
+
+
+def assign_lane(
+    listing: JobListing, result: ClassifierResult, cfg: FloorLaneConfig | None = None
+) -> ClassifierResult:
+    """Stamp the admission lane onto a verdict. Idempotent.
+
+    THIS IS THE OVERLAP RULE, and it is the reason a listing can never be
+    rendered twice. The two lanes genuinely overlap — a prestige employer
+    offering a contract role satisfies both — so `lane` is a single value
+    assigned by precedence rather than a set of tags:
+
+        prestige wins.
+
+    A listing the prestige lane already admits stays in the prestige lane and
+    is never re-examined here. Only a listing prestige REJECTED (marginal or
+    skip) is offered to the floor lane. Rendering then partitions on `lane`, so
+    every surfaced listing lands under exactly one heading.
+
+    Prestige-wins rather than floor-wins because the two lanes are not equal in
+    what they claim. "Anthropic is hiring" is strictly more informative than
+    "someone in Hong Kong wants a contractor", and demoting it into the floor
+    section would bury the signal the digest exists to deliver.
+    """
+    if result.scope != "in_scope":
+        return result  # out of scope is out of scope in both lanes
+    if result.prestige == "prestige":
+        return result  # prestige lane already has it
+    if result.lane == "floor":
+        return result  # already stamped; re-stamping would duplicate the reason
+    reason = floor_reason(listing, cfg)
+    if reason is None:
+        return result
+    combined = f"{result.reason} · {reason}" if result.reason else reason
+    return replace(result, lane="floor", reason=combined)
+
+
+# ---------------------------------------------------------------------------
 # Batched classification
 #
 # The single-listing path above spawns one `claude` CLI per listing. The CLI
@@ -341,6 +602,20 @@ def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
         if quick is not None:
             return quick, "done"
         return None, "scope"
+
+    # The scope guard is not a property of prestige, so it applies to the full
+    # lane as well: a sales or talent-acquisition title is out of scope whoever
+    # posted it, and paying for an LLM call to be told so is waste. This is
+    # where most of the cost that the demoted keyword-admits gave up comes back
+    # — the full lane is the busy one (CEDARS + LinkedIn).
+    negative = negative_title(listing.title)
+    if negative is not None:
+        return (
+            ClassifierResult(
+                "skip", "out_of_scope", f"non-technical function in title ({negative})"
+            ),
+            "done",
+        )
 
     return None, "full"
 
@@ -465,4 +740,10 @@ def classify_batch(listings: list[JobListing]) -> list[ClassifierResult]:
             for j, i in enumerate(chunk):
                 results[i] = verdicts[j]
 
-    return [r if r is not None else ClassifierResult("skip", "out_of_scope", "unclassified") for r in results]
+    # Lane assignment is the LAST step, and it runs over every verdict —
+    # heuristic and LLM alike — so there is exactly one place that decides which
+    # heading a listing renders under. See `assign_lane` for the overlap rule.
+    return [
+        assign_lane(listing, r if r is not None else ClassifierResult("skip", "out_of_scope", "unclassified"))
+        for listing, r in zip(listings, results)
+    ]

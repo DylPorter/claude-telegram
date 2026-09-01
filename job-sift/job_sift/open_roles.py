@@ -33,6 +33,11 @@ STICKY_STATUSES = frozenset({"applied", "dismissed"})
 
 VALID_STATUSES = frozenset({"open", "expired", "stale", "applied", "dismissed"})
 
+# Which classifier lane admitted the role. Stored so the register can render the
+# two lanes under separate headings without re-running the classifier, and so a
+# role keeps its heading on the days its source does not re-list it.
+VALID_LANES = frozenset({"prestige", "floor"})
+
 
 @dataclass
 class OpenRole:
@@ -48,6 +53,9 @@ class OpenRole:
     last_seen: str  # ISO date — bumped every run the listing is still present
     reason: str
     status: str = "open"
+    # Defaults to "prestige" so a register written before the floor lane
+    # existed loads with every role under the heading it was surfaced under.
+    lane: str = "prestige"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -56,6 +64,7 @@ class OpenRole:
     def from_dict(cls, d: dict) -> OpenRole:
         """Tolerant of missing/extra keys so a hand-edited state file still loads."""
         status = d.get("status", "open")
+        lane = d.get("lane", "prestige")
         return cls(
             dedup_key=d["dedup_key"],
             source=d.get("source", ""),
@@ -67,6 +76,7 @@ class OpenRole:
             last_seen=d.get("last_seen", ""),
             reason=d.get("reason", ""),
             status=status if status in VALID_STATUSES else "open",
+            lane=lane if lane in VALID_LANES else "prestige",
         )
 
     @property
@@ -101,7 +111,7 @@ def _parse_date(value: str) -> date | None:
 
 def upsert_roles(
     existing: list[OpenRole],
-    newly_surfaced: list[tuple[JobListing, str]],
+    newly_surfaced: list[tuple[JobListing, str]] | list[tuple[JobListing, str, str]],
     today: date,
 ) -> list[OpenRole]:
     """Merge this run's surfaced listings into the register.
@@ -112,6 +122,18 @@ def upsert_roles(
 
     New key → append as `open` with `first_seen == last_seen == today`.
     Returns a NEW list; `existing` is not mutated.
+
+    Each entry is `(listing, reason)` or `(listing, reason, lane)`. The lane is
+    optional because it is not the register's business to know how many lanes
+    the classifier has — a caller that does not supply one gets "prestige",
+    which is what every caller meant before there was a second lane.
+
+    THE LANE IS NOT PART OF THE KEY. `dedup_key` is, and it does not mention
+    the lane, so a role that moves between lanes — the classifier gets better,
+    an employer gets added to the boost list — is still the SAME record. Its
+    `first_seen` survives, and so does an `applied`/`dismissed` mark the
+    operator made under the old heading. A lane change re-files a role; it must
+    never resurrect a decision he already took.
     """
     iso = today.isoformat()
     merged = [
@@ -119,7 +141,9 @@ def upsert_roles(
     ]
     by_key = {r.dedup_key: r for r in merged}
 
-    for listing, reason in newly_surfaced:
+    for entry in newly_surfaced:
+        listing, reason, *rest = entry
+        lane = rest[0] if rest and rest[0] in VALID_LANES else "prestige"
         key = listing.dedup_key
         deadline = listing.deadline.isoformat() if listing.deadline else None
         current = by_key.get(key)
@@ -135,6 +159,7 @@ def upsert_roles(
                 last_seen=iso,
                 reason=reason,
                 status="open",
+                lane=lane,
             )
             merged.append(role)
             by_key[key] = role
@@ -146,6 +171,7 @@ def upsert_roles(
         current.apply_url = listing.apply_url or current.apply_url
         current.deadline = deadline if deadline is not None else current.deadline
         current.reason = reason or current.reason
+        current.lane = lane
         if current.status not in STICKY_STATUSES:
             # Seen again today → it is live, whatever the ager decided earlier.
             current.status = "open"
@@ -195,6 +221,15 @@ def _sort_key(role: OpenRole) -> tuple[int, date, str]:
 def active_roles(roles: list[OpenRole]) -> list[OpenRole]:
     """Only `open` roles, deadline-ascending with undated ones last."""
     return sorted((r for r in roles if r.status == "open"), key=_sort_key)
+
+
+def in_lane(roles: list[OpenRole], lane: str) -> list[OpenRole]:
+    """Roles belonging to one lane, order preserved.
+
+    A filter rather than a grouping so callers keep whatever sort they already
+    applied — the register is deadline-sorted, and re-grouping would lose that.
+    """
+    return [r for r in roles if r.lane == lane]
 
 
 def closing_within(roles: list[OpenRole], today: date, days: int = 7) -> list[OpenRole]:

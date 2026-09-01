@@ -17,6 +17,7 @@ Keep personal specifics OUT of the example file. That is the whole point.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -76,3 +77,250 @@ def profile_block() -> dict[str, str]:
             or "assume permanent full-time and mark out_of_scope"
         ).strip(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Classifier heuristics config
+#
+# Both of the structures below are TERM LISTS, and they live here rather than in
+# classifier.py on purpose: classifier.py owns the *mechanism* (how a term is
+# matched, what a match implies, which lane wins a tie), and this module owns
+# *who the digest is for*. An operator retunes the sift by editing YAML, not by
+# editing the matcher.
+#
+# The defaults are a generic engineering-vs-business role taxonomy — true of any
+# software candidate, personal to none — so an unconfigured clone still behaves
+# sensibly. The one genuinely personal axis, geography, has NO code default; see
+# `_default_floor_locations`.
+# ---------------------------------------------------------------------------
+
+# Non-technical business functions. A title matching one of these is never
+# admitted by the cheap keyword path — "Summer Analyst" at a bank passes the
+# intern-keyword test while being nothing like an engineering role.
+_DEFAULT_NEGATIVE_TITLES = (
+    "strategy",
+    "business develop*",
+    "sales",
+    "talent acquisition",
+    "trading",
+    "trainee",
+    "asset management",
+    "wealth management",
+    "risk",
+    "finance",
+    "accounting",
+    "marketing",
+    "human resources",
+    "recruit*",
+    "analyst",
+)
+
+# Words that RESCUE a negative title. "Analyst" alone is a finance role;
+# "Technology Analyst" is not. The carve-out is applied to every negative term,
+# not just "analyst", because several of them ("trading", "risk", "finance")
+# legitimately qualify an engineering role — "Software Engineer, Trading
+# Systems" must not be thrown away by a substring match on "trading".
+_DEFAULT_TECHNICAL_QUALIFIERS = (
+    "technology",
+    "technolog*",
+    "engineer*",
+    "software",
+    # NOT bare "developer": it is a substring of "Business Developer", so it
+    # cancelled the very negative term it sits next to. A qualifier must be
+    # narrower than the negatives it overrides. "Software Developer" is caught
+    # by "software" already.
+    "software developer",
+    "development engineer",
+    "data scien*",
+    "data engineer*",
+    "machine learning",
+    "computer scien*",
+    # NOT "programm*": that matches "Programme", the British spelling used by
+    # every graduate scheme in Hong Kong, so "Graduate Trainee Programme" would
+    # cancel its own negative term and walk straight through the guard.
+    "programmer*",
+    "programming",
+)
+
+# What makes a role technical enough for the floor lane. Judged on the TITLE
+# only — a sales listing whose body mentions "our engineering team" is still a
+# sales listing.
+_DEFAULT_TECHNICAL_TERMS = (
+    "engineer*",
+    "software",
+    "developer",
+    "programmer*",
+    "programming",
+    "data scien*",
+    "data engineer*",
+    "data analy*",
+    "machine learning",
+    "deep learning",
+    "ai",
+    "a.i.",
+    "artificial intelligence",
+    "ml",
+    "llm",
+    "nlp",
+    "computer vision",
+    "bioinformatic*",
+    "automation",
+    "devops",
+    "backend",
+    "back-end",
+    "frontend",
+    "front-end",
+    "full stack",
+    "full-stack",
+    "python",
+    "research assistant",
+    "technical",
+    "technolog*",
+    "it support",
+    "platform support",
+    "qa engineer",
+    "test engineer",
+)
+
+# What makes an engagement flexible enough for the floor lane: the part-time /
+# contract / rolling / RA shapes the prestige lane was never built to catch.
+_DEFAULT_ENGAGEMENT_TERMS = (
+    "part time",
+    "part-time",
+    "parttime",
+    "contract",
+    "contractor",
+    "contractual",
+    "rolling",
+    "temporary",
+    "temp",
+    "fixed term",
+    "fixed-term",
+    "freelance",
+    "casual",
+    "research assistant",
+    "intern",
+    "internship",
+    "placement",
+    "secondment",
+    "locum",
+    "month contract",
+    "months contract",
+)
+
+
+def _terms(value, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalise a YAML term list, falling back to `default` when unset.
+
+    An explicitly EMPTY list is honoured as empty — that is how an operator
+    turns a term class off — but a missing key falls back. `None` and a bare
+    string are both tolerated because hand-edited YAML produces both.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return default
+    return tuple(t for t in (str(v).strip().lower() for v in value) if t)
+
+
+@dataclass(frozen=True)
+class ScopeGuardConfig:
+    """Terms for the cheap pre-LLM scope guard (see classifier._negative_title)."""
+
+    negative_titles: tuple[str, ...] = _DEFAULT_NEGATIVE_TITLES
+    technical_qualifiers: tuple[str, ...] = _DEFAULT_TECHNICAL_QUALIFIERS
+
+
+@dataclass(frozen=True)
+class FloorLaneConfig:
+    """Terms for the brand-agnostic floor lane (see classifier.floor_reason).
+
+    `locations` is the load-bearing field: with nothing to match on, the lane
+    admits nothing and the digest keeps its pre-existing prestige-only shape.
+    That is the intended fail-safe — a floor lane with no geography would be an
+    unbounded firehose, not a useful second net.
+    """
+
+    enabled: bool = True
+    locations: tuple[str, ...] = ()
+    technical_terms: tuple[str, ...] = _DEFAULT_TECHNICAL_TERMS
+    engagement_terms: tuple[str, ...] = _DEFAULT_ENGAGEMENT_TERMS
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and bool(self.locations) and bool(self.technical_terms)
+
+
+def _default_floor_locations() -> tuple[str, ...]:
+    """Geography for the floor lane when `profile.yaml` does not set it.
+
+    Falls back to `config/companies.yaml`'s `location_allowlist`, which is the
+    repo's ONE existing place-of-work config and is already what every ATS
+    source filters on. Reusing it means the operator's geography is stated once,
+    an existing deployment picks the floor lane up without editing a second
+    file, and no city name gets hardcoded into the classifier.
+
+    Read here with a local loader rather than importing
+    `sources._ats_common.load_location_allowlist`: the config surface should not
+    depend on a source adapter, and this way the fallback keeps working if the
+    ATS layer is refactored. Same defensive parsing as that function — blank
+    entries are dropped, because `"" in anything` is True and one stray empty
+    string would silently disable the whole location criterion.
+    """
+    path = PROJECT_ROOT / "config" / "companies.yaml"
+    if not path.exists():
+        return ()
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception as exc:
+        log.warning("failed to parse companies.yaml for floor-lane locations: %s", exc)
+        return ()
+    raw = data.get("location_allowlist") or []
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(t for t in (str(s).strip().lower() for s in raw) if t)
+
+
+@lru_cache(maxsize=1)
+def scope_guard_config() -> ScopeGuardConfig:
+    cfg = load_profile().get("scope_guard") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return ScopeGuardConfig(
+        negative_titles=_terms(cfg.get("negative_titles"), _DEFAULT_NEGATIVE_TITLES),
+        technical_qualifiers=_terms(
+            cfg.get("technical_qualifiers"), _DEFAULT_TECHNICAL_QUALIFIERS
+        ),
+    )
+
+
+@lru_cache(maxsize=1)
+def floor_lane_config() -> FloorLaneConfig:
+    cfg = load_profile().get("floor_lane") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    locations = _terms(cfg.get("locations"), ())
+    if not locations:
+        locations = _default_floor_locations()
+    return FloorLaneConfig(
+        enabled=bool(cfg.get("enabled", True)),
+        locations=locations,
+        technical_terms=_terms(cfg.get("technical_terms"), _DEFAULT_TECHNICAL_TERMS),
+        engagement_terms=_terms(cfg.get("engagement_terms"), _DEFAULT_ENGAGEMENT_TERMS),
+    )
+
+
+def reset_config_cache() -> None:
+    """Drop every memoized profile read. For tests and one-off reconfiguration.
+
+    Tolerant of a reader having been replaced by something uncached — a test
+    that monkeypatches `load_profile` with a plain function still needs the
+    DOWNSTREAM caches dropped, and blowing up on the one that no longer has a
+    `cache_clear` would leave them stale.
+    """
+    for reader in (load_profile, scope_guard_config, floor_lane_config):
+        clear = getattr(reader, "cache_clear", None)
+        if clear is not None:
+            clear()

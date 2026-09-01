@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from job_sift.open_roles import OpenRole, active_roles, closing_within
+from job_sift.open_roles import OpenRole, active_roles, closing_within, in_lane
+from job_sift.profile import floor_lane_config
 from job_sift.schema import ClassifierResult, JobListing
 
 
@@ -20,6 +21,29 @@ def _fmt_listing(listing: JobListing) -> str:
         parts.append(f"⏰ deadline {listing.deadline.isoformat()}")
     parts.append(f"[apply]({listing.apply_url})")
     return "\n".join(parts)
+
+
+# The two lanes are rendered under separate headings everywhere — digest,
+# archive and register — and never merged into one list. That separation IS the
+# feature: the floor lane is deliberately looser (any employer, as long as the
+# work is technical, reachable and short-term), so folding its matches in with
+# the prestige ones would spend the prestige lane's credibility on them. A
+# reader must be able to tell at a glance which question a line answered.
+#
+# Nothing appears twice: `ClassifierResult.lane` and `OpenRole.lane` hold ONE
+# value each, assigned by precedence in `classifier.assign_lane`, so these
+# partitions are disjoint by construction rather than by the caller being
+# careful.
+_FLOOR_HEADER = "🧱 *Floor lane — technical contract / part-time, any employer:*"
+
+
+def _split_lanes(
+    items: list[tuple[JobListing, ClassifierResult]],
+) -> tuple[list[tuple[JobListing, ClassifierResult]], list[tuple[JobListing, ClassifierResult]]]:
+    """Partition surfaced listings into (prestige lane, floor lane)."""
+    prestige = [pair for pair in items if pair[1].lane != "floor"]
+    floor = [pair for pair in items if pair[1].lane == "floor"]
+    return prestige, floor
 
 
 def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
@@ -141,14 +165,23 @@ def render(
             out.append(health)
         return _prepend_alarm(out, staleness_alarm, drop_notice)
 
+    prestige_lane, floor_lane = _split_lanes(surfaced)
+
     messages: list[str] = []
     messages.append(
         f"📋 *Job sift — {today.isoformat()}*\n"
-        f"{len(surfaced)} new prestige match"
-        f"{'es' if len(surfaced) != 1 else ''} ↓"
+        f"{len(prestige_lane)} new prestige match"
+        f"{'es' if len(prestige_lane) != 1 else ''}"
+        + (f" · {len(floor_lane)} floor" if floor_lane else "")
+        + " ↓"
     )
-    for listing, _ in surfaced:
+    for listing, _ in prestige_lane:
         messages.append(_fmt_listing(listing))
+
+    if floor_lane:
+        messages.append(_FLOOR_HEADER)
+        for listing, _ in floor_lane:
+            messages.append(_fmt_listing(listing))
 
     near_miss_bubble = _fmt_near_misses(skipped)
     if near_miss_bubble:
@@ -165,6 +198,22 @@ def render(
         f"{len(surfaced)} surfaced._"
     )
     return _prepend_alarm(messages, staleness_alarm, drop_notice)
+
+
+def _archive_entries(items: list[tuple[JobListing, ClassifierResult]]) -> list[str]:
+    """The per-listing block shared by both lane sections of the archive."""
+    lines: list[str] = []
+    for listing, result in items:
+        lines.append(f"- **{listing.employer}** — {listing.title}")
+        lines.append(f"  - Apply: {listing.apply_url}")
+        if listing.deadline:
+            lines.append(f"  - Deadline: {listing.deadline.isoformat()}")
+        lines.append(
+            f"  - Verdict: lane={result.lane}, prestige={result.prestige}, scope={result.scope}"
+        )
+        lines.append(f"  - Reason: {result.reason}")
+        lines.append("")
+    return lines
 
 
 def render_vault_archive(
@@ -218,20 +267,26 @@ def render_vault_archive(
             lines.append(f"- **{src}** — {msg}")
         lines.append("")
 
-    if surfaced:
-        lines.append("## Surfaced (prestige + in-scope)")
+    prestige_lane, floor_lane = _split_lanes(surfaced)
+
+    if prestige_lane:
+        lines.append("## Surfaced — prestige lane (prestige + in-scope)")
         lines.append("")
-        for listing, result in surfaced:
-            lines.append(f"- **{listing.employer}** — {listing.title}")
-            lines.append(f"  - Apply: {listing.apply_url}")
-            if listing.deadline:
-                lines.append(f"  - Deadline: {listing.deadline.isoformat()}")
-            lines.append(f"  - Verdict: prestige={result.prestige}, scope={result.scope}")
-            lines.append(f"  - Reason: {result.reason}")
-            lines.append("")
+        lines.extend(_archive_entries(prestige_lane))
     else:
-        lines.append("## Surfaced")
+        lines.append("## Surfaced — prestige lane")
         lines.append("")
+        lines.append("_None today._")
+        lines.append("")
+
+    # Written even when empty, for the same reason the register keeps its empty
+    # sections explicit: a missing heading reads as a rendering bug, an explicit
+    # "none" reads as a fact about the day.
+    lines.append("## Surfaced — floor lane (technical contract / part-time, any employer)")
+    lines.append("")
+    if floor_lane:
+        lines.extend(_archive_entries(floor_lane))
+    else:
         lines.append("_None today._")
         lines.append("")
 
@@ -249,8 +304,18 @@ def render_vault_archive(
 
 
 def _fmt_open_role_entry(role: OpenRole, today: date) -> list[str]:
-    """One register entry, plus the status marker the operator can hand-edit."""
-    lines = [f"- **{role.employer}** — {role.title}"]
+    """One register entry, plus the status marker the operator can hand-edit.
+
+    The status marker is UNCHANGED by the lane split — it still holds exactly
+    `status` and `dedup_key`, in the same `<!-- status:open cedars:123 -->`
+    shape `parse_status_overrides` reads. That is deliberate: the lane is the
+    classifier's opinion and may change between runs, the marker is the
+    operator's decision and may not, so the lane is kept out of the key the
+    decision is filed under. A role that moves lanes carries its `applied` mark
+    with it.
+    """
+    lane_tag = " `[floor]`" if role.lane == "floor" else ""
+    lines = [f"- **{role.employer}** — {role.title}{lane_tag}"]
     lines.append(f"  <!-- status:{role.status} {role.dedup_key} -->")
     if role.deadline:
         left = role.days_left(today)
@@ -307,14 +372,35 @@ def render_open_roles(roles: list[OpenRole], today: date) -> str:
         lines.append("_Nothing closing in the next 7 days._")
         lines.append("")
 
-    lines.append("## 📋 Open")
+    lines.append("## 📋 Open — prestige lane")
     lines.append("")
-    if rest:
-        for role in rest:
+    prestige_rest = in_lane(rest, "prestige")
+    if prestige_rest:
+        for role in prestige_rest:
             lines.extend(_fmt_open_role_entry(role, today))
             lines.append("")
     else:
         lines.append("_No other open roles._")
+        lines.append("")
+
+    lines.append("## 🧱 Open — floor lane")
+    lines.append("")
+    # Geography comes from the profile, not from this string. Writing "Hong
+    # Kong" here would put the operator's criteria in the renderer, which is
+    # exactly the split `config/profile.yaml` exists to prevent.
+    where = ", ".join(floor_lane_config().locations) or "any configured location"
+    lines.append(
+        f"_Technical, short-term, and in scope for: {where} — regardless of who "
+        "is hiring. Deliberately a looser net than the prestige lane above._"
+    )
+    lines.append("")
+    floor_rest = in_lane(rest, "floor")
+    if floor_rest:
+        for role in floor_rest:
+            lines.extend(_fmt_open_role_entry(role, today))
+            lines.append("")
+    else:
+        lines.append("_No open floor-lane roles._")
         lines.append("")
 
     lines.append("## ✅ Applied")
