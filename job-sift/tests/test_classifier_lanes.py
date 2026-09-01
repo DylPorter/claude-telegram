@@ -27,6 +27,8 @@ import pytest
 
 from job_sift import profile as profile_mod
 from job_sift.classifier import (
+    _hard_marginal_check,
+    _hard_skip_check,
     _route,
     _scope_quick_classify,
     assign_lane,
@@ -46,6 +48,11 @@ from job_sift.render import render, render_open_roles, render_vault_archive
 from job_sift.schema import ClassifierResult, JobListing
 
 TODAY = date(2026, 9, 1)
+
+# Captured at import time, before the autouse `_profile` fixture below ever
+# monkeypatches `profile_mod.load_profile` out from under it. One test class
+# needs the REAL loader — see `TestFloorLaneConfigAgainstTheShippedExample`.
+_REAL_LOAD_PROFILE = profile_mod.load_profile
 
 
 def _listing(
@@ -217,15 +224,19 @@ class TestQuickPathStillEarnsItsPlace:
 
         Anthropic alone lists ~389 roles, so "just classify everything" is not
         a free option. No real classifier_log.jsonl exists in a fresh
-        checkout to replay, so this is measured on the corpus below instead:
-        on it the free-resolution rate actually goes DOWN (59% -> 45%, see
-        README "Two admission lanes") because several previously-free admits
-        (bare "Software Engineer Intern" titles with no negative term to
-        reject on) now fall through to the LLM. The new free rejections claw
-        some of that back but do not fully offset it on this small, intern-
-        heavy sample. This test only pins the floor on how bad that gets —
-        not every listing may end up paid — pending a real log to measure the
-        production mix against.
+        checkout to replay, so this corpus only pins the floor on how bad the
+        boosted-employer case gets — it does NOT stand in for the production
+        mix. This corpus runs every title through `_scope_quick_classify` as
+        if it came from a boosted employer, which is the one case where the
+        demoted keyword-admit actually costs something; on it, free-resolution
+        goes DOWN, 59% -> 45%. But most of a real day's titles are NOT from a
+        boosted employer, and for those the only thing this change adds is a
+        new free rejection in `_route`'s non-boosted branch. Measured against
+        Dylan's real 45-entry register (not reproduced here — personal
+        application data), free-resolution goes UP, 40.0% -> 46.7%. See
+        README "Two admission lanes" for both numbers side by side and why
+        they disagree — employer attribution, not this corpus, is what
+        decides the sign.
         """
         corpus = [
             # newly free — non-technical functions, previously an LLM call each
@@ -312,6 +323,22 @@ class TestFloorLaneAdmission:
             ("Business Development Intern", "Hong Kong", "negative title disqualifies outright"),
             ("Data Scientist (6-month contract)", "London, United Kingdom", "not reachable"),
             ("Office Administrator (Part time)", "Hong Kong", "not technical"),
+            # Over-admission found in review: bare "ai" / "technical" /
+            # "automation" / "research assistant" in _DEFAULT_TECHNICAL_TERMS
+            # let these six through on the word alone, despite none being an
+            # engineering-shaped role. All satisfy the engagement criterion
+            # (Contract / Freelance / Temporary / Part time) so the technical
+            # criterion is the only thing that should be gating them.
+            ("Legal Counsel, AI Policy (Contract)", "Hong Kong", "policy, not engineering — bare 'ai' used to admit"),
+            ("AI Content Moderator, Contract", "Hong Kong", "content moderation — bare 'ai' used to admit"),
+            ("AI Data Annotator - Freelance", "Hong Kong", "data labeling — bare 'ai' used to admit"),
+            ("Technical Writer (6-month contract)", "Hong Kong", "writing — bare 'technical' used to admit"),
+            (
+                "Research Assistant (History Department), Temporary",
+                "Hong Kong",
+                "non-technical RA — bare 'research assistant' used to admit",
+            ),
+            ("Office Automation Assistant (Part time)", "Hong Kong", "office admin — bare 'automation' used to admit"),
         ],
     )
     def test_the_lane_is_looser_but_not_open(self, title, location, why):
@@ -609,3 +636,122 @@ class TestTermMatchingIsWordBounded:
         assert negative_title("Business Development Intern", cfg) == "business develop*"
         assert negative_title("Business Developer", cfg) == "business develop*"
         assert negative_title("Business Analyst", cfg) is None
+
+
+class TestFloorLaneConfigAgainstTheShippedExample:
+    """floor_lane_config() against the REAL committed profile.yaml.example,
+    not the fixture in `_profile` above.
+
+    CRITICAL bug found in review: an earlier draft of profile.yaml.example
+    shipped a non-empty `floor_lane.locations` (a remote-only example value).
+    Since that file doubles as the live fallback profile for any checkout
+    with no config/profile.yaml (see PROFILE_EXAMPLE_PATH in
+    job_sift/profile.py), a non-empty key there means `floor_lane_config()`
+    never reaches `_default_floor_locations()` — the companies.yaml fallback
+    the README and profile.py both promise. The floor lane was inert for a
+    fresh clone, and specifically inert against every one of issue #2's own
+    acceptance examples. Every floor-lane test above passed anyway, because
+    the autouse `_profile` fixture monkeypatches `load_profile` with its own
+    config that only exists inside the test suite — exactly the kind of test
+    proving a feature works against a world that isn't real. This class
+    forces the REAL loader (`_REAL_LOAD_PROFILE`, captured at import time,
+    before `_profile` ever monkeypatches it) so a regression here fails.
+    """
+
+    @pytest.fixture
+    def real_profile(self, monkeypatch):
+        """Undo the module's autouse fixture for the duration of one test."""
+        monkeypatch.setattr(profile_mod, "load_profile", _REAL_LOAD_PROFILE)
+        # Force the "fresh clone" case even if this machine happens to have a
+        # real config/profile.yaml — the example file is what's being tested.
+        monkeypatch.setattr(
+            profile_mod, "PROFILE_PATH", profile_mod.PROJECT_ROOT / "config" / "__does_not_exist__.yaml"
+        )
+        profile_mod.reset_config_cache()
+        _REAL_LOAD_PROFILE.cache_clear()
+        yield
+        profile_mod.reset_config_cache()
+        _REAL_LOAD_PROFILE.cache_clear()
+
+    def test_the_shipped_example_is_not_inert(self, real_profile):
+        cfg = profile_mod.floor_lane_config()
+        assert cfg.active, "floor lane is inert under the shipped default config"
+        assert cfg.locations, "no locations resolved — the companies.yaml fallback did not fire"
+
+    @pytest.mark.parametrize(
+        "employer, title",
+        [
+            ("Argyll Scott", "3x AI Platform Support Engineer / 12-month contract / FS / 30-50K P/M"),
+            ("GUTolution", "Part time – AI & Bioinformatics"),
+            ("ConnectedSolutions", "Junior Automation Engineer (Rolling Contract)"),
+            ("Aster Recruiting", "Data Scientist, 6-12 month contract"),
+            ("HK Metropolitan University", "Temporary Research Assistant (AI / Data Science)"),
+        ],
+    )
+    def test_every_issue_2_example_admits_under_the_shipped_config(self, real_profile, employer, title):
+        """The exact regression: all five of issue #2's own acceptance
+        examples, run against config/profile.yaml.example as committed, not
+        a fixture standing in for it."""
+        cfg = profile_mod.floor_lane_config()
+        listing = _listing(title, employer=employer, location="Hong Kong")
+        assert floor_reason(listing, cfg) is not None, f"{employer} — {title!r} not admitted by the shipped config"
+
+
+class TestFloorLaneIsBrandAgnostic:
+    """IMPORTANT bug found in review: `_hard_skip_check` / `_hard_marginal_check`
+    stamped `scope="out_of_scope"` for domain-wrong and crypto/marginal
+    employers — a PRESTIGE opinion about the employer recorded as a SCOPE
+    verdict about the role. `assign_lane` only offers a listing to the floor
+    lane when `scope == "in_scope"`, so Coinbase, Binance, Hermes and every
+    other hard-skip/hard-marginal employer never reached `floor_reason` even
+    when the listing itself was a perfectly good technical/contract match —
+    directly contradicting issue #2's "regardless of employer brand". Fixed
+    in `_employer_gated_result`: scope is now decided by the same free
+    `negative_title` guard the full LLM lane uses, not defaulted.
+    """
+
+    def test_a_hard_skip_employer_still_reaches_the_floor_lane(self):
+        listing = _listing(
+            "AI Platform Engineer, Contract", employer="Hermes International", location="Hong Kong"
+        )
+        assert _hard_skip_check("Hermes International")  # sanity: this employer IS hard-skip
+        result, route = _route(listing)
+        assert route == "done"
+        assert result.prestige == "skip"  # prestige lane verdict is UNCHANGED
+        surfaced = assign_lane(listing, result)
+        assert surfaced.lane == "floor"
+        assert surfaced.surface is True
+
+    @pytest.mark.parametrize("employer", ["Coinbase", "Binance"])
+    def test_a_hard_marginal_employer_still_reaches_the_floor_lane(self, employer):
+        listing = _listing("Data Engineer (6-month contract)", employer=employer, location="Hong Kong")
+        assert _hard_marginal_check(employer)  # sanity: this employer IS hard-marginal
+        result, route = _route(listing)
+        assert route == "done"
+        assert result.prestige == "marginal"  # prestige lane verdict is UNCHANGED
+        surfaced = assign_lane(listing, result)
+        assert surfaced.lane == "floor"
+        assert surfaced.surface is True
+
+    def test_the_prestige_lane_verdict_is_unchanged_for_these_employers(self):
+        """The instruction was explicit: fix the floor lane, do not change
+        what the prestige lane does with hard-skip/hard-marginal employers.
+        `result.surface` under the OLD `lane` default (never stamped floor)
+        must still be False — i.e. these never surface in the prestige lane,
+        exactly as before this fix."""
+        listing = _listing("AI Platform Engineer, Contract", employer="Hermes International")
+        result, _ = _route(listing)
+        assert result.prestige != "prestige"
+        assert ClassifierResult(result.prestige, result.scope, result.reason).surface is False
+
+    def test_a_hard_skip_employer_with_a_negative_title_is_still_rejected_outright(self):
+        """The floor lane is looser, not blind: a genuinely non-technical
+        title at a hard-skip employer must not be rescued into the floor
+        lane just because the employer check ran first."""
+        listing = _listing("Sales Executive, Luxury Retail", employer="Hermes International", location="Hong Kong")
+        result, route = _route(listing)
+        assert route == "done"
+        assert result.scope == "out_of_scope"
+        surfaced = assign_lane(listing, result)
+        assert surfaced.lane != "floor"
+        assert surfaced.surface is False

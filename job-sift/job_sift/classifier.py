@@ -142,6 +142,39 @@ def _hard_marginal_check(employer: str) -> bool:
     return any(needle in e for needle in _PRESTIGE_HARD_MARGINAL_SUBSTRINGS)
 
 
+def _employer_gated_result(prestige: str, reason: str, listing: JobListing) -> ClassifierResult:
+    """Free-rejection verdict for an employer the prestige lane excludes on
+    brand/domain grounds (hard-skip / hard-marginal).
+
+    `scope` here used to be hardcoded to `out_of_scope` — a convenience,
+    because nothing downstream cared what it said as long as `prestige`
+    wasn't "prestige". That stopped being harmless once `assign_lane` started
+    reading `scope` to decide floor-lane eligibility: a prestige/domain
+    opinion about the EMPLOYER was being recorded as a scope verdict about
+    the ROLE, and silently vetoed the floor lane for it — Coinbase, Binance,
+    Hermes and every other hard-skip/hard-marginal employer never reached
+    `floor_reason` even when the listing itself was a perfectly good
+    technical/contract match. Issue #2 wants the floor lane to run
+    "regardless of employer brand", which has to include these employers too.
+
+    So scope is now decided the same free way the full LLM lane's no-LLM
+    branch decides it in `_route` — `negative_title` only. A non-technical
+    title is still out_of_scope for both lanes. A title with no free reason
+    to reject stays a scope CANDIDATE (`in_scope`), not a confirmed yes — but
+    that is exactly the epistemic state `assign_lane` already expects to
+    hand to `floor_reason`, which does its own independent technical /
+    reachable / engagement check before admitting anything. Prestige stays
+    exactly "skip"/"marginal" either way, so the prestige lane's behaviour
+    for these employers is unchanged.
+    """
+    negative = negative_title(listing.title)
+    if negative is not None:
+        return ClassifierResult(
+            prestige, "out_of_scope", f"{reason}; non-technical function in title ({negative})"
+        )
+    return ClassifierResult(prestige, "in_scope", reason)
+
+
 def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
     """Run one classifier pass against a listing. Returns ClassifierResult.
 
@@ -152,10 +185,14 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
     employer = listing.employer
     if _hard_skip_check(employer):
         log.debug("hard-skip hit for %s", employer)
-        return ClassifierResult(prestige="skip", scope="out_of_scope", reason="domain-wrong employer (non-tech sector)")
+        return assign_lane(
+            listing, _employer_gated_result("skip", "domain-wrong employer (non-tech sector)", listing)
+        )
     if _hard_marginal_check(employer):
         log.debug("hard-marginal hit for %s", employer)
-        return ClassifierResult(prestige="marginal", scope="out_of_scope", reason="crypto/non-prestige-fintech employer")
+        return assign_lane(
+            listing, _employer_gated_result("marginal", "crypto/non-prestige-fintech employer", listing)
+        )
     if _boost_check(listing.employer):
         log.debug("boost-list hit for %s — running scope-only path", listing.employer)
         return classify_scope_only(listing, timeout=timeout)
@@ -348,8 +385,21 @@ def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
       rolling register, and the whole point of the bot is to remove hand-
       scanning. So the admit direction returns None and pays for the LLM.
 
-    Net cost is roughly a wash: the new free rejections roughly cancel the
-    demoted free admits, which is why the quick path still earns its place.
+    Whether the net cost goes up or down is NOT settled here — say so
+    plainly rather than assume it away. This function is only reached at all
+    for a boosted/auto-prestige employer, and measured that way in isolation
+    (every title forced through this branch) the free-resolution rate goes
+    DOWN, 59% -> 45%. But measured against a real, mixed employer register —
+    most of which was never boosted and never ran through this function
+    either way — the free-resolution rate goes UP, 40.0% -> 46.7%, because
+    the OTHER half of this change (the negative-title guard `_route` applies
+    to non-boosted employers too) does most of the saving. See README "Two
+    admission lanes" for both numbers and why they disagree. The quick path
+    still earns its place for a cheaper reason than "cost neutral": rejecting
+    for free is safe regardless of the net, because a missed listing costs
+    nothing the operator would have acted on anyway, while every dollar spent
+    asking the LLM about a title this function could answer for free is
+    dollars unavailable for the listings that actually need judgment.
     """
     title_l = listing.title.lower()
 
@@ -591,9 +641,12 @@ def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
     if not auto_prestige:
         employer = listing.employer
         if _hard_skip_check(employer):
-            return ClassifierResult("skip", "out_of_scope", "domain-wrong employer (non-tech sector)"), "done"
+            # scope decided by `_employer_gated_result`, not hardcoded — see its
+            # docstring. classify_batch applies assign_lane to every "done"
+            # result, this one included, so scope has to leave room for that.
+            return _employer_gated_result("skip", "domain-wrong employer (non-tech sector)", listing), "done"
         if _hard_marginal_check(employer):
-            return ClassifierResult("marginal", "out_of_scope", "crypto/non-prestige-fintech employer"), "done"
+            return _employer_gated_result("marginal", "crypto/non-prestige-fintech employer", listing), "done"
         if _boost_check(employer):
             auto_prestige = True  # known prestige → fall through to scope-only routing
 
@@ -605,9 +658,14 @@ def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
 
     # The scope guard is not a property of prestige, so it applies to the full
     # lane as well: a sales or talent-acquisition title is out of scope whoever
-    # posted it, and paying for an LLM call to be told so is waste. This is
-    # where most of the cost that the demoted keyword-admits gave up comes back
-    # — the full lane is the busy one (CEDARS + LinkedIn).
+    # posted it, and paying for an LLM call to be told so is waste. This
+    # branch — not `_scope_quick_classify` — is where MOST of the real cost
+    # saving actually lives: the full lane is the busy one (CEDARS +
+    # LinkedIn, mostly non-boosted employers that never touched
+    # `_scope_quick_classify` either way), and measured against a real
+    # employer mix the net effect of this change is fewer LLM calls, not
+    # more. See the cost note on `_scope_quick_classify` and README "Two
+    # admission lanes" for both measurements and why they disagree.
     negative = negative_title(listing.title)
     if negative is not None:
         return (

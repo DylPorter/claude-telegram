@@ -48,8 +48,22 @@ The floor lane is deliberately looser than the prestige lane: a false positive
 costs one line under a clearly-labelled heading, a false negative costs a job
 that could actually have been taken. It is **inert unless configured** — with no
 `locations` it admits nothing, because a floor lane with no geography is a
-firehose. See `floor_lane:` in `config/profile.yaml.example`; if the key is
-absent it falls back to `location_allowlist` in `config/companies.yaml`.
+firehose. See `floor_lane:` in `config/profile.yaml.example`; the `locations`
+key ships commented out there on purpose (see the comment on it), so both a
+fresh clone and an existing deployment fall back to `location_allowlist` in
+`config/companies.yaml` without either one having to edit a second file. If
+that fallback also comes up empty, `floor_lane_config()` logs a warning
+rather than rendering a silently empty section forever.
+
+**Genuinely brand-agnostic.** The prestige lane's hard-skip / hard-marginal
+employer checks (domain-wrong companies, crypto exchanges) are a judgment
+about the EMPLOYER, not the role — so they no longer force `scope` to
+`out_of_scope` the way they used to. A hard-skip or hard-marginal employer's
+listing is still never `prestige`, but it is now evaluated by the floor lane
+on its own technical / reachable / engagement merits, same as anyone else's.
+Issue #2 asked for "regardless of employer brand"; that now includes the
+employers the prestige lane actively excludes, not just the ones it's merely
+silent on.
 
 ## The scope guard, and why the keyword path does not admit
 
@@ -67,24 +81,45 @@ admission, so any title containing "Summer" at a boosted employer was surfaced
 with nothing ever asking whether the role was technical — 20 of 35 entries in the
 live register were finance, BD and sales roles admitted exactly that way.
 
-This does cost more LLM calls on the titles the fix is aimed at, and that is
-worth stating plainly rather than asserting away. No `classifier_log.jsonl`
-exists in a fresh checkout to replay against, so the number below is measured
-against the 22 titles committed in `tests/test_classifier_lanes.py`
-(deliberately edge-case-heavy — intern/summer/contract titles are
-over-represented relative to a real day's source mix, so treat this as a
-directional check, not a production estimate). On that corpus the
-free-resolution rate (no LLM call) moved **59% → 45%** — down, not up.
-Several previously-free admits (`Software Engineer Intern`, `Software
-Engineering Intern, Summer 2027`, `Summer Technology Programme`) now correctly
-fall through to the LLM because they carry no negative-title term to reject
-on. The new free rejections (`Business Development Manager`, `Sales
-Executive`, `Talent Acquisition Intern`, `Marketing Analyst`, `Graduate
-Trainee Programme`) claw some of that back but did not fully offset it on this
-sample. Anthropic alone lists ~389 roles, so the extra LLM calls are real
-operating cost — accepted here because a false admit reaching the register is
-worse than an extra API call, but the tradeoff should be monitored against the
-real `classifier_log.jsonl` once one accumulates, not assumed to net to zero.
+No `classifier_log.jsonl` exists in a fresh checkout to replay against, so
+this was measured two ways, and the two ways disagree — which is the whole
+point of showing both rather than picking the flattering one.
+
+**Employer attribution is the decisive variable**, and it wasn't stated the
+first time this number was measured — that omission is worth naming rather
+than repeating. `_scope_quick_classify` only runs at all for a boosted or
+already-prestige employer (`_route` decides that first); a listing from a
+non-boosted employer takes a completely different path (`full`, an LLM call
+either way, before or after this change) where the fix's only effect is the
+NEW free rejection at the end of `_route` (the non-technical-title guard,
+which this change adds unconditionally). So the answer to "did this cost more
+or less" depends entirely on what fraction of the corpus is boosted-employer
+intern titles versus everything else:
+
+- **A small, boosted-employer-only sample overstates the cost increase.** 22
+  representative titles from `tests/test_classifier_lanes.py`, run as if every
+  one came from a boosted employer (`_scope_quick_classify` in isolation,
+  which is what `_route` calls ONLY in that case): free-resolution goes
+  **59% → 45%, down**. This isolates exactly the tradeoff `_scope_quick_classify`'s
+  own docstring discusses — demoted admits vs. new rejections — but it is not
+  a claim about the real employer mix, because every title in it was forced
+  through the boosted branch.
+- **The real employer mix says the opposite.** Measured against the 45
+  entries in Dylan's live `Areas/Work/Open Roles.md` register (real employers,
+  real titles, real source split across CEDARS and LinkedIn — not
+  reproduced here, personal application data): free-resolution goes
+  **40.0% → 46.7%, up**. Most of that register is non-boosted employers
+  (Morgan Stanley, HSBC, UBS, Societe Generale, JPMorgan, …) that were paying
+  for a full LLM call before this change regardless; the new negative-title
+  guard at the end of `_route` now catches several of them
+  (`TRAINEE: Financing & Advisory`, `Finance Summer Analyst Program`, …) for
+  free, for a net DECREASE in LLM calls on this sample.
+
+Anthropic alone lists ~389 roles, so neither number should be read as "the"
+production figure — the real mix shifts over time as sources and boost-list
+membership change. Both measurements are committed here so the direction
+isn't asserted from one favorable sample; the honest answer is "measure
+against `classifier_log.jsonl` once one exists," not either number above.
 
 The term lists behind both features live in `config/profile.yaml` (gitignored),
 not in `classifier.py`. The matcher is the mechanism; the terms are who the

@@ -106,11 +106,19 @@ floor_lane:
   # A listing with NO location at all passes — an unstated location is a
   # question for you, not a rejection.
   #
-  # Kept deliberately generic here. Add your own city in config/profile.yaml.
-  locations:
-    - remote, worldwide
-    - global remote
-    # - hong kong
+  # LEFT COMMENTED OUT DELIBERATELY. This file doubles as the live fallback
+  # profile (see job_sift/profile.py, PROFILE_EXAMPLE_PATH) for any checkout
+  # that has not written its own config/profile.yaml yet. If this key were
+  # set here, `floor_lane_config()` would see a non-empty `locations` and
+  # never reach `_default_floor_locations()` — the companies.yaml fallback
+  # this comment block promises below would be silently dead in the shipped
+  # default, and the floor lane would only ever admit "remote, worldwide" /
+  # "global remote" postings, which is not what "falls back to
+  # location_allowlist" means. Uncomment and edit in your OWN
+  # config/profile.yaml, never here.
+  # locations:
+  #   - hong kong
+  #   - remote, worldwide
 
   # What counts as technical is judged on the TITLE only: a sales listing whose
   # body mentions "our engineering team" is still a sales listing.
