@@ -1,0 +1,52 @@
+# Trip-wire watcher for the agent-identity / agent-commerce standard landing.
+#
+# This is NOT a digest source. It stays silent for months and fires once,
+# loudly, when the thing Dylan is waiting for actually happens.
+#
+# Thesis (2026-08-10): Web Bot Auth (RFC 9421 HTTP Message Signatures + ed25519
+# per-agent keys) is being pushed by Cloudflare/Amazon/Akamai/OpenAI. Adoption
+# is currently blocked on enforcement. When Cloudflare makes verification a
+# DEFAULT rather than an option, every e-commerce site in HK suddenly needs
+# someone who understands agent traffic policy. That is the starting gun.
+
+feeds:
+  - name: Cloudflare Blog
+    url: https://blog.cloudflare.com/rss/
+  - name: Cloudflare Press
+    url: https://www.cloudflare.com/press-releases/rss/
+  - name: IETF HTTP WG (datatracker)
+    url: https://mailarchive.ietf.org/arch/browse/http-wg/atom/
+  - name: Hacker News (front page, filtered)
+    url: https://hnrss.org/frontpage?points=150
+
+# A candidate must match at least one CORE phrase to be considered at all.
+# This is deliberately narrow — false negatives are cheap, false positives
+# destroy the whole point of the watcher.
+core:
+  - "web bot auth"
+  - "bot auth"
+  - "signed agent"
+  - "signature-agent"
+  - "verified bot"
+  - "known agent"
+  - "pay per crawl"
+  - "pay-per-crawl"
+  - "agent identity"
+  - "agentic commerce"
+  - "agent payments"
+
+# If a CORE match ALSO contains an escalation phrase, it is treated as the
+# switch flipping (TIER 1) rather than background movement (TIER 2).
+escalation:
+  - "by default"
+  - "default for all"
+  - "generally available"
+  - "general availability"
+  - "now enforced"
+  - "enforcement"
+  - "all plans"
+  - "required"
+  - "mandatory"
+  - "block unsigned"
+  - "unsigned traffic"
+  - "deprecat"
