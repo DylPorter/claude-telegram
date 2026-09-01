@@ -1,0 +1,682 @@
+<!--
+  CEDARS NETjobs search-results page — real captured markup, trimmed.
+
+  Provenance: a live logged-in fetch of https://web2.cedars.hku.hk/jobs/,
+  kept out of the repo at job-sift/.data/cedars_sample.html (gitignored).
+  This file is that page, reduced so it can live in the suite:
+
+    * the logged-in student's name replaced with "A Student";
+    * their "Recent Search" trail removed (it is a person's query history);
+    * <script>/<style>/<link> dropped;
+    * mega-menu, sidebar and filter <select>s trimmed to 2-3 entries each;
+    * the results table cut to its <thead> plus 2 data rows.
+
+  Nothing structural was added or renamed. The point of committing real markup
+  rather than a hand-written page is that `cedars._is_portal_page`'s anchors —
+  a <form action="search.php"> and #mega-menu-1 — are then pinned against what
+  the portal actually emits, not against a guess about it. Contains no cookie,
+  session id or contact detail; check before refreshing it.
+-->
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xml:lang="en" xmlns="http://www.w3.org/1999/xhtml">
+ <head>
+  <title>
+   NETjobs
+  </title>
+  <base href="https://web2.cedars.hku.hk/jobs/"/>
+  <meta content="application/xhtml+xml; charset=utf-8" http-equiv="Content-Type"/>
+  <meta content="" name="description"/>
+  <meta content="" name="keywords"/>
+ </head>
+ <body>
+  <div id="container">
+   <div id="header">
+    <h1 id="logo">
+     <a alt="visit HKU Website" href="http://hku.hk" target="_blank" title="visit HKU Website">
+      <img alt="HKU logo" src="img/hku-logo.png" title="HKU logo"/>
+     </a>
+     <a alt="Visit CEDARS" href="http://www.cedars.hku.hk" target="_blank" title="Visit CEDARS">
+      <img alt="CEDARS logo" src="img/logo.png" title="CEDARS logo"/>
+     </a>
+    </h1>
+    <a alt="visit Home page" href="./" title="visit Home page">
+     <img alt="NETjobs Logo" src="./img/netjobs_logo.png" style="float:right;height:74px;margin-top:20px;" title="NETjobs Logo"/>
+    </a>
+    <ul id="top">
+     <li style="color:#000000;">
+      Welcome: A Student
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="./resume.php" title="My Resume">
+       My Resume
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="./favourite_job.php" title="Favourite Job">
+       Favourite Job
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="./favourite.php" title="Favourite">
+       Favourite Setting
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="./history.php" title="Application History">
+       Application History
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="http://www.cedars.hku.hk/cp/" target="_blank" title="Careers and Placement">
+       Careers and Placement
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="http://www.cedars.hku.hk/contact-us#CareersandPlacement" target="_blank" title="Contact Us">
+       Contact Us
+      </a>
+     </li>
+     <li>
+      •
+     </li>
+     <li>
+      <a href="login.php?action=logout" title="Logout">
+       Logout
+      </a>
+     </li>
+    </ul>
+   </div>
+   <div id="box">
+    <div id="search">
+     <form action="search.php" id="search_form" method="post">
+      <fieldset>
+       <div>
+        <input id="keyw" maxlength="100" name="keyw" placeholder="Search for a job" type="text" value=""/>
+        <a href="search.php" style="font-size:18px;margin-left:10px;">
+         Advanced Search
+        </a>
+       </div>
+       <div>
+        <p class="suggestionTop" style="width:100%;margin-bottom:5px;">
+         (You can search for Employer Name, Job Title, Job ID, Job Description, etc)
+        </p>
+       </div>
+      </fieldset>
+     </form>
+    </div>
+   </div>
+   <div class="nav">
+    <div id="mega-menu-1">
+     <table border="0" cellpadding="0" cellspacing="2" width="100%">
+      <tr>
+       <td width="18%">
+        <a alt="visit Industry" class="first-child" href="javascript:void(0);" ref="Industry" title="visit Industry">
+         Industry
+        </a>
+        <div class="submenu" ref="Industry">
+         <div>
+          <table>
+           <tr>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Accounting / Audit / Taxation" href="search.php?industry=1" title="visit Accounting / Audit / Taxation">
+                Accounting / Audit / Taxation
+               </a>
+              </li>
+              <li>
+               <a alt="visit Advertising / Public Relations / Marketing" href="search.php?industry=2" title="visit Advertising / Public Relations / Marketing">
+                Advertising / Public Relations / Marketing
+               </a>
+              </li>
+             </ul>
+            </td>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Education" href="search.php?industry=12" title="visit Education">
+                Education
+               </a>
+              </li>
+              <li>
+               <a alt="visit Electronics / Electrical Equipment" href="search.php?industry=13" title="visit Electronics / Electrical Equipment">
+                Electronics / Electrical Equipment
+               </a>
+              </li>
+             </ul>
+            </td>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Human Resources Consulting / Recruitment Agency / Training" href="search.php?industry=23" title="visit Human Resources Consulting / Recruitment Agency / Training">
+                Human Resources Consulting / Recruitment Agency / Training
+               </a>
+              </li>
+              <li>
+               <a alt="visit Information Technology / Telecom / Technology " href="search.php?industry=24" title="visit Information Technology / Telecom / Technology ">
+                Information Technology / Telecom / Technology
+               </a>
+              </li>
+             </ul>
+            </td>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Real Estate / Property" href="search.php?industry=34" title="visit Real Estate / Property">
+                Real Estate / Property
+               </a>
+              </li>
+              <li>
+               <a alt="visit Scientific / Research and Development" href="search.php?industry=35" title="visit Scientific / Research and Development">
+                Scientific / Research and Development
+               </a>
+              </li>
+             </ul>
+            </td>
+           </tr>
+          </table>
+         </div>
+        </div>
+       </td>
+       <td width="18%">
+        <a alt="visit Job Nature" href="javascript:void(0);" ref="JobNature" title="visit Job Nature">
+         Job Nature
+        </a>
+        <div class="submenu" ref="JobNature">
+         <div>
+          <table>
+           <tr>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Accounting / Auditing / Tax" href="search.php?job_nature=1" title="visit Accounting / Auditing / Tax">
+                Accounting / Auditing / Tax
+               </a>
+              </li>
+              <li>
+               <a alt="visit Administration" href="search.php?job_nature=2" title="visit Administration">
+                Administration
+               </a>
+              </li>
+             </ul>
+            </td>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Health / Beauty Care" href="search.php?job_nature=16" title="visit Health / Beauty Care">
+                Health / Beauty Care
+               </a>
+              </li>
+              <li>
+               <a alt="visit Human Resources / Training / Recruitment" href="search.php?job_nature=17" title="visit Human Resources / Training / Recruitment">
+                Human Resources / Training / Recruitment
+               </a>
+              </li>
+             </ul>
+            </td>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Merchandising / Purchasing" href="search.php?job_nature=31" title="visit Merchandising / Purchasing">
+                Merchandising / Purchasing
+               </a>
+              </li>
+              <li>
+               <a alt="visit Public Relations / Event Management" href="search.php?job_nature=32" title="visit Public Relations / Event Management">
+                Public Relations / Event Management
+               </a>
+              </li>
+             </ul>
+            </td>
+           </tr>
+          </table>
+         </div>
+        </div>
+       </td>
+       <td width="20%">
+        <a alt="visit Job Type" href="javascript:void(0);" ref="JobType" title="visit Job Type">
+         Job Type
+        </a>
+        <div class="submenu" ref="JobType">
+         <div>
+          <table>
+           <tr>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Graduate" href="search.php?job_type=Graduate" title="visit Graduate">
+                Graduate
+               </a>
+              </li>
+              <li>
+               <a alt="visit Summer" href="search.php?job_type=Summer" title="visit Summer">
+                Summer
+               </a>
+              </li>
+             </ul>
+            </td>
+           </tr>
+          </table>
+         </div>
+        </div>
+       </td>
+       <td width="29%">
+        <a alt="visit Other Internship Programmes" class="last-child" href="javascript:void(0);" ref="OtherInternshipProgrammes" title="visit Other Internship Programmes">
+         Other Internship Programmes
+        </a>
+        <div class="submenu" ref="OtherInternshipProgrammes">
+         <div>
+          <table>
+           <tr>
+            <td valign="top">
+             <ul style="margin-bottom:0px;">
+              <li>
+               <a alt="visit Overseas Internship in new window" href="http://www.cedars.hku.hk/careerspringboard" target="_blank" title="visit Overseas Internship in new window">
+                CEDARS Global Career Springboard Scheme (CGCSS)
+               </a>
+              </li>
+              <li>
+               <a alt="visit Overseas Internship in new window" href="http://cedars.hku.hk/internwfounder" target="_blank" title="visit Overseas Internship in new window">
+                Intern with Founder
+               </a>
+              </li>
+             </ul>
+            </td>
+           </tr>
+          </table>
+         </div>
+        </div>
+       </td>
+      </tr>
+     </table>
+    </div>
+   </div>
+   <div class="clear">
+   </div>
+   <div id="sidebar">
+    <div id="stats">
+     <!-- Jobs -->
+     <b>
+      625 total jobs
+     </b>
+     <br/>
+     <ul>
+      <li style="display:block;overflow:hidden;border-bottom:solid 1px #e1e1e1;">
+       <a alt="visit Graduate" href="search.php?job_type=Graduate" style="padding:3px;display:block;overflow:hidden;" title="visit Graduate">
+        Graduate (
+        <strong>
+         134 jobs
+        </strong>
+        )
+       </a>
+      </li>
+      <li style="display:block;overflow:hidden;border-bottom:solid 1px #e1e1e1;">
+       <a alt="visit Internship" href="search.php?job_type=Internship" style="padding:3px;display:block;overflow:hidden;" title="visit Internship">
+        Internship (
+        <strong>
+         453 jobs
+        </strong>
+        )
+       </a>
+      </li>
+     </ul>
+    </div>
+   </div>
+   <div id="PtScAlert" style="padding:20px 10px;">
+    <span class="fa-stack fa-3x">
+     <i class="fas fa-copy fa-stack-1x">
+     </i>
+     <i class="fas fa-ban fa-stack-2x" style="color:Tomato">
+     </i>
+    </span>
+    <br/>
+    <br/>
+    The graphics, images, editorial content, HTML and all information posted on NETjobs are the intellectual property of CEDARS. They are protected by copyright and trademark laws and should not be downloaded, duplicated, further distributed, or reproduced, in any form or by whatever means, without written permission from CEDARS. Re-use of the foregoing is strictly prohibited and CEDARS reserves all rights.
+   </div>
+   <div id="content">
+    <h2>
+     Search Jobs related to:
+    </h2>
+    <form action="search.php" enctype="multipart/form-data" method="post">
+     <input name="sort" type="hidden" value="postdate"/>
+     <input name="order" type="hidden" value="desc"/>
+     <div style="border:solid #e1e1e1 1px;margin:10px 0px;overflow:hidden;padding:5px;line-height:25px;">
+      <b>
+       Search Criteria
+      </b>
+      <div>
+       <div style="display:inline-block;margin-right:10px;">
+        Keyword:
+        <input name="keyw" placeholder="Search for a job" type="text" value=""/>
+       </div>
+       <div style="display:inline-block;margin-right:10px;">
+        Job ID:
+        <input name="job_id" placeholder="Enter a Job ID" type="text" value=""/>
+       </div>
+       <div style="display:inline-block;margin-right:10px;">
+        Industry:
+        <select name="industry">
+         <option value="0">
+          All
+         </option>
+         <option value="1">
+          Accounting / Audit / Taxation
+         </option>
+         <option value="2">
+          Advertising / Public Relations / Marketing
+         </option>
+        </select>
+       </div>
+       <div style="display:inline-block;margin-right:10px;">
+        Job Nature:
+        <select name="job_nature">
+         <option value="">
+          All
+         </option>
+         <option value="1">
+          Accounting / Auditing / Tax
+         </option>
+         <option value="2">
+          Administration
+         </option>
+        </select>
+       </div>
+       <br/>
+       <div style="display:inline-block;margin-right:10px;">
+        Job Mode:
+        <select name="job_mode">
+         <option value="0">
+          All
+         </option>
+         <option value="Full-time">
+          Full-time
+         </option>
+         <option value="Part-time">
+          Part-time
+         </option>
+        </select>
+       </div>
+       <div style="display:inline-block;margin-right:10px;">
+        Job Type:
+        <select name="job_type">
+         <option value="0">
+          All
+         </option>
+         <option value="Graduate">
+          Graduate
+         </option>
+         <option value="Summer">
+          Summer
+         </option>
+        </select>
+       </div>
+       <br/>
+       <div style="display:none;margin-right:10px;">
+        AiPEX:
+        <select name="aipex">
+         <option selected="selected" value="0">
+          All
+         </option>
+         <option value="Y">
+          Yes
+         </option>
+         <option value="N">
+          No
+         </option>
+        </select>
+       </div>
+       <div style="display:inline-block;margin-right:10px;">
+        STEM:
+        <select name="stem">
+         <option selected="selected" value="0">
+          All
+         </option>
+         <option value="Y">
+          Yes
+         </option>
+         <option value="N">
+          No
+         </option>
+        </select>
+       </div>
+      </div>
+      <input type="submit" value="Search"/>
+     </div>
+    </form>
+    <b>
+     631
+    </b>
+    job(s) found. Click the job title to view details.
+    <table class="tablesorter" id="search_jobs">
+     <thead>
+      <tr>
+       <th class="header" width="10%">
+        <a href="search.php?&amp;sort=jobid&amp;order=desc" style="display:block;">
+         Job ID
+        </a>
+       </th>
+       <th class="header" width="30%">
+        <a href="search.php?&amp;sort=employer&amp;order=desc" style="display:block;">
+         Employer
+        </a>
+       </th>
+       <th class="header" width="25%">
+        <a href="search.php?&amp;sort=title&amp;order=desc" style="display:block;">
+         Job Title
+        </a>
+       </th>
+       <th class="header" width="20%">
+        <a href="search.php?&amp;sort=deadline&amp;order=desc" style="display:block;">
+         Application Deadline
+        </a>
+       </th>
+       <th class="header headerSortUp" width="15%">
+        <a href="search.php?&amp;sort=postdate&amp;order=asc" style="display:block;">
+         Posting Date
+        </a>
+       </th>
+      </tr>
+     </thead>
+     <tbody>
+      <tr>
+       <td>
+        <a alt="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" href="job_detail.php?job_id=G2503154" target="_blank" title="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)">
+         G2503154
+        </a>
+       </td>
+       <td>
+        <a alt="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" href="job_detail.php?job_id=G2503154" target="_blank" title="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)">
+         Applied Artificial Intelligence Laboratory Limited
+        </a>
+       </td>
+       <td>
+        <a alt="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" href="job_detail.php?job_id=G2503154" target="_blank" title="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" value=" ">
+         Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)
+         <img src="./img/stem.png"/>
+        </a>
+       </td>
+       <td>
+        <a alt="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" href="job_detail.php?job_id=G2503154" target="_blank" title="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)">
+         2026-06-30
+        </a>
+       </td>
+       <td>
+        <a alt="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)" href="job_detail.php?job_id=G2503154" target="_blank" title="Educational Content Creator (Math, Physics, Chemistry, Biology, ICT, Economics)">
+         2026-05-21
+        </a>
+       </td>
+      </tr>
+      <tr>
+       <td>
+        <a alt="Full Stack Developer" href="job_detail.php?job_id=G2503158" target="_blank" title="Full Stack Developer">
+         G2503158
+        </a>
+       </td>
+       <td>
+        <a alt="Full Stack Developer" href="job_detail.php?job_id=G2503158" target="_blank" title="Full Stack Developer">
+         RISK STEWARD LIMITED
+        </a>
+       </td>
+       <td>
+        <a alt="Full Stack Developer" href="job_detail.php?job_id=G2503158" target="_blank" title="Full Stack Developer" value=" ">
+         Full Stack Developer
+         <img src="./img/stem.png"/>
+        </a>
+       </td>
+       <td>
+        <a alt="Full Stack Developer" href="job_detail.php?job_id=G2503158" target="_blank" title="Full Stack Developer">
+         2026-06-06
+        </a>
+       </td>
+       <td>
+        <a alt="Full Stack Developer" href="job_detail.php?job_id=G2503158" target="_blank" title="Full Stack Developer">
+         2026-05-21
+        </a>
+       </td>
+      </tr>
+     </tbody>
+    </table>
+    <div class="pagination">
+     <div class="links">
+      <b>
+       1
+      </b>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=2">
+       2
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=3">
+       3
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=4">
+       4
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=5">
+       5
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=6">
+       6
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=7">
+       7
+      </a>
+      ....
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=2">
+       &gt;
+      </a>
+      <a href="search.php?sort=postdate&amp;order=desc&amp;page=32">
+       &gt;|
+      </a>
+     </div>
+     <div class="results">
+      Showing 1 to 20 of
+      <b>
+       631 job(s)
+      </b>
+      (32 Pages)
+     </div>
+    </div>
+    <br/>
+   </div>
+   <div style="clear:both;">
+   </div>
+   <div class="floating">
+    <div class="floating-icon">
+     <i class="fas fa-2x fa-exclamation-triangle">
+     </i>
+    </div>
+    <div class="floating-content">
+     The graphics, images, editorial content, HTML and all information posted on NETjobs are the intellectual property of CEDARS. They are protected by copyright and trademark laws and should not be downloaded, duplicated, further distributed, or reproduced, in any form or by whatever means, without written permission from CEDARS. Re-use of the foregoing is strictly prohibited and CEDARS reserves all rights.
+    </div>
+   </div>
+   <div style="clear:both;">
+   </div>
+   <div class="footer">
+    <div id="footer-contents">
+     <div class="footer-col">
+      Career News:
+      <br/>
+      <a href="http://www.cedars.hku.hk/careers/latest-announcement" target="_blank" title="Latest Announcement">
+       Latest Announcement
+      </a>
+      <br/>
+      <a href="https://web2.cedars.hku.hk/career_registration/" target="_blank" title="Event Schedule &amp; Registration">
+       Event Schedule &amp; Registration
+      </a>
+      <br/>
+      <br/>
+      Other Internship Programmes:
+      <br/>
+      <a href="https://cedars-cp.hku.hk/careerspringboard" target="_blank" title="CEDARS Global Springboard Scheme">
+       CEDARS Global Springboard Scheme
+      </a>
+      <br/>
+      <a href="https://www.cedars.hku.hk/careers/entrepreneurship" target="_blank" title="Intern with Founder">
+       Intern with Founder
+      </a>
+      <br/>
+      <a href="https://www.cedars.hku.hk/careers/pssip" target="_blank" title="HKSAR Post-secondary Student Summer Internship Programme">
+       HKSAR Post-secondary Student Summer Internship Programme
+      </a>
+      <br/>
+     </div>
+     <div class="footer-col">
+      Useful Information:
+      <br/>
+      <a alt="visit Minimum Wage Ordinance in new window" href="http://www.labour.gov.hk/eng/news/mwo.htm" target="_blank" title="visit Minimum Wage Ordinance in new window">
+       Minimum Wage Ordinance
+      </a>
+      <br/>
+      <a alt="visit MPF in new window" href="http://www.mpfa.org.hk" target="_blank" title="visit MPF in new window">
+       MPF
+      </a>
+      <br/>
+      <a alt="visit Employment of Non-local Students in new window" href="http://www.immd.gov.hk/eng/faq/imm-policy-study.html" target="_blank" title="visit Employment of Non-local Students in new window">
+       Employment of Non-local Students
+      </a>
+      <br/>
+      <a alt="visit Employment of Non-local Graduates in new window" href="http://www.immd.gov.hk/eng/services/visas/IANG.html" target="_blank" title="visit Employment of Non-local Graduates in new window">
+       Employment of Non-local Graduates
+      </a>
+      <br/>
+     </div>
+     <div class="footer-col">
+      <br/>
+      <a alt="visit Terms and Conditions and Declaration" href="./use.php" title="visit Terms and Conditions and Declaration">
+       Terms and Conditions and Declaration
+      </a>
+      <br/>
+      <a alt="visit Privacy Policy in new window" href="http://www.hku.hk/about/policies_reports/privacy_policy.html" target="_blank" title="visit Privacy Policy in new window">
+       Privacy Policy
+      </a>
+      <br/>
+      <!-- <a href="./disclaimer.php" title="Disclaimer">Disclaimer</a><br /> -->
+      <a alt="visit Sitemap" href="./sitemap.php" title="visit Sitemap">
+       Sitemap
+      </a>
+      <br/>
+     </div>
+     <div class="clear">
+     </div>
+    </div>
+   </div>
+  </div>
+ </body>
+</html>
