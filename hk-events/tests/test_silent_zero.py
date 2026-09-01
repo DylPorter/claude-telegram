@@ -19,7 +19,7 @@ import httpx
 import pytest
 
 from hk_events import config, orchestrator, source_health
-from hk_events.errors import SourceFetchError
+from hk_events.errors import SourceFetchError, SourceNotConfiguredError
 from hk_events.sources import _ical_common, luma, meetup
 
 _DAY = date(2026, 9, 1)
@@ -192,4 +192,127 @@ class TestStreakSurvivesATotalOutage:
 
         assert health["meetup"]["consecutive_failures"] == 13
         assert health["meetup"]["last_success"] == "2026-08-20"
+        assert source_health.render_alarm(health) is not None
+
+
+class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
+    """The third outcome — "nobody asked me anything" — and the second way the
+    staleness alarm could still be silently wrong.
+
+    Sibling of job-sift's class of the same name. The escalation above closes
+    the case where the network died; this closes the case where the CONFIG did.
+    `_load_sources_yaml` degrades to `{}` when sources.yaml is missing, and
+    `load_feed_urls` also returns `[]` when every entry for the group is still
+    marked TODO — the documented way to park an unverified feed, and the state
+    luma's entries were in until they were verified on 2026-08-09. The old
+    escalation guard read `if urls and failed == len(urls)`, so an empty `urls`
+    skipped the raise and `fetch_feed_group` returned `[]`. That landed the
+    source in the orchestrator's `succeeded` list and scored it a SUCCESS:
+    streak reset to 0, today stamped as `last_success`.
+
+    Both groups are fully configured as of this commit, so nothing changes for
+    the live run today — this closes the path back to the bug, it does not fix
+    a source that is currently broken.
+
+    "No config" is neither success nor failure. It is the same non-event as the
+    three adapters commented out of `_source_tasks`, and gets the same handling:
+    absent from BOTH sets, and pruned by `update_health`.
+    """
+
+    _STREAK = {
+        "meetup": {
+            "consecutive_failures": 12,
+            "last_success": "2026-08-20",
+            "last_failure": "2026-08-31",
+            "last_error": "fetch failed: all feeds down",
+            "first_seen": "2026-06-01",
+        }
+    }
+
+    @pytest.mark.parametrize("name,fetch", _SOURCES, ids=_IDS)
+    def test_no_configured_feeds_raises_instead_of_returning_empty(
+        self, monkeypatch, name, fetch
+    ):
+        monkeypatch.setattr(_ical_common, "load_feed_urls", lambda group: [])
+        # Nothing should be fetched — a request here means we guessed at config.
+        monkeypatch.setattr(httpx.Client, "get", _outage)
+
+        with pytest.raises(SourceNotConfiguredError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+
+    @pytest.mark.parametrize("name,fetch", _SOURCES, ids=_IDS)
+    def test_a_missing_sources_yaml_is_what_produces_that(
+        self, monkeypatch, tmp_path, name, fetch
+    ):
+        """Through the REAL config loader, not a stubbed `load_feed_urls`."""
+        monkeypatch.setattr(_ical_common, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(_ical_common, "_CFG_CACHE", None)
+        assert _ical_common.load_feed_urls(name) == []
+
+        with pytest.raises(SourceNotConfiguredError):
+            fetch()
+
+    @pytest.mark.parametrize("name,fetch", _SOURCES, ids=_IDS)
+    def test_a_group_whose_entries_are_all_TODO_is_also_unconfigured(
+        self, monkeypatch, tmp_path, name, fetch
+    ):
+        """A parked feed: the loader skips TODO entries, so the group is empty."""
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "sources.yaml").write_text(
+            "ical_feeds:\n"
+            f"  {name}:\n"
+            "    - {name: unverified, url: TODO-confirm-the-ics-url}\n"
+        )
+        monkeypatch.setattr(_ical_common, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(_ical_common, "_CFG_CACHE", None)
+
+        with pytest.raises(SourceNotConfiguredError):
+            fetch()
+
+    def test_the_orchestrator_puts_it_in_neither_set(self, monkeypatch):
+        """The wiring: not in `succeeded`, and NOT invented as an error either."""
+        monkeypatch.setattr(
+            orchestrator.meetup,
+            "fetch_meetup_events",
+            lambda: (_ for _ in ()).throw(
+                SourceNotConfiguredError("meetup", "no feeds configured")
+            ),
+        )
+        monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", lambda: [])
+
+        _events, errors, succeeded = orchestrator._fetch_all_sources()
+
+        assert "meetup" not in succeeded
+        assert "meetup" not in errors
+        # The run is otherwise untouched: one dead config is not a dead run.
+        assert succeeded == ["luma"]
+
+    def test_the_record_is_pruned_not_reset(self):
+        """The consequence in the state file: no fabricated success.
+
+        Pruned means DROPPED, per `update_health`'s existing contract for a
+        source that reported nothing — deliberately not "kept at 12", and
+        emphatically not "reset to 0 with today as last_success".
+        """
+        prior = {k: dict(v) for k, v in self._STREAK.items()}
+        out = source_health.update_health(prior, succeeded=[], errors={}, today=_DAY)
+
+        assert "meetup" not in out
+        assert out == {}
+        # The reset shape is what the bug wrote. Neither half may appear.
+        assert _DAY.isoformat() not in repr(out)
+        # update_health is pure — the caller's prior state is not mutated.
+        assert prior == self._STREAK
+
+    def test_an_unconfigured_source_cannot_silence_a_real_alarm(self):
+        """A source that IS failing still alarms; only the unasked one drops."""
+        health = source_health.update_health(
+            {**self._STREAK, "luma": {"consecutive_failures": 2, "first_seen": "2026-06-01"}},
+            succeeded=[],
+            errors={"luma": "fetch failed: connection reset"},
+            today=_DAY,
+        )
+        assert "meetup" not in health
+        assert health["luma"]["consecutive_failures"] == 3
         assert source_health.render_alarm(health) is not None

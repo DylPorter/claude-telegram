@@ -19,7 +19,7 @@ import yaml
 from icalendar import Calendar
 
 from hk_events.config import HK_EVENTS_HORIZON_DAYS, PROJECT_ROOT
-from hk_events.errors import SourceFetchError
+from hk_events.errors import SourceFetchError, SourceNotConfiguredError
 from hk_events.schema import Event, Source
 
 log = logging.getLogger(__name__)
@@ -196,8 +196,23 @@ def fetch_feed_group(group: str, *, source: Source, organizer_default: str | Non
     fetch, reset an accumulated failure streak to 0, and write today as
     `last_success`. A fabricated fact, persisted to disk, later rendered to a
     human as "nothing today". Returning zero must mean we looked.
+
+    NOT CONFIGURED is a THIRD outcome. With no usable feed URL for the group —
+    the key is missing, the list is empty, or every entry is still marked TODO —
+    there is nothing to fetch, so the run learnt nothing about this source
+    either way. The old escalation guard read `if urls and failed == len(urls)`,
+    so that case skipped the raise and returned `[]`, which `source_health`
+    scored as a success exactly like the outage above. It now raises
+    `SourceNotConfiguredError`, which the orchestrator scores as neither a
+    success nor a failure and therefore PRUNES — see errors.py.
     """
     urls = load_feed_urls(group)
+    if not urls:
+        raise SourceNotConfiguredError(
+            str(source),
+            f"no usable feed URL configured under ical_feeds.{group} "
+            "(missing, empty, or every entry still marked TODO)",
+        )
     events: list[Event] = []
     failed = 0
     for url in urls:
@@ -206,7 +221,7 @@ def fetch_feed_group(group: str, *, source: Source, organizer_default: str | Non
             failed += 1
             continue
         events.extend(parse_ics(text, source=source, organizer_default=organizer_default))
-    if urls and failed == len(urls):
+    if failed == len(urls):
         raise SourceFetchError(
             str(source),
             f"all {len(urls)} configured feed(s) failed to fetch — "

@@ -24,8 +24,8 @@ import httpx
 import pytest
 
 from job_sift import config, orchestrator, source_health
-from job_sift.errors import SourceAuthError, SourceFetchError
-from job_sift.sources import ashby, greenhouse, lever, linkedin
+from job_sift.errors import SourceAuthError, SourceFetchError, SourceNotConfiguredError
+from job_sift.sources import _ats_common, ashby, greenhouse, lever, linkedin
 
 _DAY = date(2026, 9, 1)
 
@@ -238,4 +238,112 @@ class TestStreakSurvivesATotalOutage:
 
         assert health["cedars"]["consecutive_failures"] == 13
         assert health["cedars"]["last_success"] == "2026-08-20"
+        assert source_health.render_alarm(health) is not None
+
+
+class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
+    """The third outcome — "nobody asked me anything" — and the second way the
+    staleness alarm could still be silently wrong.
+
+    The escalation above closes the case where the network died. It does not
+    close the case where the CONFIG died. `_ats_common._load_companies_yaml`
+    degrades to `{}` when companies.yaml is missing, `load_slugs` therefore
+    returns `[]`, and the adapters used to answer that with a bare `return []`.
+    An empty list raises nothing, so the source landed in the orchestrator's
+    `succeeded` list and was scored a SUCCESS: streak reset to 0, today stamped
+    as `last_success`. Reproduced live — with companies.yaml removed, a seeded
+    12-run streak went to 0.
+
+    "No config" is neither success nor failure. It is the same non-event as a
+    source commented out of the fetch list, and gets the same handling: absent
+    from BOTH sets, and pruned by `update_health`.
+    """
+
+    _STREAK = {
+        "greenhouse": {
+            "consecutive_failures": 12,
+            "last_success": "2026-08-20",
+            "last_failure": "2026-08-31",
+            "last_error": "fetch failed: all boards down",
+            "first_seen": "2026-06-01",
+        }
+    }
+
+    @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
+    def test_no_configured_slugs_raises_instead_of_returning_empty(
+        self, monkeypatch, name, module, fetch, payload
+    ):
+        monkeypatch.setattr(module, "load_slugs", lambda vendor: [])
+        # Nothing should be polled — a request here means we guessed at config.
+        monkeypatch.setattr(httpx.Client, "get", _outage)
+
+        with pytest.raises(SourceNotConfiguredError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+
+    def test_a_missing_companies_yaml_is_what_produces_that(self, monkeypatch, tmp_path):
+        """Through the REAL config loader, not a stubbed `load_slugs`.
+
+        `_CFG_CACHE = {}` is the actual degrade the reviewer found; point
+        PROJECT_ROOT at an empty dir so there is genuinely no companies.yaml.
+        """
+        monkeypatch.setattr(_ats_common, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(_ats_common, "_CFG_CACHE", None)
+        assert _ats_common.load_slugs("greenhouse") == []
+
+        with pytest.raises(SourceNotConfiguredError):
+            greenhouse.fetch_greenhouse_listings()
+
+    def test_the_orchestrator_puts_it_in_neither_set(self, monkeypatch):
+        """The wiring: not in `succeeded`, and NOT invented as an error either."""
+        monkeypatch.setattr(
+            orchestrator.greenhouse,
+            "fetch_greenhouse_listings",
+            lambda: (_ for _ in ()).throw(
+                SourceNotConfiguredError("greenhouse", "no slugs configured")
+            ),
+        )
+        for module, attr in (
+            (orchestrator.lever, "fetch_lever_listings"),
+            (orchestrator.ashby, "fetch_ashby_listings"),
+            (orchestrator.linkedin, "fetch_linkedin_listings"),
+        ):
+            monkeypatch.setattr(module, attr, lambda: [])
+        monkeypatch.setattr(orchestrator.cedars, "fetch_cedars_listings", lambda **kw: [])
+        monkeypatch.setattr(orchestrator, "load_seen", lambda source: set())
+
+        _listings, errors, succeeded = orchestrator._fetch_all_sources()
+
+        assert "greenhouse" not in succeeded
+        assert "greenhouse" not in errors
+        # The run is otherwise untouched: one dead config is not a dead run.
+        assert set(succeeded) == {"cedars", "lever", "ashby", "linkedin"}
+
+    def test_the_record_is_pruned_not_reset(self):
+        """The consequence in the state file: no fabricated success.
+
+        Pruned means DROPPED, per `update_health`'s existing contract for a
+        source that reported nothing — deliberately not "kept at 12", and
+        emphatically not "reset to 0 with today as last_success".
+        """
+        prior = {k: dict(v) for k, v in self._STREAK.items()}
+        out = source_health.update_health(prior, succeeded=[], errors={}, today=_DAY)
+
+        assert "greenhouse" not in out
+        assert out == {}
+        # The reset shape is what the bug wrote. Neither half may appear.
+        assert _DAY.isoformat() not in repr(out)
+        # update_health is pure — the caller's prior state is not mutated.
+        assert prior == self._STREAK
+
+    def test_an_unconfigured_source_cannot_silence_a_real_alarm(self):
+        """A source that IS failing still alarms; only the unasked one drops."""
+        health = source_health.update_health(
+            {**self._STREAK, "cedars": {"consecutive_failures": 2, "first_seen": "2026-06-01"}},
+            succeeded=[],
+            errors={"cedars": "session expired"},
+            today=_DAY,
+        )
+        assert "greenhouse" not in health
+        assert health["cedars"]["consecutive_failures"] == 3
         assert source_health.render_alarm(health) is not None

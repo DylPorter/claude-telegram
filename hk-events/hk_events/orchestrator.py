@@ -27,6 +27,7 @@ from hk_events.dedupe import (
     record_verdict,
     save_seen,
 )
+from hk_events.errors import SourceNotConfiguredError
 from hk_events.render import render, render_vault_archive
 from hk_events.schema import Event, RelevanceResult
 from hk_events.sources import (
@@ -96,7 +97,9 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
     that actually completed a fetch. That third value is a POSITIVE success
     signal for `source_health` — see `update_health`. It is not derivable from
     the other two: "in the task list and not in the error map" is exactly the
-    inference that let a total network outage reset every failure streak.
+    inference that let a total network outage reset every failure streak, and a
+    source can legitimately land in NEITHER (see SourceNotConfiguredError
+    below), so the two returned sets do not partition the task list.
 
     Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
     are caught so one dead source never kills the run — but they are recorded
@@ -128,6 +131,15 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
             # look now raises SourceFetchError, so an empty list here honestly
             # means "I looked, there was nothing".
             succeeded.append(name)
+        except SourceNotConfiguredError as exc:
+            # NEITHER list. A source with no usable feed URL was never asked
+            # anything, so this run is no evidence about it — scoring it a
+            # success would reset a real failure streak and stamp a
+            # `last_success` we never observed. Absent from both `succeeded`
+            # and `errors`, update_health PRUNES it, the same as the three
+            # adapters commented out of _source_tasks. Not a digest health line
+            # either: nothing failed.
+            log.warning("%s not configured — skipped, health record pruned: %s", name, exc.message)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
             errors[name] = f"fetch failed: {exc}"

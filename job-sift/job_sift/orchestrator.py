@@ -13,7 +13,7 @@ from job_sift import config, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
-from job_sift.errors import SourceAuthError
+from job_sift.errors import SourceAuthError, SourceNotConfiguredError
 from job_sift.open_roles import (
     OpenRole,
     active_roles,
@@ -86,7 +86,9 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str], list[str]]:
     that actually completed a fetch. That third value is a POSITIVE success
     signal for `source_health` — see `update_health`. It is not derivable from
     the other two: "in the task list and not in the error map" is exactly the
-    inference that let a total network outage reset every failure streak.
+    inference that let a total network outage reset every failure streak, and a
+    source can legitimately land in NEITHER (see SourceNotConfiguredError
+    below), so the two returned sets do not partition the task list.
 
     Individual failures are caught so one dead source never kills the run — but
     they are recorded in the returned error map (keyed by source name) so the
@@ -124,6 +126,16 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str], list[str]]:
             # look now raises (SourceAuthError / SourceFetchError), so an empty
             # list here honestly means "I looked, there was nothing".
             succeeded.append(name)
+        except SourceNotConfiguredError as exc:
+            # NEITHER list. A source with no config was never asked anything,
+            # so this run is no evidence about it — scoring it a success would
+            # reset a real failure streak and stamp a `last_success` we never
+            # observed (reproduced: with companies.yaml removed, a seeded
+            # 12-run streak went to 0). Absent from both `succeeded` and
+            # `errors`, update_health PRUNES it, the same as a source that is
+            # commented out of the fetch list. Not a digest health line either:
+            # nothing failed.
+            log.warning("%s not configured — skipped, health record pruned: %s", name, exc.message)
         except SourceAuthError as exc:
             log.error("%s auth failure: %s", name, exc.message)
             errors[name] = exc.message
