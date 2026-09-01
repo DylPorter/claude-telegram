@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from datetime import date
 
-from job_sift import config
+from job_sift import config, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
@@ -48,6 +48,35 @@ def _setup_logging() -> None:
     )
 
 
+def _source_tasks(cedars_seen: set[str]) -> list[tuple[str, Callable[[], list[JobListing]]]]:
+    """The sources this run will attempt, in fetch order.
+
+    Built per call so tests (and hot-patches) that swap a module attribute
+    still take effect; the previous inline list had the same property.
+    """
+    return [
+        # CEDARS — greedy pagination with the pre-loaded seen-set
+        ("cedars", lambda: cedars.fetch_cedars_listings(seen_ids=cedars_seen)),
+        # Standardized-ATS sources — public JSON APIs, no pagination needed
+        ("greenhouse", greenhouse.fetch_greenhouse_listings),
+        ("lever", lever.fetch_lever_listings),
+        ("ashby", ashby.fetch_ashby_listings),
+        # LinkedIn — gws CLI Gmail digest email parsing
+        ("linkedin", linkedin.fetch_linkedin_listings),
+    ]
+
+
+def enabled_sources() -> list[str]:
+    """Names of the sources this run actually attempts.
+
+    Derived from the SAME list `_fetch_all_sources` fans out over, so the
+    staleness counters can never drift from the fetch list: a source that is
+    removed or commented out vanishes from both at once and therefore cannot
+    accrue failures or alarm. Absence is not failure.
+    """
+    return [name for name, _ in _source_tasks(set())]
+
+
 def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str]]:
     """Run every source adapter CONCURRENTLY, return (combined listings, errors).
 
@@ -72,18 +101,7 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str]]:
     # fan-out — the workers must not race each other on the state files.
     cedars_seen = load_seen("cedars")
 
-    # Built per call so tests (and hot-patches) that swap a module attribute
-    # still take effect; the previous serial loop had the same property.
-    tasks: list[tuple[str, Callable[[], list[JobListing]]]] = [
-        # CEDARS — greedy pagination with the pre-loaded seen-set
-        ("cedars", lambda: cedars.fetch_cedars_listings(seen_ids=cedars_seen)),
-        # Standardized-ATS sources — public JSON APIs, no pagination needed
-        ("greenhouse", greenhouse.fetch_greenhouse_listings),
-        ("lever", lever.fetch_lever_listings),
-        ("ashby", ashby.fetch_ashby_listings),
-        # LinkedIn — gws CLI Gmail digest email parsing
-        ("linkedin", linkedin.fetch_linkedin_listings),
-    ]
+    tasks = _source_tasks(cedars_seen)
 
     budget_s = config.fetch_budget_s()
     settled, abandoned = run_with_budget(tasks, budget_s, thread_name_prefix="job-sift-fetch")
@@ -176,13 +194,38 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     listings, source_errors = _fetch_all_sources()
     if source_errors:
         log.warning("source health: %d source(s) did not run: %s", len(source_errors), ", ".join(sorted(source_errors)))
+
+    # 1b. Roll the per-source consecutive-failure counters forward and decide
+    #     whether anything has been dead long enough to escalate. Computed
+    #     BEFORE either render path so the alarm rides on the empty digest too
+    #     — that is the run where "none today" is most likely to be believed.
+    health = source_health.update_health(
+        source_health.load_health(),
+        attempted=enabled_sources(),
+        errors=source_errors,
+        today=today,
+    )
+    staleness_alarm = source_health.render_alarm(health)
+    if staleness_alarm:
+        for name, rec in source_health.stale_sources(health):
+            log.error(
+                "STALE SOURCE %s: %d consecutive failed runs, last success %s",
+                name,
+                rec["consecutive_failures"],
+                rec["last_success"] or "never",
+            )
+    # Persisted before the push, not after: if the push itself blows up, the
+    # failure that caused the alarm still happened and must survive the run.
+    if not dry_run:
+        source_health.save_health(health)
+
     if not listings:
         log.warning("no listings fetched from any source — pushing heartbeat")
         # Ageing is time-driven, so the register still needs a pass on a dead day.
         roles = _update_open_roles([], today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles))
-            write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors))
+            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm))
+            write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
         return 0
 
     log.info("fetched %d listings across all sources", len(listings))
@@ -228,6 +271,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         today=today,
         source_errors=source_errors,
         open_roles=open_roles,
+        staleness_alarm=staleness_alarm,
     )
 
     if dry_run:
@@ -240,7 +284,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         log.info("pushed %d messages", len(messages))
 
     # 6. Vault archive
-    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today, source_errors=source_errors)
+    archive_md = render_vault_archive(surfaced=surfaced, skipped=skipped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
     if not dry_run:
         write_archive(today, archive_md)
 

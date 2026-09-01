@@ -71,6 +71,15 @@ def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
     return "\n".join(lines)
 
 
+def _prepend_alarm(messages: list[str], staleness_alarm: str | None) -> list[str]:
+    """Put the staleness alarm FIRST, ahead of the digest it invalidates.
+
+    Position is the point: a reader who stops after the first bubble must have
+    seen that a source is dead before they read "no new relevant events today".
+    """
+    return ([staleness_alarm] + messages) if staleness_alarm else messages
+
+
 def render(
     *,
     surfaced: list[tuple[Event, RelevanceResult, str]],
@@ -79,6 +88,7 @@ def render(
     calendar_stats: dict[str, int] | None,
     today: date,
     source_errors: dict[str, str] | None = None,
+    staleness_alarm: str | None = None,
 ) -> list[str]:
     """Build the chunked message list for /push. One event per bubble.
 
@@ -89,7 +99,9 @@ def render(
     decides whether to actually send that (see HK_EVENTS_PUSH_EMPTY) — pushing
     "nothing today" every day is what trains you to stop opening the digest.
     Any failed sources get a ⚠️ health bubble appended so a broken source is
-    never mistaken for a quiet day.
+    never mistaken for a quiet day, and a `staleness_alarm` (a source dead for
+    3+ consecutive runs) is PREPENDED so it leads the digest it invalidates —
+    the orchestrator pushes an otherwise-silent empty digest when one is set.
     """
     health = _fmt_source_health(source_errors)
 
@@ -101,7 +113,7 @@ def render(
         ]
         if health:
             out.append(health)
-        return out
+        return _prepend_alarm(out, staleness_alarm)
 
     soon = [s for s in surfaced if s[2] == "soon"]
     fresh = [s for s in surfaced if s[2] != "soon"]
@@ -134,7 +146,7 @@ def render(
     else:
         footer += "_"
     messages.append(footer)
-    return messages
+    return _prepend_alarm(messages, staleness_alarm)
 
 
 def render_vault_archive(
@@ -143,6 +155,7 @@ def render_vault_archive(
     dropped: list[tuple[Event, RelevanceResult, str]],
     today: date,
     source_errors: dict[str, str] | None = None,
+    staleness_alarm: str | None = None,
 ) -> str:
     """Render the per-day Markdown archive that lands in the vault (audit trail)."""
     lines = [
@@ -155,6 +168,15 @@ def render_vault_archive(
         f"# HK Events — {today.isoformat()}",
         "",
     ]
+
+    if staleness_alarm:
+        lines.append("## 🚨 Stale source alarm")
+        lines.append("")
+        lines.append("_A source has failed on 3+ consecutive runs. Everything below is incomplete._")
+        lines.append("")
+        for line in staleness_alarm.splitlines():
+            lines.append(f"> {line}")
+        lines.append("")
 
     if source_errors:
         lines.append("## ⚠️ Source health — these did NOT run")
