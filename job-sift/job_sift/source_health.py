@@ -28,7 +28,7 @@ Absence is not failure
 ----------------------
 Only sources that REPORTED AN OUTCOME this run — a completed fetch or a
 recorded error — get a record. A source that
-is commented out of the fetch list (hk-events has three) or removed entirely is
+is commented out of the fetch list (hk-events has two) or removed entirely is
 pruned from the state rather than accruing failures forever — you cannot be
 stale if nobody asked you for anything.
 

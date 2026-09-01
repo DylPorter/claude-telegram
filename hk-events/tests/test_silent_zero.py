@@ -320,7 +320,7 @@ class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
     a source that is currently broken.
 
     "No config" is neither success nor failure. It is the same non-event as the
-    three adapters commented out of `_source_tasks`, and gets the same handling:
+    two adapters commented out of `_source_tasks`, and gets the same handling:
     absent from BOTH sets, and pruned by `update_health`.
     """
 

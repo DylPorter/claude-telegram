@@ -34,10 +34,12 @@ daily, but the counter does not know that and does not pretend to.
 Absence is not failure
 ----------------------
 Only sources that REPORTED AN OUTCOME this run — a completed fetch or a
-recorded error — get a record. The three
-adapters commented out of `orchestrator._source_tasks` (aitinkerers, cyberport,
-startmeuphk) are never attempted, so they can never accrue failures or alarm —
-you cannot be stale if nobody asked you for anything.
+recorded error — get a record. The two adapters commented out of
+`orchestrator._source_tasks` (cyberport, startmeuphk) are never attempted, so
+they can never accrue failures or alarm — you cannot be stale if nobody asked
+you for anything. (`aitinkerers` was in that list until 2026-09-01; it is wired
+and live now, and DOES accrue failures. If you are reading this to decide
+whether a source can alarm, read `_source_tasks` — not this paragraph.)
 
 State shape (`.data/state/source_health.json`):
 

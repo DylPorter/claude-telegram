@@ -10,7 +10,7 @@ must override it.
 What is pinned here:
   * the counter increments on failure and resets on success;
   * the alarm fires at EXACTLY 3 consecutive failed runs and not at 2;
-  * the three DISABLED adapters can never accrue a counter or alarm;
+  * the two DISABLED adapters can never accrue a counter or alarm;
   * a budget timeout counts as a failure;
   * the alarm overrides HK_EVENTS_PUSH_EMPTY=0 and reaches Telegram;
   * --dry-run persists nothing.

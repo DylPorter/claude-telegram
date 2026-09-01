@@ -43,7 +43,7 @@ class SourceNotConfiguredError(RuntimeError):
 
     So the orchestrator catches this separately and puts the source in NEITHER
     the `succeeded` list nor the error map, which `update_health` already treats
-    as "not attempted this run" and PRUNES — the same handling the three
+    as "not attempted this run" and PRUNES — the same handling the two
     commented-out adapters get. Not a success, not a failure, and above all not
     a fabricated `last_success`.
     """
