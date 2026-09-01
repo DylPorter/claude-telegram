@@ -30,6 +30,7 @@ from datetime import date, datetime
 
 import httpx
 
+from job_sift.errors import SourceFetchError
 from job_sift.schema import JobListing
 from job_sift.sources._ats_common import load_slugs, location_matches
 
@@ -57,36 +58,56 @@ def _parse_iso_date(s: str | None) -> date | None:
         return None
 
 
-def _fetch_company(slug: str, *, client: httpx.Client) -> list[dict]:
+def _fetch_company(slug: str, *, client: httpx.Client) -> list[dict] | None:
+    """Jobs for one board, or None if the board could not be reached/read.
+
+    None and [] are deliberately different: None is "I could not look", [] is
+    "this board has no jobs". The caller counts the Nones.
+    """
     url = f"{_API}/{slug}"
     try:
         resp = client.get(url)
     except httpx.HTTPError as exc:
         log.warning("ashby: %s — network error: %s", slug, exc)
-        return []
+        return None
     if resp.status_code == 404:
         log.warning("ashby: %s — 404 (invalid slug?)", slug)
-        return []
+        return None
     if resp.status_code != 200:
         log.warning("ashby: %s — HTTP %d", slug, resp.status_code)
-        return []
+        return None
     try:
         return resp.json().get("jobs", []) or []
     except ValueError:
         log.warning("ashby: %s — non-JSON response", slug)
-        return []
+        return None
 
 
 def fetch_ashby_listings() -> list[JobListing]:
+    """Public entry point. Polls every configured Ashby board.
+
+    PARTIAL degrade, TOTAL escalation. A single dead slug is logged, skipped,
+    and the other boards still report. But if EVERY configured slug failed we
+    raise `SourceFetchError` rather than returning `[]`: `httpx` wraps
+    `socket.gaierror` in `ConnectError` (an `HTTPError`), so a total network
+    outage otherwise comes back as a clean empty list, stays out of the
+    orchestrator's error map, and is scored by `source_health` as a SUCCESS —
+    zeroing the failure streak and writing a fabricated `last_success`.
+    Returning zero must mean we looked.
+    """
     slugs = load_slugs("ashby")
     if not slugs:
         return []
     log.info("ashby: polling %d companies", len(slugs))
 
     listings: list[JobListing] = []
+    failed = 0
     with httpx.Client(timeout=_TIMEOUT) as client:
         for slug in slugs:
             jobs = _fetch_company(slug, client=client)
+            if jobs is None:
+                failed += 1
+                continue
             kept = 0
             for j in jobs:
                 # Skip listings the company has hidden
@@ -120,6 +141,13 @@ def fetch_ashby_listings() -> list[JobListing]:
                 )
                 kept += 1
             log.info("ashby: %s — %d jobs, %d after filter", slug, len(jobs), kept)
+
+    if failed == len(slugs):
+        raise SourceFetchError(
+            "ashby",
+            f"all {len(slugs)} configured board(s) failed to fetch — "
+            "network outage or the Ashby API is unreachable (see log for per-slug detail)",
+        )
 
     log.info("ashby: %d total listings after filtering", len(listings))
     return listings

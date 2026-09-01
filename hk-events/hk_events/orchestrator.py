@@ -66,8 +66,9 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
         # The adapters are kept so re-enabling is a one-line change once any of
-        # them has a real feed. Being absent from this list is also what keeps
-        # them out of the staleness counters — see enabled_sources().
+        # them has a real feed. Being absent from this list also keeps them out
+        # of the staleness counters: they never run, so they never land in the
+        # error map or the succeeded list, and update_health prunes them.
         # ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
         # ("cyberport", cyberport.fetch_cyberport_events),
         # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
@@ -76,18 +77,26 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
 
 
 def enabled_sources() -> list[str]:
-    """Names of the sources this run actually attempts.
+    """Names of the sources this run attempts, derived from the real fetch list.
 
-    Derived from the SAME list `_fetch_all_sources` fans out over, so the
-    staleness counters can never drift from the fetch list. The three adapters
-    commented out above are never attempted and therefore can never accrue a
-    failure or fire an alarm — absence is not failure.
+    NOT what drives the staleness counters. Those are fed by what the fetch
+    phase actually observed — `_fetch_all_sources`' `succeeded` list and error
+    map — precisely so a source that is in this list but never really reported
+    cannot be scored as a success. This stays as an introspection accessor: it
+    answers "what does a run try?", which is a different question from "what
+    happened?".
     """
     return [name for name, _ in _source_tasks()]
 
 
-def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
-    """Run every source adapter CONCURRENTLY, return (combined events, errors).
+def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
+    """Run every source adapter CONCURRENTLY.
+
+    Returns `(events, errors, succeeded)`, where `succeeded` names the sources
+    that actually completed a fetch. That third value is a POSITIVE success
+    signal for `source_health` — see `update_health`. It is not derivable from
+    the other two: "in the task list and not in the error map" is exactly the
+    inference that let a total network outage reset every failure streak.
 
     Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
     are caught so one dead source never kills the run — but they are recorded
@@ -103,6 +112,7 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
     """
     events: list[Event] = []
     errors: dict[str, str] = {}
+    succeeded: list[str] = []
 
     tasks = _source_tasks()
 
@@ -114,6 +124,10 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
             got = future.result()
             log.info("%s: %d events", name, len(got))
             events.extend(got)
+            # Returning at all is the success signal. An adapter that could not
+            # look now raises SourceFetchError, so an empty list here honestly
+            # means "I looked, there was nothing".
+            succeeded.append(name)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
             errors[name] = f"fetch failed: {exc}"
@@ -122,7 +136,7 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
         log.error("%s fetch failed: exceeded the %.0fs fetch budget", name, budget_s)
         errors[name] = f"fetch failed: exceeded the {budget_s:.0f}s fetch budget"
 
-    return events, errors
+    return events, errors, succeeded
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -137,7 +151,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         config.assert_required()
 
     # 1. Fetch raw events from all sources
-    events, source_errors = _fetch_all_sources()
+    events, source_errors, fetched_ok = _fetch_all_sources()
     if source_errors:
         log.warning(
             "source health: %d source(s) did not run: %s",
@@ -150,7 +164,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #     — that is the run where "nothing today" is most likely to be believed.
     health = source_health.update_health(
         source_health.load_health(),
-        attempted=enabled_sources(),
+        succeeded=fetched_ok,
         errors=source_errors,
         today=today,
     )
@@ -232,27 +246,35 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         for m in messages:
             print(m)
             print("---")
-    elif not surfaced and not config.HK_EVENTS_PUSH_EMPTY and staleness_alarm is None:
-        log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
     else:
-        # A staleness alarm OVERRIDES the empty-digest silence above. The gate
-        # exists so a daily "nothing today" doesn't train the reader to stop
-        # opening the digest — but on the day a source has been dead for three
-        # runs, that same silence is the bug: "nothing found" and "I could not
-        # look" would render identically, which is exactly how CEDARS stayed
-        # broken for fifty days in the sibling bot.
-        push_messages(messages)
-        log.info("pushed %d messages", len(messages))
+        if not surfaced and not config.HK_EVENTS_PUSH_EMPTY and staleness_alarm is None:
+            log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
+        else:
+            # A staleness alarm OVERRIDES the empty-digest silence above. The
+            # gate exists so a daily "nothing today" doesn't train the reader to
+            # stop opening the digest — but on the day a source has been dead
+            # for three runs, that same silence is the bug: "nothing found" and
+            # "I could not look" would render identically, which is exactly how
+            # CEDARS stayed broken for fifty days in the sibling bot.
+            push_messages(messages)
+            log.info("pushed %d messages", len(messages))
 
-    # 6. Vault archive (audit trail)
+        # 6. Persist the seen-set as soon as delivery has settled — a push that
+        #    succeeded, or a deliberate silence — and BEFORE the archive write.
+        #    These events have now been dispatched; nothing after this point may
+        #    undeliver them. With the archive write in between, an OSError there
+        #    exited non-zero after the push but before this line, so a re-run
+        #    re-classified and re-pushed the same events. Nothing retries
+        #    automatically today (the unit carries no Restart= — see
+        #    systemd/hk-events.service), but a manual re-run has the same shape,
+        #    and this ordering is what makes any future retry safe.
+        for source, seen in seen_by_source.items():
+            save_seen(source, seen)
+
+    # 7. Vault archive (audit trail — after delivery is committed)
     archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
     if not dry_run:
         write_archive(today, archive_md)
-
-    # 7. Persist seen-set (only after successful push)
-    if not dry_run:
-        for source, seen in seen_by_source.items():
-            save_seen(source, seen)
 
     return 0
 

@@ -33,7 +33,8 @@ daily, but the counter does not know that and does not pretend to.
 
 Absence is not failure
 ----------------------
-Only sources that were actually ATTEMPTED this run get a record. The three
+Only sources that REPORTED AN OUTCOME this run — a completed fetch or a
+recorded error — get a record. The three
 adapters commented out of `orchestrator._source_tasks` (aitinkerers, cyberport,
 startmeuphk) are never attempted, so they can never accrue failures or alarm —
 you cannot be stale if nobody asked you for anything.
@@ -122,11 +123,24 @@ def _normalize(rec: Mapping) -> dict:
 def save_health(health: Mapping[str, dict]) -> None:
     """Write the counters ATOMICALLY (tmp file + os.replace).
 
-    `dedupe.save_seen` gets away with a plain write_text; this file does not.
-    The whole plan exists because systemd SIGTERM'd a run mid-flight, and a
-    truncated state file here reads as corrupt, resets to empty, and silently
-    buys a dead source three more runs of silence — the exact failure being
-    fixed. A reader either sees the old file or the new one, never a half one.
+    `dedupe.save_seen` still uses a plain `write_text`, and that asymmetry is
+    deliberate rather than an oversight either file gets away with. Both can be
+    truncated by a SIGTERM mid-write (TimeoutStartSec, or a machine shutdown),
+    but the two truncations fail in opposite directions:
+
+      * a half-written seen-set reads as fewer seen ids, so the next run
+        re-notifies listings the reader already got. LOUD, self-correcting, and
+        the reader can see it happened;
+      * a half-written health file reads as corrupt, `load_health` resets to
+        empty, and a dead source's streak silently restarts from zero — buying
+        it another `ALARM_THRESHOLD` runs of looking healthy. That is the exact
+        failure this whole module exists to make impossible.
+
+    Silence is the failure mode worth paying for; a duplicate digest is not.
+    So this file gets tmp-file + `os.replace` — a reader sees the old file or
+    the new one, never a half one — and `save_seen` is left alone. (Ordering
+    helps too: the orchestrator commits the seen-set immediately after a
+    successful push, so its exposure window is as narrow as it can be.)
     """
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +163,7 @@ def save_health(health: Mapping[str, dict]) -> None:
 def update_health(
     health: Mapping[str, dict],
     *,
-    attempted: Iterable[str],
+    succeeded: Iterable[str],
     errors: Mapping[str, str],
     today: date,
 ) -> dict[str, dict]:
@@ -158,13 +172,31 @@ def update_health(
     Being pure is what makes `--dry-run` honest: the caller computes the
     would-be state, renders the alarm from it, and only writes it on a real run.
 
-    A source in `errors` increments; a source that was attempted and is not in
-    `errors` resets to 0. Anything not attempted is dropped from the returned
-    map (see "Absence is not failure" above).
+    Success must be POSITIVE, never inferred
+    ----------------------------------------
+    `succeeded` is the set of sources that actually completed a fetch this run.
+    It is emphatically NOT "the enabled list minus the error map". This function
+    used to take `attempted=enabled_sources()` — a static list — and treat
+    "attempted and absent from `errors`" as proof of success. That inference is
+    only as good as the adapters' willingness to raise, and they were not
+    willing: `httpx` wraps `socket.gaierror` in `ConnectError`, the feed and ATS
+    adapters caught it per-endpoint and returned `[]`, and a total network
+    outage therefore produced an EMPTY error map. Every source was then scored a
+    success — a 12-run failure streak reset to 0 and today stamped as
+    `last_success`. A fabricated fact, written to disk, later rendered to a human.
+
+    So the two signals are now both explicit and both come from what the fetch
+    phase actually observed: `succeeded` resets to 0 and records the date;
+    `errors` increments. A source in NEITHER set was not attempted this run and
+    is dropped from the returned map — the "Absence is not failure" pruning
+    above. Crucially, it is dropped, not reset: this function can no longer
+    manufacture a success for a source that never reported one.
+
+    (`succeeded` and `errors` overlapping would be a caller bug; `errors` wins,
+    because claiming a failure we saw beats claiming a success we inferred.)
     """
-    # Union rather than plain `attempted`: a name in the error map ran by
-    # definition, so it can never be treated as "not attempted".
-    names = list(dict.fromkeys([*attempted, *errors]))
+    # `errors` first: a name in both sets must land on the failure branch.
+    names = list(dict.fromkeys([*errors, *succeeded]))
     out: dict[str, dict] = {}
     for name in names:
         prev = _normalize(health.get(name) or {})

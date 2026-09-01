@@ -42,8 +42,20 @@ def _isolated_state(monkeypatch, tmp_path):
 
 
 def _run_once(health, *, errors, attempted=("cedars", "greenhouse"), today=_DAY):
+    """One run's outcome, as the ORCHESTRATOR would report it.
+
+    `attempted` names the sources the run fanned out over; the ones absent from
+    `errors` are the ones that came back with a result, so they are what the
+    orchestrator passes as `succeeded`. Deriving it here is fine — this helper
+    is standing in for the fetch phase's observations. What is NOT fine, and is
+    what `update_health` no longer does, is making that same inference INSIDE
+    the counter from a static enabled-list that never watched anything run.
+    """
     return source_health.update_health(
-        health, attempted=attempted, errors=errors, today=today
+        health,
+        succeeded=[s for s in attempted if s not in errors],
+        errors=errors,
+        today=today,
     )
 
 
@@ -299,10 +311,12 @@ class TestRenderPlacement:
 class _Harness:
     """Patch everything run() touches except the bit under test."""
 
-    def __init__(self, monkeypatch, *, listings, errors):
+    def __init__(self, monkeypatch, *, listings, errors, succeeded=None):
         self.pushed: list[list[str]] = []
+        if succeeded is None:
+            succeeded = [s for s in orchestrator.enabled_sources() if s not in errors]
         monkeypatch.setattr(
-            orchestrator, "_fetch_all_sources", lambda: (listings, errors)
+            orchestrator, "_fetch_all_sources", lambda: (listings, errors, list(succeeded))
         )
         monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: self.pushed.append(msgs))
         monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)

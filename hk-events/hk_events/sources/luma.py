@@ -3,7 +3,8 @@
 Luma calendars expose an iCal subscription. The public-facing pattern is a
 "Subscribe" / "Add to Calendar" button on each calendar page that yields a
 webcal/ICS URL. Calendar slugs live in config/sources.yaml under
-ical_feeds.luma. Per-feed failures degrade to [].
+ical_feeds.luma. A single dead feed degrades; EVERY feed failing raises
+SourceFetchError, because an empty return has to mean "I looked".
 
 TODO: confirm the exact Luma .ics URL shape for a given calendar slug before
 relying on it. Observed candidates (NOT yet verified against a live 200):
