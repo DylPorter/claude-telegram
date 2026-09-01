@@ -147,6 +147,23 @@ def _real_portal_page_claiming(total_pages: int) -> str:
     return str(soup)
 
 
+def _real_portal_page_linking_only(*hrefs: str) -> str:
+    """The captured page whose pagination block carries only these links.
+
+    The words-string reading is deleted so the LINK FALLBACK is what runs. Used
+    to reach the reading that a disabled `page=0` control would otherwise
+    poison.
+    """
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    block = soup.select_one("div.pagination")
+    block.clear()
+    for href in hrefs:
+        a = soup.new_tag("a", href=href)
+        a.string = "x"
+        block.append(a)
+    return str(soup)
+
+
 def _real_portal_page_without_pagination() -> str:
     """The captured page with the whole pagination widget gone."""
     soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
@@ -514,6 +531,46 @@ class TestTheWalkNeverGoesPastTheLastPage:
         got = cedars.fetch_cedars_listings(seen_ids=set(), max_pages=2)
         assert served == [1, 2], "the cap alone must still bound the walk"
         assert got, "and the listings it did read must still come back"
+
+    def test_a_disabled_first_page_link_does_not_truncate_the_walk(self, monkeypatch):
+        """THE ASYMMETRY BUG. Both readings must agree about what "0" means.
+
+        The words-string reading guarded against a zero count; the link fallback
+        did not. A widget whose only readable link is a disabled `page=0`
+        "first"/"previous" control — a common template pattern — therefore
+        returned 0, the caller computed `min(max_pages, 0) == 0`, and the walk
+        silently truncated to page 1 even under FULL=1 with a large cap. No
+        raise, no warning (the fallback log only fires on None), just quietly
+        fewer listings than the run claimed to have looked for. Silent
+        truncation is the family this whole branch exists to eliminate, so it
+        does not get to survive inside the fix for it.
+        """
+        page = _real_portal_page_linking_only("search.php?page=0")
+        assert cedars._parse_total_pages(page) is None
+
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        served = self._serve(monkeypatch, page)
+        cedars.fetch_cedars_listings(seen_ids=set(), max_pages=4)
+        assert served == [1, 2, 3, 4], "an unusable count must fall back to the cap"
+
+    def test_the_link_fallback_still_reads_a_real_last_page_link(self):
+        """Premise: the guard rejects 0, it does not reject the fallback."""
+        page = _real_portal_page_linking_only("search.php?page=0", "search.php?page=17")
+        assert cedars._parse_total_pages(page) == 17
+
+    @pytest.mark.parametrize("href", ["search.php?page=-1", "search.php?page=abc", "search.php"])
+    def test_a_negative_or_non_numeric_page_link_never_reaches_int(self, href):
+        """Both patterns match `\\d+` only, so these fail to match rather than
+        raising inside `int()`. Pinned because the guard's reasoning depends on
+        it — if the pattern ever loosens, this is the test that notices."""
+        assert cedars._parse_total_pages(_real_portal_page_linking_only(href)) is None
+
+    def test_an_absurd_page_count_is_still_bounded_by_the_cap(self, monkeypatch):
+        """The large direction needs no guard — `min` already owns it."""
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        served = self._serve(monkeypatch, _real_portal_page_claiming(999_999_999))
+        cedars.fetch_cedars_listings(seen_ids=set(), max_pages=3)
+        assert served == [1, 2, 3]
 
     def test_a_nonsense_page_count_is_ignored_rather_than_trusted(self):
         """Zero pages on a page that is visibly showing listings is not a number

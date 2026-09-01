@@ -160,6 +160,36 @@ _PAGINATION_SELECTOR = "div.pagination"
 _TOTAL_PAGES_RE = re.compile(r"\((\d+)\s*pages?\)", re.IGNORECASE)
 
 
+def _usable_page_count(total: int | None) -> int | None:
+    """A page count the walk can be bounded by, or None to fall back to the cap.
+
+    ONE guard for BOTH readings in `_parse_total_pages`, and a function rather
+    than a repeated expression because the first cut of that parser guarded the
+    words-string reading against zero and forgot to carry it to the link
+    fallback. The consequence was small and exactly the family this branch
+    exists to eliminate: a widget whose only readable link is a disabled
+    `page=0` "first"/"previous" control (a common template pattern) yielded 0,
+    the caller computed `min(max_pages, 0) == 0`, and the walk silently
+    truncated to page 1 — even under FULL=1 with a large cap, and with no
+    warning, because the "unreadable, falling back" log only fires on None.
+    Not a raise, not an error, just quietly fewer listings than the run claimed
+    to have looked for.
+
+    So the two readings no longer each carry their own opinion about what counts
+    as usable. Anything below 1 is not a page count and reads as "the block did
+    not tell us", which routes to the logged max_pages fallback.
+
+    A NEGATIVE OR NON-NUMERIC `page=N` cannot reach here: `_TOTAL_PAGES_RE` and
+    the link pattern both match digits only, so `page=-1` and `page=abc` fail
+    to match rather than reaching `int()`. `page=0` and `page=00` do match, and
+    are what this rejects. An absurdly LARGE claim needs no guard — the caller
+    takes `min(max_pages, total_pages)`, so the cap still governs.
+    """
+    if total is None or total < 1:
+        return None
+    return total
+
+
 def _parse_total_pages(html: str) -> int | None:
     """How many result pages the portal says exist. None if it does not say.
 
@@ -202,8 +232,7 @@ def _parse_total_pages(html: str) -> int | None:
 
         match = _TOTAL_PAGES_RE.search(block.get_text(" ", strip=True))
         if match:
-            total = int(match.group(1))
-            return total if total > 0 else None
+            return _usable_page_count(int(match.group(1)))
 
         # Fallback: the highest page number the block links to.
         linked = [
@@ -211,7 +240,7 @@ def _parse_total_pages(html: str) -> int | None:
             for m in (re.search(r"[?&]page=(\d+)", a.get("href") or "") for a in block.find_all("a"))
             if m
         ]
-        return max(linked) if linked else None
+        return _usable_page_count(max(linked)) if linked else None
     except (ValueError, AttributeError) as exc:
         log.warning("cedars: could not read the pagination block: %s", exc)
         return None
