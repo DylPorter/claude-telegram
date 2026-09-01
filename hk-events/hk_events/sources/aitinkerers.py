@@ -151,13 +151,59 @@ def _event_from_jsonld(obj: dict) -> Event | None:
     )
 
 
+def _is_chapter_page(docs: list[dict]) -> bool:
+    """True if these JSON-LD blocks came from an AI TINKERERS CHAPTER PAGE.
+
+    Sibling of `luma_discover._discovery_container`, and here for the same
+    reason: HTTP 200 plus valid JSON-LD is not proof we read the page we meant
+    to. A redirect to a marketing page, a consent interstitial, or the
+    platform-wide aitinkerers.org landing page all serve well-formed JSON-LD —
+    the blocks parse, no `Event` is found, and `[]` gets scored a SUCCESS by
+    `source_health`, resetting the failure streak and stamping a `last_success`
+    for a page we never actually read.
+
+    There is no observed host drift on this domain today. It is guarded anyway,
+    because the whole point of this branch is that "I could not look" and
+    "nothing found" must be impossible to confuse — and shipping that guarantee
+    on one of two new adapters is exactly the inconsistency that let the sibling
+    bot's CEDARS source stay broken for fifty days.
+
+    THE ANCHOR, chosen from what the real page actually emits (9 ld+json blocks:
+    Organization x2, WebSite, CollectionPage, BreadcrumbList, ItemList x3):
+
+      * a `CollectionPage` — the chapter listing page's own identity
+        (`@id` = ".../#city-page" live), or
+      * an `Organization` carrying `parentOrganization` — the CHAPTER org
+        (`@id` = ".../#chapter-organization"), as distinct from the platform-wide
+        `https://aitinkerers.org/#organization`, which has no parent.
+
+    Two independent signals, either sufficient, so a rename of one does not take
+    the source down. Both are EVENT-INDEPENDENT: a chapter with nothing scheduled
+    still emits them, so a genuinely quiet page returns `[]` rather than raising.
+
+    Deliberately NOT "at least one ItemList". The three ItemLists live are
+    #events, #recent-talks and #testimonials — all three are content the chapter
+    accumulates, so a brand-new chapter could legitimately emit none, and a
+    generic marketing page could easily emit one. That candidate is both too
+    strict and too loose.
+    """
+    for doc in docs:
+        doc_type = doc.get("@type")
+        if doc_type == "CollectionPage":
+            return True
+        if doc_type == "Organization" and doc.get("parentOrganization"):
+            return True
+    return False
+
+
 def _parse_jsonld_events(html: str) -> list[Event]:
     """Extract every schema.org Event from the page's JSON-LD blocks.
 
     NO horizon filtering — see the module docstring. Raises `SourceFetchError`
-    if there is no JSON-LD at all, or if every block we found failed to parse:
-    both mean the page changed shape under us, which is "could not look", not
-    "nothing on this week".
+    if there is no JSON-LD at all, if every block we found failed to parse, or if
+    the blocks parse but carry no chapter-page anchor (see `_is_chapter_page`):
+    all three mean we did not read the page we think we read, which is "could not
+    look", not "nothing on this week".
     """
     soup = BeautifulSoup(html, "lxml")
     blocks = soup.find_all("script", attrs={"type": "application/ld+json"})
@@ -192,6 +238,15 @@ def _parse_jsonld_events(html: str) -> list[Event]:
         raise SourceFetchError(
             _SOURCE,
             f"all {len(blocks)} ld+json block(s) failed to parse as JSON",
+        )
+
+    if not _is_chapter_page(docs):
+        raise SourceFetchError(
+            _SOURCE,
+            "ld+json parsed but carries no chapter-page anchor (no CollectionPage, "
+            "no Organization with a parentOrganization) — this is not the chapter "
+            "homepage. Returning zero events here would be scored a SUCCESS and "
+            "stamp a last_success we never earned.",
         )
 
     # An Event can sit at the top level of its own block as easily as inside an

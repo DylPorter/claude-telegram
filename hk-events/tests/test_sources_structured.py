@@ -39,6 +39,29 @@ def _fixture(name: str) -> str:
     return (FIXTURES / name).read_text()
 
 
+def _ld_page(*blocks: str) -> str:
+    """An AI Tinkerers page carrying the CHAPTER-PAGE ANCHOR plus `blocks`.
+
+    The anchor (a CollectionPage, or an Organization with a parentOrganization)
+    is what separates "the right page, nothing scheduled" from "we were served
+    some other page" — see `_is_chapter_page`. Both anchor blocks below are
+    copied from the shapes the live page emits. Tests about event PARSING carry
+    it so they are testing what they claim to.
+    """
+    anchor = (
+        '<script type="application/ld+json">'
+        '{"@context":"https://schema.org","@type":"CollectionPage",'
+        '"@id":"https://hong-kong.aitinkerers.org/#city-page",'
+        '"name":"AI Tinkerers Hong Kong: AI meetup for builders"}'
+        "</script>"
+    )
+    return "<html><body>" + anchor + "".join(blocks) + "</body></html>"
+
+
+def _ld(payload: str) -> str:
+    return '<script type="application/ld+json">' + payload + "</script>"
+
+
 # ---------------------------------------------------------------------------
 # 2a — AI Tinkerers, schema.org JSON-LD
 # ---------------------------------------------------------------------------
@@ -131,11 +154,9 @@ def test_aitinkerers_raises_when_every_block_is_unparseable():
 def test_aitinkerers_returns_empty_for_a_page_with_no_events():
     """Parsed fine, listed nothing. That is a real observation, not a failure —
     returning [] here is what lets `source_health` record an honest success."""
-    html = (
-        '<html><body><script type="application/ld+json">'
-        '{"@type": "ItemList", "itemListElement": ['
-        '{"@type":"ListItem","item":{"@type":"BlogPosting","name":"Recap"}}]}'
-        "</script></body></html>"
+    html = _ld_page(
+        _ld('{"@type": "ItemList", "itemListElement": ['
+            '{"@type":"ListItem","item":{"@type":"BlogPosting","name":"Recap"}}]}')
     )
     assert aitinkerers._parse_jsonld_events(html) == []
 
@@ -143,12 +164,10 @@ def test_aitinkerers_returns_empty_for_a_page_with_no_events():
 def test_aitinkerers_accepts_a_flattened_itemlist():
     """Live markup wraps each Event in a ListItem. Accept a bare Event too, so a
     future flattening of the page does not read as 'zero events this week'."""
-    html = (
-        '<html><body><script type="application/ld+json">'
-        '{"@type": "ItemList", "itemListElement": ['
-        '{"@type":"Event","@id":"https://x/p/a#event","name":"Bare Event",'
-        '"startDate":"2026-09-20T18:00:00+08:00"}]}'
-        "</script></body></html>"
+    html = _ld_page(
+        _ld('{"@type": "ItemList", "itemListElement": ['
+            '{"@type":"Event","@id":"https://x/p/a#event","name":"Bare Event",'
+            '"startDate":"2026-09-20T18:00:00+08:00"}]}')
     )
     events = aitinkerers._parse_jsonld_events(html)
     assert [e.title for e in events] == ["Bare Event"]
@@ -159,11 +178,10 @@ def test_aitinkerers_finds_a_top_level_event_outside_any_itemlist():
     """schema.org does not require the ItemList wrapper, and the site could drop
     it. Descending only into ItemLists would turn that into a silent zero: the
     blocks parse, we find nothing, and `[]` is scored as a quiet week."""
-    html = (
-        '<html><body><script type="application/ld+json">'
-        '{"@context":"https://schema.org","@type":"Event","@id":"https://x/p/solo#event",'
-        '"name":"Standalone Event","startDate":"2026-09-20T18:00:00+08:00"}'
-        "</script></body></html>"
+    html = _ld_page(
+        _ld('{"@context":"https://schema.org","@type":"Event",'
+            '"@id":"https://x/p/solo#event","name":"Standalone Event",'
+            '"startDate":"2026-09-20T18:00:00+08:00"}')
     )
     events = aitinkerers._parse_jsonld_events(html)
     assert [e.title for e in events] == ["Standalone Event"]
@@ -172,16 +190,68 @@ def test_aitinkerers_finds_a_top_level_event_outside_any_itemlist():
 def test_aitinkerers_unwraps_a_graph_envelope():
     """`{"@context":…,"@graph":[…]}` is the other very common JSON-LD shape —
     it is what most CMS SEO plugins emit."""
-    html = (
-        '<html><body><script type="application/ld+json">'
-        '{"@context":"https://schema.org","@graph":['
-        '{"@type":"Organization","name":"AI Tinkerers"},'
-        '{"@type":"Event","@id":"https://x/p/g#event","name":"Graph Event",'
-        '"startDate":"2026-09-21T18:00:00+08:00"}]}'
-        "</script></body></html>"
+    html = _ld_page(
+        _ld('{"@context":"https://schema.org","@graph":['
+            '{"@type":"Organization","name":"AI Tinkerers"},'
+            '{"@type":"Event","@id":"https://x/p/g#event","name":"Graph Event",'
+            '"startDate":"2026-09-21T18:00:00+08:00"}]}')
     )
     events = aitinkerers._parse_jsonld_events(html)
     assert [e.title for e in events] == ["Graph Event"]
+
+
+def test_aitinkerers_raises_when_served_a_page_that_is_not_the_chapter_page():
+    """The I5-equivalent guard, on the sibling adapter.
+
+    A wrong page — a marketing landing, a consent interstitial, the platform-wide
+    aitinkerers.org root — still serves well-formed JSON-LD. The blocks parse, no
+    Event is found, and `[]` gets scored a SUCCESS: failure streak reset,
+    `last_success` stamped for a page we never read. Note the block below is the
+    PLATFORM Organization, exactly as it appears on the real chapter page — it is
+    not an anchor precisely because it appears everywhere on the domain.
+    """
+    wrong_page = (
+        "<html><body>"
+        + _ld('{"@context":"https://schema.org","@type":"Organization",'
+              '"@id":"https://aitinkerers.org/#organization","name":"AI Tinkerers",'
+              '"url":"https://aitinkerers.org/"}')
+        + "</body></html>"
+    )
+    with pytest.raises(SourceFetchError) as exc:
+        aitinkerers._parse_jsonld_events(wrong_page)
+    assert "chapter-page anchor" in str(exc.value)
+
+
+def test_aitinkerers_anchor_accepts_either_signal():
+    """Two independent signals so a rename of one does not take the source down.
+    Both shapes are copied from what the live page emits."""
+    collection_page = _ld(
+        '{"@type":"CollectionPage","@id":"https://hong-kong.aitinkerers.org/#city-page"}'
+    )
+    chapter_org = _ld(
+        '{"@type":"Organization","@id":"https://hong-kong.aitinkerers.org/#chapter-organization",'
+        '"name":"AI Tinkerers Hong Kong",'
+        '"parentOrganization":{"@id":"https://aitinkerers.org/#organization"}}'
+    )
+    for block in (collection_page, chapter_org):
+        assert aitinkerers._parse_jsonld_events("<html><body>" + block + "</body></html>") == []
+
+
+def test_the_real_page_satisfies_the_anchor():
+    """Guards against an anchor that is right in principle and wrong in fact."""
+    events = aitinkerers._parse_jsonld_events(_fixture("aitinkerers_home.html"))
+    assert len(events) == 7
+
+
+def test_aitinkerers_anchor_is_event_independent():
+    """A chapter with nothing scheduled is a quiet week, not a failure — so the
+    anchor must not be something the page only emits when it HAS events. This is
+    why "at least one ItemList" was rejected: the live ItemLists are #events,
+    #recent-talks and #testimonials, all of them accumulated content."""
+    quiet = _ld_page(_ld('{"@type":"ItemList","@id":"x#events","itemListElement":[]}'))
+    assert aitinkerers._parse_jsonld_events(quiet) == []
+    # ...and the anchor alone, with no ItemList at all, is still a readable page.
+    assert aitinkerers._parse_jsonld_events(_ld_page()) == []
 
 
 def test_aitinkerers_is_still_auto_tagged_founder_ai():
@@ -731,42 +801,102 @@ class TestSeenSetSurvivesTheHandOff:
         # event the classifier already rejected.
         assert seen_luma[ics.external_id]["tag"] == "founder_ai"
 
+    def _settle(self, events, state, monkeypatch, *, verdict="founder_ai"):
+        """collapse → diff → verdict → mirror → persist, returning the winner."""
+        monkeypatch.setattr(config, "STATE_DIR", state)
+        monkeypatch.setattr(dedupe, "STATE_DIR", state)
+        kept, collapsed = collapse_cross_source(events)
+        due, seen_by_source = dedupe.filter_due(kept)
+        for event, _stage, _tag in due:
+            dedupe.record_verdict(seen_by_source, event, verdict)
+        mirror_collapsed(seen_by_source, collapsed)
+        for source, seen in seen_by_source.items():
+            dedupe.save_seen(source, seen)
+        return kept, collapsed
+
     def test_a_dropped_verdict_is_mirrored_too(self, tmp_path, monkeypatch):
         """A "drop" that only reached the winner's file would let the loser's
-        source resurface an event the filter already rejected."""
+        source resurface an event the filter already rejected.
+
+        ⚠️ ASSERT ON THE LOSER'S FILE. An earlier version of this test read
+        `seen_luma.json` — but `luma` is the WINNER here, and `filter_due` +
+        `record_verdict` write the winner's record whether or not the mirror runs
+        at all. It passed with `mirror_collapsed` a complete no-op, i.e. it named
+        a guarantee it did not enforce.
+        """
+        ics, page = self._pair()
+        kept, collapsed = self._settle([ics, page], tmp_path, monkeypatch, verdict="drop")
+
+        # Precondition: without this, the assertion below is about the wrong file.
+        assert [e.source for e in kept] == ["luma"]
+        assert [loser.source for _w, loser in collapsed] == ["luma_discover"]
+
+        seen_loser = json.loads((tmp_path / "seen_luma_discover.json").read_text())
+        assert seen_loser[page.external_id]["tag"] == "drop"
+
+    def test_the_mirror_does_not_re_arm_a_reminder_already_fired(self, tmp_path, monkeypatch):
+        """The MERGE branch of `mirror_collapsed`, which was entirely unguarded.
+
+        When the loser's side already tracks the event and has fired its reminder,
+        the mirror must merge into that record, not replace it. A blind overwrite
+        would reset the loser's `stages` from ["new","soon"] back to ["new"] and
+        re-arm a reminder that already went out.
+
+        Both sources are seeded so both are "already seen" — that keeps the
+        continuity rule from flipping the winner, so the fixed precedence decides
+        (`luma` wins) and the LOSER is `luma_discover`, which is the side carrying
+        the fired reminder and therefore the side the merge branch has to protect.
+        """
         ics, page = self._pair()
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
         monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+        # Winner's record: discovery only.
+        dedupe.save_seen("luma", {ics.external_id: {"stages": ["new"], "tag": "founder_ai"}})
+        # Loser's record: reminder ALREADY fired.
+        dedupe.save_seen(
+            "luma_discover",
+            {page.external_id: {"stages": ["new", "soon"], "tag": "founder_ai"}},
+        )
 
         kept, collapsed = collapse_cross_source([ics, page])
+        assert [e.source for e in kept] == ["luma"]
+        assert [loser.source for _w, loser in collapsed] == ["luma_discover"]
+
         due, seen_by_source = dedupe.filter_due(kept)
-        for event, _stage, _tag in due:
-            dedupe.record_verdict(seen_by_source, event, "drop")
         mirror_collapsed(seen_by_source, collapsed)
         for source, seen in seen_by_source.items():
             dedupe.save_seen(source, seen)
 
-        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
-        assert seen_luma[ics.external_id]["tag"] == "drop"
+        seen_loser = json.loads((tmp_path / "seen_luma_discover.json").read_text())
+        assert seen_loser[page.external_id]["stages"] == ["new", "soon"], (
+            "the mirror overwrote the loser's record instead of merging into it — "
+            "an already-fired reminder has been re-armed"
+        )
 
-    def test_the_mirror_does_not_re_arm_a_reminder_already_fired(self, tmp_path, monkeypatch):
-        """If the loser's side already tracked the event and had fired its
-        reminder, merging must not drop that stage and let it fire again."""
+    def test_the_mirror_adds_a_stage_the_loser_has_not_seen(self, tmp_path, monkeypatch):
+        """The merge is a union, not a freeze: a stage the WINNER has fired and
+        the loser has not must still propagate, or the loser's source would
+        re-fire it after a hand-off."""
         ics, page = self._pair()
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
         monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         dedupe.save_seen(
             "luma", {ics.external_id: {"stages": ["new", "soon"], "tag": "founder_ai"}}
         )
+        dedupe.save_seen(
+            "luma_discover", {page.external_id: {"stages": ["new"], "tag": None}}
+        )
 
-        kept, collapsed = collapse_cross_source([ics, page])
-        due, seen_by_source = dedupe.filter_due(kept)
+        _kept, collapsed = collapse_cross_source([ics, page])
+        seen_by_source = {
+            "luma": dedupe.load_seen("luma"),
+            "luma_discover": dedupe.load_seen("luma_discover"),
+        }
         mirror_collapsed(seen_by_source, collapsed)
-        for source, seen in seen_by_source.items():
-            dedupe.save_seen(source, seen)
 
-        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
-        assert seen_luma[ics.external_id]["stages"] == ["new", "soon"]
+        rec = seen_by_source["luma_discover"][page.external_id]
+        assert rec["stages"] == ["new", "soon"]
+        assert rec["tag"] == "founder_ai"
 
     # ------------------------------------------------------------------
     # ...and the same sequence through the REAL orchestrator.
@@ -790,7 +920,6 @@ class TestSeenSetSurvivesTheHandOff:
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
         monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         monkeypatch.setattr(orchestrator.config, "assert_required", lambda: None)
-        monkeypatch.setattr(orchestrator, "push_messages", lambda messages: None)
         monkeypatch.setattr(orchestrator, "write_archive", lambda today, md: None)
         monkeypatch.setattr(orchestrator, "sync_events", lambda events, dry_run: None)
         monkeypatch.setattr(orchestrator.source_health, "save_health", lambda health: None)
@@ -798,14 +927,23 @@ class TestSeenSetSurvivesTheHandOff:
             orchestrator, "classify", lambda e: RelevanceResult(tag="founder_ai", reason="test")
         )
 
-        def _run(*, ics: list[Event], page: list[Event]) -> None:
+        # RECORD the pushes rather than discarding them. A stub that swallows
+        # them makes "did not re-push" unobservable — the state-file assertions
+        # a re-pushing run leaves behind are byte-identical to a silent one's.
+        pushes: list[list[str]] = []
+        monkeypatch.setattr(orchestrator, "push_messages", lambda messages: pushes.append(messages))
+
+        def _run(*, ics: list[Event], page: list[Event]) -> list[list[str]]:
+            """Run once; return the pushes THIS run made."""
             monkeypatch.setattr(orchestrator.meetup, "fetch_meetup_events", lambda: [])
             monkeypatch.setattr(orchestrator.aitinkerers, "fetch_aitinkerers_events", lambda: [])
             monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", lambda: list(ics))
             monkeypatch.setattr(
                 orchestrator.luma_discover, "fetch_luma_discover_events", lambda: list(page)
             )
+            before = len(pushes)
             assert orchestrator.run() == 0
+            return pushes[before:]
 
         return _run
 
@@ -814,21 +952,37 @@ class TestSeenSetSurvivesTheHandOff:
     ):
         ics, page = self._pair()
 
-        orchestrated(ics=[], page=[page])
+        # run 1 — standalone. It is genuinely new, so it SHOULD push. Asserting
+        # this is what makes the run-3 assertion mean something: it proves the
+        # counter can see a push at all.
+        run1 = orchestrated(ics=[], page=[page])
+        assert len(run1) == 1
+        assert page.title in "\n".join(run1[0])
         assert self.API_ID in json.loads((tmp_path / "seen_luma_discover.json").read_text())
 
-        # Both sources carry it. This is the only run that can teach `luma` the
-        # event exists, and it only does so because the orchestrator calls
-        # `mirror_collapsed`.
-        orchestrated(ics=[ics], page=[page])
+        # run 2 — both sources carry it. The only run that can teach `luma` the
+        # event exists, and it only does so because orchestrator.run calls
+        # `mirror_collapsed`. Nothing new, so nothing pushed.
+        run2 = orchestrated(ics=[ics], page=[page])
+        assert run2 == []
         seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
         assert ics.external_id in seen_luma, (
             "orchestrator.run did not mirror the collapsed event into the loser's "
             "seen-set — the next run will re-push it and double-book the calendar"
         )
 
-        # It ages off the city listing. `luma` now wins, and must stay silent.
-        orchestrated(ics=[ics], page=[])
+        # run 3 — THE REGRESSION. It ages off the city listing, `luma` wins by
+        # default, and must stay silent. This is the assertion the test's title
+        # claims: zero pushes, observed, not inferred from a state file that a
+        # re-pushing run would have left looking identical.
+        run3 = orchestrated(ics=[ics], page=[])
+        assert run3 == [], (
+            f"re-pushed on the hand-off: {run3!r} — the loser's seen-set did not "
+            "carry the event, so `luma` treated it as newly discovered"
+        )
         after = json.loads((tmp_path / "seen_luma.json").read_text())
         assert after[ics.external_id]["stages"] == ["new"]
         assert after[ics.external_id]["tag"] == "founder_ai"
+
+        # run 4 — back on the listing. Still silent.
+        assert orchestrated(ics=[ics], page=[page]) == []

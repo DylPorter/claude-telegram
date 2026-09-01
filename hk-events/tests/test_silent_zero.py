@@ -130,8 +130,12 @@ class TestPageAdaptersEscalateToo:
     ):
         """The other side of the contract: an empty-but-genuine page returns []."""
         empty = {
+            # Carries the chapter-page anchor (a CollectionPage) and no events:
+            # the right page, nothing scheduled. Must be [] and not a raise.
             "aitinkerers": (
                 '<html><body><script type="application/ld+json">'
+                '{"@type":"CollectionPage","@id":"https://hong-kong.aitinkerers.org/#city-page"}'
+                '</script><script type="application/ld+json">'
                 '{"@type":"ItemList","itemListElement":[]}</script></body></html>'
             ),
             "luma_discover": (
