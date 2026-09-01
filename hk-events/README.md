@@ -52,6 +52,14 @@ hk-events-specific knobs are in `.env.example` — notably:
   when this is `1`. Until then the orchestrator validates via `gws --dry-run`.
 - `HK_EVENTS_CALENDAR_ID` — target calendar; default `primary`. Recommend a
   dedicated secondary calendar ID so auto-added events stay segregated.
+- `HK_EVENTS_FETCH_BUDGET_S` — hard wall-clock budget for the whole source-fetch
+  phase, in seconds; **default 240**. Sources are fetched in parallel, so the
+  phase costs `max(t)` rather than `sum(t)`, and anything still running when the
+  budget expires is abandoned and recorded as a failed source — the run
+  continues with what landed. This is the ceiling, because an httpx timeout does
+  **not** bound a `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s
+  fetches against `_ical_common`'s configured 25s timeout). Raise it only if you
+  also raise the unit's `TimeoutStartSec` (currently 900).
 
 ## Calendar writes (gws)
 

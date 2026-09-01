@@ -3,15 +3,47 @@ Description=job-sift daily — scrape CEDARS, classify, push prestige matches to
 After=network-online.target claude-telegram.service
 Wants=network-online.target
 Requires=claude-telegram.service
+# DELIBERATELY no Restart / RestartSec / StartLimit* directives here. Do not
+# re-add them without reading this first.
+#
+# They were added so a transient network blip would self-heal. It does not work,
+# and it is not free:
+#
+#  * It cannot fire for the outage it was added for. The in-process fetch budget
+#    turns a DNS outage into a run that COMPLETES and exits 0 — a restart never
+#    triggers there.
+#  * It duplicates the digest. The push is not idempotent: a failure in the
+#    archive write exits non-zero AFTER a successful push, so every restart
+#    re-classified and re-pushed the same items. (Ordering has since been fixed
+#    so the seen-set commits right after the push — that is the precondition
+#    below — but a push that itself half-succeeds is still not idempotent.)
+#  * It manufactures a false alarm. save_health() runs once per process, so N
+#    restarts write N increments; with a burst cap of 3 numerically equal to
+#    source_health.ALARM_THRESHOLD=3, one 15-minute blip drove a source from 0
+#    to "SOURCE DEAD — 3 consecutive failed runs".
+#
+# The daily timer IS the retry mechanism. One timer beats three interacting
+# ones. Re-add a restart only once the push is genuinely idempotent.
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/Documents/Programming/claude-telegram/job-sift
-ExecStart=%h/Documents/Programming/claude-telegram/job-sift/.venv/bin/python -m job_sift.orchestrator
+# sift wrapper refreshes the CEDARS PHPSESSID cookie from a locally logged-in
+# browser (firefox -> chrome -> chromium -> brave) before running the
+# orchestrator, so the daily run doesn't depend on a stale stored cookie.
+# Verified 2026-09-01 under a `systemd-run --user --wait --pipe` transient
+# unit (real systemd --user env/PATH, not a stripped-down approximation):
+# browser_cookie3's Firefox path reads plaintext cookies.sqlite and needs no
+# dbus/SecretService/keyring, so it works in this unit's actual runtime
+# context — see task-3-report.md. Residual limit: only helps while Firefox
+# itself still holds a live CEDARS session.
+ExecStart=%h/Documents/Programming/claude-telegram/job-sift/sift
 StandardOutput=journal
 StandardError=journal
-# 10-minute cap — classifier is fast (haiku, per-listing), most time is scraping.
-TimeoutStartSec=600
+# Backstop behind the 240s in-process fetch budget — 900s leaves ~11min of
+# headroom above budget+classify+push+save for a normal run. This is the only
+# time-based guard on the unit; see the [Unit] comment above.
+TimeoutStartSec=900
 
 [Install]
 WantedBy=default.target

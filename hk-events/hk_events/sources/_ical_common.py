@@ -19,6 +19,7 @@ import yaml
 from icalendar import Calendar
 
 from hk_events.config import HK_EVENTS_HORIZON_DAYS, PROJECT_ROOT
+from hk_events.errors import SourceFetchError
 from hk_events.schema import Event, Source
 
 log = logging.getLogger(__name__)
@@ -180,11 +181,35 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
 
 
 def fetch_feed_group(group: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
-    """Fetch + parse every configured feed for a group. Per-feed degrade."""
+    """Fetch + parse every configured feed for a group.
+
+    PARTIAL degrade, TOTAL escalation. One dead feed out of four is a partial
+    success: it is logged, skipped, and the other three still report. But if
+    EVERY configured feed failed we raise `SourceFetchError` instead of
+    returning `[]`.
+
+    That distinction is the whole point of this branch. `fetch_ics` swallows
+    `httpx.HTTPError`, and `httpx` wraps `socket.gaierror` in `ConnectError`,
+    which is an `HTTPError` — so a total DNS outage used to come back as a clean
+    empty list. The orchestrator would then find this source ABSENT from the
+    error map, `source_health` would read that absence as proof of a successful
+    fetch, reset an accumulated failure streak to 0, and write today as
+    `last_success`. A fabricated fact, persisted to disk, later rendered to a
+    human as "nothing today". Returning zero must mean we looked.
+    """
+    urls = load_feed_urls(group)
     events: list[Event] = []
-    for url in load_feed_urls(group):
+    failed = 0
+    for url in urls:
         text = fetch_ics(url)
         if text is None:
+            failed += 1
             continue
         events.extend(parse_ics(text, source=source, organizer_default=organizer_default))
+    if urls and failed == len(urls):
+        raise SourceFetchError(
+            str(source),
+            f"all {len(urls)} configured feed(s) failed to fetch — "
+            "network/DNS outage or every feed URL is dead (see log for per-feed detail)",
+        )
     return events

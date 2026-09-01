@@ -89,6 +89,15 @@ def _fmt_rolling_state(
     )
 
 
+def _prepend_alarm(messages: list[str], staleness_alarm: str | None) -> list[str]:
+    """Put the staleness alarm FIRST, ahead of the digest it invalidates.
+
+    Position is the point: a reader who stops after the first bubble must have
+    seen that a source is dead before they read "no new matches today".
+    """
+    return ([staleness_alarm] + messages) if staleness_alarm else messages
+
+
 def render(
     *,
     surfaced: list[tuple[JobListing, ClassifierResult]],
@@ -98,13 +107,16 @@ def render(
     today: date,
     source_errors: dict[str, str] | None = None,
     open_roles: list[OpenRole] | None = None,
+    staleness_alarm: str | None = None,
 ) -> list[str]:
     """Build the chunked message list for /push.
 
     Each listing gets its own bubble. A header chip leads, a footer chip closes
     with stats. If nothing surfaced, returns a single quiet "no matches" bubble
     so the daily heartbeat is visible. Any failed sources get a ⚠️ health
-    bubble appended so a broken source is never mistaken for a quiet day.
+    bubble appended so a broken source is never mistaken for a quiet day, and a
+    `staleness_alarm` (a source dead for 3+ consecutive runs) is PREPENDED so it
+    leads the digest it invalidates.
     """
     health = _fmt_source_health(source_errors)
     rolling = _fmt_rolling_state(open_roles, len(surfaced), today)
@@ -120,7 +132,7 @@ def render(
             out.append(rolling)
         if health:
             out.append(health)
-        return out
+        return _prepend_alarm(out, staleness_alarm)
 
     messages: list[str] = []
     messages.append(
@@ -145,7 +157,7 @@ def render(
         f"_Processed {total_processed} listings, {total_new} new, "
         f"{len(surfaced)} surfaced._"
     )
-    return messages
+    return _prepend_alarm(messages, staleness_alarm)
 
 
 def render_vault_archive(
@@ -154,6 +166,7 @@ def render_vault_archive(
     skipped: list[tuple[JobListing, ClassifierResult]],
     today: date,
     source_errors: dict[str, str] | None = None,
+    staleness_alarm: str | None = None,
 ) -> str:
     """Render the per-day Markdown archive that lands in the vault."""
     lines = [
@@ -166,6 +179,15 @@ def render_vault_archive(
         f"# Job Sift — {today.isoformat()}",
         "",
     ]
+
+    if staleness_alarm:
+        lines.append("## 🚨 Stale source alarm")
+        lines.append("")
+        lines.append("_A source has failed on 3+ consecutive runs. Everything below is incomplete._")
+        lines.append("")
+        for line in staleness_alarm.splitlines():
+            lines.append(f"> {line}")
+        lines.append("")
 
     if source_errors:
         lines.append("## ⚠️ Source health — these did NOT run")

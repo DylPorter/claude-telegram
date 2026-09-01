@@ -12,11 +12,13 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import date
 
-from hk_events import config
+from hk_events import config, source_health
 from hk_events.calendar_sync import sync_events
 from hk_events.classifier import classify
+from hk_events.concurrency import run_with_budget
 from hk_events.dedupe import (
     STAGE_NEW,
     STAGE_SOON,
@@ -48,37 +50,93 @@ def _setup_logging() -> None:
     )
 
 
-def _fetch_all_sources() -> list[Event]:
-    """Run every source adapter, swallow individual failures, return combined events.
+def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
+    """The sources this run will attempt, in fetch order.
 
-    Feed (iCal) sources first — clean. Scrape sources after — brittle, each one
-    already degrades to [] internally, but we also wrap here for belt-and-braces.
+    Built per call so tests (and hot-patches) that swap a module attribute
+    still take effect; the previous inline list had the same property.
     """
-    events: list[Event] = []
-    fetchers = [
+    return [
         # Clean iCal/feed tier
-        (meetup.fetch_meetup_events, "meetup"),
-        (luma.fetch_luma_events, "luma"),
+        ("meetup", meetup.fetch_meetup_events),
+        ("luma", luma.fetch_luma_events),
         # DISABLED 2026-08-09 — these three returned 0 events on every run for
         # two months and only added latency + log noise:
         #   aitinkerers  — no public feed exists (email-only chapter)
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
         # The adapters are kept so re-enabling is a one-line change once any of
-        # them has a real feed.
-        # (aitinkerers.fetch_aitinkerers_events, "aitinkerers"),
-        # (cyberport.fetch_cyberport_events, "cyberport"),
-        # (startmeuphk.fetch_startmeuphk_events, "startmeuphk"),
+        # them has a real feed. Being absent from this list also keeps them out
+        # of the staleness counters: they never run, so they never land in the
+        # error map or the succeeded list, and update_health prunes them.
+        # ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        # ("cyberport", cyberport.fetch_cyberport_events),
+        # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
     ]
-    for fetch_fn, name in fetchers:
+
+
+def enabled_sources() -> list[str]:
+    """Names of the sources this run attempts, derived from the real fetch list.
+
+    NOT what drives the staleness counters. Those are fed by what the fetch
+    phase actually observed — `_fetch_all_sources`' `succeeded` list and error
+    map — precisely so a source that is in this list but never really reported
+    cannot be scored as a success. This stays as an introspection accessor: it
+    answers "what does a run try?", which is a different question from "what
+    happened?".
+    """
+    return [name for name, _ in _source_tasks()]
+
+
+def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
+    """Run every source adapter CONCURRENTLY.
+
+    Returns `(events, errors, succeeded)`, where `succeeded` names the sources
+    that actually completed a fetch. That third value is a POSITIVE success
+    signal for `source_health` — see `update_health`. It is not derivable from
+    the other two: "in the task list and not in the error map" is exactly the
+    inference that let a total network outage reset every failure streak.
+
+    Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
+    are caught so one dead source never kills the run — but they are recorded
+    in the returned error map (keyed by source name) so the digest + archive
+    can surface a ⚠️ health line, the same way job-sift already does.
+
+    Sources run in parallel under a hard wall-clock budget (see
+    hk_events/concurrency.py for why an httpx timeout is not enough — this
+    module's own `_ical_common._TIMEOUT = 25.0` did not stop a 135s DNS
+    block). A source that blows the budget is abandoned, its partial result
+    discarded, and it lands in the SAME error map as a crashed source — a
+    timeout is a failed source, not a quiet zero.
+    """
+    events: list[Event] = []
+    errors: dict[str, str] = {}
+    succeeded: list[str] = []
+
+    tasks = _source_tasks()
+
+    budget_s = config.fetch_budget_s()
+    settled, abandoned = run_with_budget(tasks, budget_s, thread_name_prefix="hk-events-fetch")
+
+    for name, future in settled:
         try:
-            got = fetch_fn()
+            got = future.result()
             log.info("%s: %d events", name, len(got))
             events.extend(got)
+            # Returning at all is the success signal. An adapter that could not
+            # look now raises SourceFetchError, so an empty list here honestly
+            # means "I looked, there was nothing".
+            succeeded.append(name)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
-    return events
+            errors[name] = f"fetch failed: {exc}"
+
+    for name in abandoned:
+        log.error("%s fetch failed: exceeded the %.0fs fetch budget", name, budget_s)
+        errors[name] = f"fetch failed: exceeded the {budget_s:.0f}s fetch budget"
+
+    return events, errors, succeeded
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -93,11 +151,50 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         config.assert_required()
 
     # 1. Fetch raw events from all sources
-    events = _fetch_all_sources()
+    events, source_errors, fetched_ok = _fetch_all_sources()
+    if source_errors:
+        log.warning(
+            "source health: %d source(s) did not run: %s",
+            len(source_errors),
+            ", ".join(sorted(source_errors)),
+        )
+    # 1b. Roll the per-source consecutive-failure counters forward and decide
+    #     whether anything has been dead long enough to escalate. Computed
+    #     BEFORE either render path so the alarm rides on the empty digest too
+    #     — that is the run where "nothing today" is most likely to be believed.
+    health = source_health.update_health(
+        source_health.load_health(),
+        succeeded=fetched_ok,
+        errors=source_errors,
+        today=today,
+    )
+    staleness_alarm = source_health.render_alarm(health)
+    if staleness_alarm:
+        for name, rec in source_health.stale_sources(health):
+            log.error(
+                "STALE SOURCE %s: %d consecutive failed runs, last success %s",
+                name,
+                rec["consecutive_failures"],
+                rec["last_success"] or "never",
+            )
+    # Persisted before the push, not after: if the push itself blows up, the
+    # failure that caused the alarm still happened and must survive the run.
+    #
+    # NOT under --stub, mirroring job-sift. hk-events is not vulnerable TODAY
+    # — its two stub adapters (cyberport, startmeuphk) are both commented out
+    # of _source_tasks, so a stub run still fetches meetup/luma for real — but
+    # the hazard is latent: re-enabling either is a documented one-line change,
+    # and it would silently start resetting counters from canned data. A stub
+    # run is not evidence about the real world, so it does not get to write the
+    # record of it.
+    if not dry_run and not stub:
+        source_health.save_health(health)
+
     if not events:
         log.warning("no events fetched from any source — pushing heartbeat")
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today))
+            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
+            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
         return 0
 
     log.info("fetched %d events across all sources", len(events))
@@ -141,27 +238,43 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         total_processed=len(events),
         calendar_stats=calendar_stats,
         today=today,
+        source_errors=source_errors,
+        staleness_alarm=staleness_alarm,
     )
     if dry_run:
         log.info("dry-run — would push %d messages:", len(messages))
         for m in messages:
             print(m)
             print("---")
-    elif not surfaced and not config.HK_EVENTS_PUSH_EMPTY:
-        log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
     else:
-        push_messages(messages)
-        log.info("pushed %d messages", len(messages))
+        if not surfaced and not config.HK_EVENTS_PUSH_EMPTY and staleness_alarm is None:
+            log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
+        else:
+            # A staleness alarm OVERRIDES the empty-digest silence above. The
+            # gate exists so a daily "nothing today" doesn't train the reader to
+            # stop opening the digest — but on the day a source has been dead
+            # for three runs, that same silence is the bug: "nothing found" and
+            # "I could not look" would render identically, which is exactly how
+            # CEDARS stayed broken for fifty days in the sibling bot.
+            push_messages(messages)
+            log.info("pushed %d messages", len(messages))
 
-    # 6. Vault archive (audit trail)
-    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today)
-    if not dry_run:
-        write_archive(today, archive_md)
-
-    # 7. Persist seen-set (only after successful push)
-    if not dry_run:
+        # 6. Persist the seen-set as soon as delivery has settled — a push that
+        #    succeeded, or a deliberate silence — and BEFORE the archive write.
+        #    These events have now been dispatched; nothing after this point may
+        #    undeliver them. With the archive write in between, an OSError there
+        #    exited non-zero after the push but before this line, so a re-run
+        #    re-classified and re-pushed the same events. Nothing retries
+        #    automatically today (the unit carries no Restart= — see
+        #    systemd/hk-events.service), but a manual re-run has the same shape,
+        #    and this ordering is what makes any future retry safe.
         for source, seen in seen_by_source.items():
             save_seen(source, seen)
+
+    # 7. Vault archive (audit trail — after delivery is committed)
+    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
+    if not dry_run:
+        write_archive(today, archive_md)
 
     return 0
 

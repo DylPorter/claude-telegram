@@ -33,7 +33,7 @@ from typing import Iterator
 
 from bs4 import BeautifulSoup
 
-from job_sift.errors import SourceAuthError
+from job_sift.errors import SourceAuthError, SourceFetchError
 from job_sift.schema import JobListing
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,11 @@ _BADGE_RE = re.compile(
 def _gws_list_messages() -> list[dict]:
     """List recent LinkedIn job-alert messages via gws CLI.
 
+    Returns [] ONLY for a genuinely empty result. Every path where we could not
+    ask — gws missing, gws timing out, a non-zero exit, an unparseable
+    response — raises, because "I could not look" and "there was nothing" must
+    not reach the digest as the same empty list.
+
     Env overrides (for a one-time deep catch-up after an outage, without
     changing the cheap daily defaults of 2 days / 50 messages):
       - JOB_SIFT_LINKEDIN_DAYS : Gmail `newer_than` window in days (default 2).
@@ -77,8 +82,12 @@ def _gws_list_messages() -> list[dict]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        # NOT an empty inbox — we never got to ask. Escalate, or source_health
+        # scores this run as a success and resets the failure streak.
         log.warning("linkedin: gws unavailable or timed out: %s", exc)
-        return []
+        raise SourceFetchError(
+            "linkedin", f"gws is unavailable or timed out ({type(exc).__name__}) — is the CLI installed and on PATH?"
+        ) from exc
     if proc.returncode != 0:
         err = proc.stderr[:300] or proc.stdout[:300]
         # An expired/revoked OAuth token is an auth failure, not "no jobs" —
@@ -92,13 +101,20 @@ def _gws_list_messages() -> list[dict]:
                 "to re-authenticate. Permanent fix: publish the Google OAuth "
                 "app Testing→Production so refresh tokens stop expiring weekly",
             )
+        # Deliberately does NOT echo `err` into the raised message: that
+        # string reaches Telegram and the on-disk state file, and gws stderr is
+        # not guaranteed to be free of token material. It is already in the
+        # journal for whoever is debugging.
         log.warning("linkedin: gws list failed: %s", err)
-        return []
+        raise SourceFetchError(
+            "linkedin",
+            f"gws Gmail list failed (exit {proc.returncode}) — see `journalctl --user -u job-sift` for the stderr",
+        )
     try:
         return json.loads(proc.stdout).get("messages", []) or []
-    except (json.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, AttributeError) as exc:
         log.warning("linkedin: gws returned non-JSON")
-        return []
+        raise SourceFetchError("linkedin", "gws Gmail list returned a non-JSON response") from exc
 
 
 def _gws_fetch_html(message_id: str) -> str | None:
@@ -211,6 +227,10 @@ def fetch_linkedin_listings() -> list[JobListing]:
     Returns combined listings across all unread emails in the last 2 days,
     deduplicated by LinkedIn job_id within this run (the higher-level dedupe
     against seen-set happens in orchestrator).
+
+    Raises `SourceAuthError` when the OAuth token is dead and `SourceFetchError`
+    when gws could not be asked at all — an empty return means the mailbox was
+    genuinely empty.
     """
     messages = _gws_list_messages()
     if not messages:
@@ -219,6 +239,7 @@ def fetch_linkedin_listings() -> list[JobListing]:
 
     log.info("linkedin: %d alert emails to parse", len(messages))
     by_jid: dict[str, JobListing] = {}
+    unreadable = 0
     for msg in messages:
         mid = msg.get("id")
         if not mid:
@@ -226,6 +247,7 @@ def fetch_linkedin_listings() -> list[JobListing]:
         html = _gws_fetch_html(mid)
         if not html:
             log.warning("linkedin: failed to fetch body for %s", mid)
+            unreadable += 1
             continue
         count = 0
         for listing in _parse_alert_email(html):
@@ -234,6 +256,12 @@ def fetch_linkedin_listings() -> list[JobListing]:
                 by_jid[listing.external_id] = listing
                 count += 1
         log.info("linkedin: msg %s — extracted %d new listings", mid, count)
+
+    if unreadable and unreadable == len(messages):
+        raise SourceFetchError(
+            "linkedin",
+            f"listed {len(messages)} alert email(s) but could not read the body of any of them",
+        )
 
     listings = list(by_jid.values())
     log.info("linkedin: %d unique listings after within-run dedup", len(listings))

@@ -54,6 +54,32 @@ def _fmt_event(event: Event, result: RelevanceResult, stage: str = "new") -> str
     return "\n".join(parts)
 
 
+def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
+    """Format a ⚠️ health bubble for sources that failed to run.
+
+    Mirrors job_sift/render.py::_fmt_source_health. Without this, a dead feed
+    or a bot-blocked scrape returns zero and the digest reads as a clean "no
+    matches" — indistinguishable from a genuinely quiet day. Surfacing the
+    failure turns a silent blind spot into a visible, same-day fix.
+    """
+    if not source_errors:
+        return None
+    lines = ["⚠️ *Source health — did NOT run (results missing):*"]
+    for src, msg in sorted(source_errors.items()):
+        first = msg.split(" — ")[0].split(". ")[0]
+        lines.append(f"• *{src}* — {first}")
+    return "\n".join(lines)
+
+
+def _prepend_alarm(messages: list[str], staleness_alarm: str | None) -> list[str]:
+    """Put the staleness alarm FIRST, ahead of the digest it invalidates.
+
+    Position is the point: a reader who stops after the first bubble must have
+    seen that a source is dead before they read "no new relevant events today".
+    """
+    return ([staleness_alarm] + messages) if staleness_alarm else messages
+
+
 def render(
     *,
     surfaced: list[tuple[Event, RelevanceResult, str]],
@@ -61,6 +87,8 @@ def render(
     total_processed: int,
     calendar_stats: dict[str, int] | None,
     today: date,
+    source_errors: dict[str, str] | None = None,
+    staleness_alarm: str | None = None,
 ) -> list[str]:
     """Build the chunked message list for /push. One event per bubble.
 
@@ -70,13 +98,22 @@ def render(
     If nothing surfaced, returns a single quiet heartbeat bubble. The caller
     decides whether to actually send that (see HK_EVENTS_PUSH_EMPTY) — pushing
     "nothing today" every day is what trains you to stop opening the digest.
+    Any failed sources get a ⚠️ health bubble appended so a broken source is
+    never mistaken for a quiet day, and a `staleness_alarm` (a source dead for
+    3+ consecutive runs) is PREPENDED so it leads the digest it invalidates —
+    the orchestrator pushes an otherwise-silent empty digest when one is set.
     """
+    health = _fmt_source_health(source_errors)
+
     if not surfaced:
-        return [
+        out = [
             f"🎟 *HK events — {today.isoformat()}*\n"
             f"No new relevant events today. "
             f"Scanned {total_processed} events, {total_new} new."
         ]
+        if health:
+            out.append(health)
+        return _prepend_alarm(out, staleness_alarm)
 
     soon = [s for s in surfaced if s[2] == "soon"]
     fresh = [s for s in surfaced if s[2] != "soon"]
@@ -97,6 +134,9 @@ def render(
     for event, result, stage in soon + fresh:
         messages.append(_fmt_event(event, result, stage))
 
+    if health:
+        messages.append(health)
+
     footer = f"_Scanned {total_processed}, {total_new} new, {len(surfaced)} surfaced."
     if calendar_stats:
         footer += (
@@ -106,7 +146,7 @@ def render(
     else:
         footer += "_"
     messages.append(footer)
-    return messages
+    return _prepend_alarm(messages, staleness_alarm)
 
 
 def render_vault_archive(
@@ -114,6 +154,8 @@ def render_vault_archive(
     surfaced: list[tuple[Event, RelevanceResult, str]],
     dropped: list[tuple[Event, RelevanceResult, str]],
     today: date,
+    source_errors: dict[str, str] | None = None,
+    staleness_alarm: str | None = None,
 ) -> str:
     """Render the per-day Markdown archive that lands in the vault (audit trail)."""
     lines = [
@@ -126,6 +168,24 @@ def render_vault_archive(
         f"# HK Events — {today.isoformat()}",
         "",
     ]
+
+    if staleness_alarm:
+        lines.append("## 🚨 Stale source alarm")
+        lines.append("")
+        lines.append("_A source has failed on 3+ consecutive runs. Everything below is incomplete._")
+        lines.append("")
+        for line in staleness_alarm.splitlines():
+            lines.append(f"> {line}")
+        lines.append("")
+
+    if source_errors:
+        lines.append("## ⚠️ Source health — these did NOT run")
+        lines.append("")
+        lines.append("_Events from these sources are MISSING today. \"None\" below is not authoritative until fixed._")
+        lines.append("")
+        for src, msg in sorted(source_errors.items()):
+            lines.append(f"- **{src}** — {msg}")
+        lines.append("")
 
     if surfaced:
         lines.append("## Surfaced")

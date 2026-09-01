@@ -4,8 +4,9 @@ Meetup exposes a per-group iCal feed at:
     https://www.meetup.com/<group-slug>/events/ical/
 
 Group slugs live in config/sources.yaml under ical_feeds.meetup. These feeds are
-clean and preferred over scraping. Per-feed failures degrade to [] (the shared
-_ical_common helper logs and skips).
+clean and preferred over scraping. A single dead feed degrades (the shared
+_ical_common helper logs and skips it); EVERY feed failing raises
+SourceFetchError, because an empty return has to mean "I looked".
 
 CONFIRMED slug: data-science-andgenai-hk (Data Science & Generative AI Hong Kong)
 TODO slug:      vLLM Hong Kong — exact Meetup group slug not yet verified.
