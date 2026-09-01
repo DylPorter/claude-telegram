@@ -108,7 +108,8 @@ def assert_required() -> None:
     if not CEDARS_COOKIES_PATH.exists():
         raise SystemExit(
             f"CEDARS cookies not found at {CEDARS_COOKIES_PATH}. "
-            "Export from Chrome — see README."
+            "Log into https://web2.cedars.hku.hk/jobs/ in Firefox, then run "
+            "./sift to refresh."
         )
     if VAULT_ROOT and not VAULT_ROOT.exists():
         raise SystemExit(f"VAULT_ROOT does not exist: {VAULT_ROOT}")

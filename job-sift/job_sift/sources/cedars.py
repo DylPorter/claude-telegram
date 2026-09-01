@@ -62,8 +62,9 @@ def _fetch_listings_page(page: int = 1) -> str:
     cookies = _load_cookies()
     if not cookies:
         raise RuntimeError(
-            "no cedars cookies — export from Chrome to "
-            f"{CEDARS_COOKIES_PATH}"
+            f"no cedars cookies at {CEDARS_COOKIES_PATH} — log into "
+            "https://web2.cedars.hku.hk/jobs/ in Firefox, then run ./sift "
+            "(it refreshes the cookie automatically)."
         )
     url = CEDARS_PORTAL_URL
     if page > 1:
@@ -83,8 +84,9 @@ def _fetch_listings_page(page: int = 1) -> str:
             raise SourceAuthError(
                 "cedars",
                 "CEDARS session cookie expired — request was redirected to "
-                f"{final_page}. Re-export a fresh PHPSESSID from a logged-in "
-                f"Chrome session into {CEDARS_COOKIES_PATH}",
+                f"{final_page}. Log into https://web2.cedars.hku.hk/jobs/ in "
+                "Firefox (a successful cookie refresh does not mean a valid "
+                "session) and re-run ./sift.",
             )
         return resp.text
 
