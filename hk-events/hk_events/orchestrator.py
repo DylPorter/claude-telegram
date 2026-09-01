@@ -165,7 +165,15 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             )
     # Persisted before the push, not after: if the push itself blows up, the
     # failure that caused the alarm still happened and must survive the run.
-    if not dry_run:
+    #
+    # NOT under --stub, mirroring job-sift. hk-events is not vulnerable TODAY
+    # — its two stub adapters (cyberport, startmeuphk) are both commented out
+    # of _source_tasks, so a stub run still fetches meetup/luma for real — but
+    # the hazard is latent: re-enabling either is a documented one-line change,
+    # and it would silently start resetting counters from canned data. A stub
+    # run is not evidence about the real world, so it does not get to write the
+    # record of it.
+    if not dry_run and not stub:
         source_health.save_health(health)
 
     if not events:

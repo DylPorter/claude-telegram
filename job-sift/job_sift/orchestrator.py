@@ -216,7 +216,15 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             )
     # Persisted before the push, not after: if the push itself blows up, the
     # failure that caused the alarm still happened and must survive the run.
-    if not dry_run:
+    #
+    # NOT under --stub. `--stub` sets JOB_SIFT_STUB=1, which makes
+    # sources/cedars.py return canned listings and never fail — so cedars
+    # leaves the error map and RESETS to zero. Writing that zero would let a
+    # debug run on the live box wipe the evidence of the exact outage this
+    # alarm exists to catch (verified: a 49-run streak went to 0 after one
+    # `run(dry_run=False, stub=True)`). A stub run is not evidence about the
+    # real world, so it does not get to write the record of it.
+    if not dry_run and not stub:
         source_health.save_health(health)
 
     if not listings:

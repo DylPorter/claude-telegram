@@ -34,6 +34,10 @@ _DAY = date(2026, 9, 1)
 def _isolated_state(monkeypatch, tmp_path):
     """Never touch the operator's real .data/state/."""
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    # run(stub=True) sets this in os.environ and never unsets it. Letting
+    # monkeypatch own the key means the teardown reverts it, so a stub test
+    # cannot leak stub mode into whatever runs next.
+    monkeypatch.setenv("HK_EVENTS_STUB", "0")
     return tmp_path
 
 
@@ -119,8 +123,16 @@ class TestThresholdBoundary:
             health = _run_once(health, errors={"meetup": "boom"})
         assert "last successful fetch: 2026-08-29" in source_health.render_alarm(health)
 
-    def test_never_succeeded_says_never(self):
-        assert "last successful fetch: never" in source_health.render_alarm(self._streak(3))
+    def test_no_recorded_success_is_bounded_by_first_seen_not_called_never(self):
+        """"never" would be a fabricated absolute — the state only knows what
+        it has observed since it started tracking the source."""
+        alarm = source_health.render_alarm(self._streak(3))
+        assert "no successful fetch since tracking began 2026-09-01" in alarm
+        assert "never" not in alarm
+
+    def test_unknown_when_not_even_first_seen_is_known(self):
+        alarm = source_health.render_alarm({"meetup": {"consecutive_failures": 3}})
+        assert "last successful fetch: unknown" in alarm
 
 
 class TestAbsenceIsNotFailure:
@@ -174,6 +186,35 @@ class TestPersistence:
 
     def test_missing_file_is_empty_not_an_error(self):
         assert source_health.load_health() == {}
+
+    def test_first_seen_is_set_once_and_carried_forward(self):
+        health = _run_once({}, errors={"meetup": "boom"}, today=date(2026, 8, 1))
+        assert health["meetup"]["first_seen"] == "2026-08-01"
+        for day in (2, 3, 4):
+            health = _run_once(health, errors={"meetup": "boom"}, today=date(2026, 8, day))
+        assert health["meetup"]["first_seen"] == "2026-08-01"
+
+    def test_save_is_atomic_and_leaves_no_tmp_files(self, _isolated_state):
+        source_health.save_health(_run_once({}, errors={"meetup": "boom"}))
+        source_health.save_health(_run_once({}, errors={}))
+        assert [p.name for p in _isolated_state.iterdir()] == ["source_health.json"]
+
+    def test_a_failed_save_leaves_the_previous_state_intact(self, _isolated_state, monkeypatch):
+        """A SIGTERM mid-write must not truncate the file into 'corrupt' —
+        that would reset a dead source's streak and buy it three more runs of
+        silence, which is the exact failure this module exists to prevent."""
+        good = _run_once({}, errors={"meetup": "boom"})
+        source_health.save_health(good)
+
+        def _die(*a, **k):
+            raise OSError("SIGTERM mid-write")
+
+        monkeypatch.setattr(source_health.os, "replace", _die)
+        with pytest.raises(OSError):
+            source_health.save_health(_run_once(good, errors={}))
+
+        assert source_health.load_health() == good
+        assert [p.name for p in _isolated_state.iterdir()] == ["source_health.json"]
 
     def test_corrupt_file_starts_fresh_instead_of_killing_the_run(self, _isolated_state):
         (_isolated_state / "source_health.json").write_text("{not json")
@@ -338,6 +379,30 @@ class TestOrchestratorPersistence:
         orchestrator.run(dry_run=True)
 
         assert not (_isolated_state / "source_health.json").exists()
+
+    def test_stub_run_does_not_wipe_a_standing_streak(self, monkeypatch, _isolated_state):
+        """hk-events is not vulnerable today (its two stub adapters are both
+        disabled), but re-enabling either is a documented one-line change, so
+        the guard is pinned here too rather than left to be rediscovered."""
+        source_health.save_health(
+            {"meetup": {"consecutive_failures": 49, "last_success": "2026-07-04"}}
+        )
+        _Harness(monkeypatch, events=[], errors={})
+
+        assert orchestrator.run(dry_run=False, stub=True) == 0
+
+        assert source_health.load_health()["meetup"]["consecutive_failures"] == 49
+
+    def test_a_real_run_with_the_same_inputs_does_reset(self, monkeypatch, _isolated_state):
+        """Control: it must be --stub doing the protecting, not the harness."""
+        source_health.save_health(
+            {"meetup": {"consecutive_failures": 49, "last_success": "2026-07-04"}}
+        )
+        _Harness(monkeypatch, events=[], errors={})
+
+        assert orchestrator.run(dry_run=False, stub=False) == 0
+
+        assert source_health.load_health()["meetup"]["consecutive_failures"] == 0
 
     def test_healthy_run_resets_a_standing_alarm(self, monkeypatch, _isolated_state):
         monkeypatch.setattr(config, "HK_EVENTS_PUSH_EMPTY", False)

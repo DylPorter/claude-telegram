@@ -43,13 +43,16 @@ State shape (`.data/state/source_health.json`):
     {"meetup": {"consecutive_failures": 3,
                 "last_success": "2026-08-29",
                 "last_failure": "2026-09-01",
-                "last_error": "fetch failed: connection reset"}}
+                "last_error": "fetch failed: connection reset",
+                "first_seen": "2026-06-01"}}
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from collections.abc import Iterable, Mapping
 from datetime import date
 from pathlib import Path
@@ -109,11 +112,38 @@ def _normalize(rec: Mapping) -> dict:
         "last_success": rec.get("last_success"),
         "last_failure": rec.get("last_failure"),
         "last_error": rec.get("last_error"),
+        # Date this source's record was created. It bounds what the state can
+        # honestly claim: with no `last_success`, all we know is "not since
+        # `first_seen`" — NOT "never". See _fmt_last_success.
+        "first_seen": rec.get("first_seen"),
     }
 
 
 def save_health(health: Mapping[str, dict]) -> None:
-    _path().write_text(json.dumps(health, indent=2, sort_keys=True))
+    """Write the counters ATOMICALLY (tmp file + os.replace).
+
+    `dedupe.save_seen` gets away with a plain write_text; this file does not.
+    The whole plan exists because systemd SIGTERM'd a run mid-flight, and a
+    truncated state file here reads as corrupt, resets to empty, and silently
+    buys a dead source three more runs of silence — the exact failure being
+    fixed. A reader either sees the old file or the new one, never a half one.
+    """
+    path = _path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(health, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave a stray tmp file behind; the old state stays intact.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def update_health(
@@ -138,12 +168,14 @@ def update_health(
     out: dict[str, dict] = {}
     for name in names:
         prev = _normalize(health.get(name) or {})
+        first_seen = prev["first_seen"] or today.isoformat()
         if name in errors:
             out[name] = {
                 "consecutive_failures": prev["consecutive_failures"] + 1,
                 "last_success": prev["last_success"],
                 "last_failure": today.isoformat(),
                 "last_error": str(errors[name])[:_MAX_ERROR_CHARS],
+                "first_seen": first_seen,
             }
         else:
             out[name] = {
@@ -151,6 +183,7 @@ def update_health(
                 "last_success": today.isoformat(),
                 "last_failure": prev["last_failure"],
                 "last_error": None,
+                "first_seen": first_seen,
             }
     return out
 
@@ -172,6 +205,26 @@ def _short(msg) -> str:
     return str(msg or "").split(" — ")[0].split(". ")[0].strip() or "no error recorded"
 
 
+def _fmt_last_success(rec: Mapping) -> str:
+    """Say only what the state can support about the last good fetch.
+
+    A bare "never" is a fabricated absolute: a source that worked for months
+    renders as never-succeeded after a corrupt-state reset, or after being
+    pruned and re-added. In the one message whose entire job is to be scrupulous
+    about the difference between "nothing found" and "I could not look", that is
+    the same error in miniature.
+
+    So: a real date when we have one; "not since <first_seen>" when the record
+    is continuous back to its creation and holds no success (true, and bounded
+    by what we actually observed); "unknown" when we cannot even establish that.
+    """
+    if rec.get("last_success"):
+        return f"last successful fetch: {rec['last_success']}"
+    if rec.get("first_seen"):
+        return f"no successful fetch since tracking began {rec['first_seen']}"
+    return "last successful fetch: unknown"
+
+
 def render_alarm(
     health: Mapping[str, dict], *, threshold: int = ALARM_THRESHOLD
 ) -> str | None:
@@ -187,10 +240,9 @@ def render_alarm(
     for name, rec in stale:
         rec = _normalize(rec)
         runs = rec["consecutive_failures"]
-        last_ok = rec["last_success"] or "never"
         lines.append(
             f"• *{name}* — {runs} consecutive failed runs "
-            f"(last successful fetch: {last_ok}) — {_short(rec['last_error'])}"
+            f"({_fmt_last_success(rec)}) — {_short(rec['last_error'])}"
         )
     lines.append(
         "_Nothing from these sources reached this digest. "
