@@ -120,6 +120,13 @@ class TestAdapterEscalatesTotalFailure:
 class TestLinkedInEscalatesTotalFailure:
     """linkedin.py:96 was the case the earlier review parked. Same shape."""
 
+    @pytest.fixture(autouse=True)
+    def _use_the_real_adapter(self, real_sources):
+        """These tests call the adapter directly, so they must undo
+        `conftest.stub_all_sources`. `no_network` still applies — the transport
+        here is `subprocess`, patched per-test."""
+        real_sources()
+
     def _gws(self, monkeypatch, *, returncode=0, stdout="", stderr="", exc=None):
         def run(cmd, **kwargs):
             if exc is not None:
@@ -192,7 +199,10 @@ class TestStreakSurvivesATotalOutage:
         monkeypatch.setenv("JOB_SIFT_STUB", "0")
         return tmp_path
 
-    def _total_outage(self, monkeypatch):
+    def _total_outage(self, monkeypatch, real_sources):
+        # This reproduction is ABOUT the genuine adapters swallowing the
+        # outage, so it opts back out of `conftest.stub_all_sources`.
+        real_sources()
         # The three ATS adapters go through their REAL code path with the
         # network pulled out from under them — that is the swallow being tested.
         monkeypatch.setattr(httpx.Client, "get", _outage)
@@ -211,16 +221,16 @@ class TestStreakSurvivesATotalOutage:
         )
         monkeypatch.setattr(orchestrator, "load_seen", lambda source: set())
 
-    def test_every_source_lands_in_the_error_map(self, monkeypatch):
-        self._total_outage(monkeypatch)
+    def test_every_source_lands_in_the_error_map(self, monkeypatch, real_sources):
+        self._total_outage(monkeypatch, real_sources)
         listings, errors, succeeded = orchestrator._fetch_all_sources()
 
         assert listings == []
         assert succeeded == []
         assert set(errors) == set(orchestrator.enabled_sources())
 
-    def test_the_streak_grows_and_last_success_does_not_advance(self, monkeypatch):
-        self._total_outage(monkeypatch)
+    def test_the_streak_grows_and_last_success_does_not_advance(self, monkeypatch, real_sources):
+        self._total_outage(monkeypatch, real_sources)
         _listings, errors, succeeded = orchestrator._fetch_all_sources()
 
         health = source_health.update_health(
