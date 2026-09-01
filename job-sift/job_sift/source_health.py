@@ -213,6 +213,68 @@ def update_health(
     return out
 
 
+def dropped_while_stale(
+    prior: Mapping[str, dict],
+    current: Mapping[str, dict],
+    *,
+    threshold: int = ALARM_THRESHOLD,
+) -> list[tuple[str, dict]]:
+    """Sources pruned this run that were carrying a standing alarm.
+
+    Pruning is right — you cannot be stale if nobody asked you anything — but it
+    is also the one way to make a live alarm disappear without fixing anything:
+    delete the source's config key and the record goes with it, silently.
+
+    Two things make that worse than it sounds. The digest cannot show it, because
+    `render._fmt_source_health` is driven by the error map and a pruned source is
+    in neither map. And the prune RESETS THE RE-ARM CLOCK: restoring the config
+    gives `update_health` no `prev`, so `first_seen` becomes today and
+    `last_success` is None — a source that was twelve runs dead comes back
+    looking brand new and needs another `threshold` runs before it can shout
+    again. That is the exact "buying it another ALARM_THRESHOLD runs of looking
+    healthy" failure `save_health` was hardened against, reached through a YAML
+    edit instead of a truncated file.
+
+    So the drop gets one line in the push. Worst streak first, then alphabetical
+    — same ordering as `stale_sources`.
+    """
+    hits = [
+        (name, _normalize(rec))
+        for name, rec in prior.items()
+        if name not in current and _normalize(rec)["consecutive_failures"] >= threshold
+    ]
+    return sorted(hits, key=lambda kv: (-kv[1]["consecutive_failures"], kv[0]))
+
+
+def render_drop_notice(
+    prior: Mapping[str, dict],
+    current: Mapping[str, dict],
+    *,
+    threshold: int = ALARM_THRESHOLD,
+) -> str | None:
+    """The bubble for those drops. None when nothing alarming was pruned.
+
+    Deliberately NOT an alarm: nothing failed this run, and dressing a
+    configuration change up as a failure is the same fabrication in the other
+    direction. It states what was dropped, what streak it was carrying, and what
+    would explain it — and leaves the call to the reader.
+
+    Per-run and self-clearing by construction. The record is gone from the state
+    file after this run, so `prior` no longer holds it and the next run says
+    nothing. A deliberate disable costs exactly one line, once; it cannot nag,
+    and it accrues nothing, so no schema change is needed to carry it.
+    """
+    gone = dropped_while_stale(prior, current, threshold=threshold)
+    if not gone:
+        return None
+    return "\n".join(
+        f"ℹ️ *{name}* — dropped from health tracking (no config this run) "
+        f"while carrying a {rec['consecutive_failures']}-run failure streak. "
+        "If that wasn't deliberate, its config is missing."
+        for name, rec in gone
+    )
+
+
 def stale_sources(
     health: Mapping[str, dict], *, threshold: int = ALARM_THRESHOLD
 ) -> list[tuple[str, dict]]:

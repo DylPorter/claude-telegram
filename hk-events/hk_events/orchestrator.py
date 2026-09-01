@@ -174,8 +174,9 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #     whether anything has been dead long enough to escalate. Computed
     #     BEFORE either render path so the alarm rides on the empty digest too
     #     — that is the run where "nothing today" is most likely to be believed.
+    prior_health = source_health.load_health()
     health = source_health.update_health(
-        source_health.load_health(),
+        prior_health,
         succeeded=fetched_ok,
         errors=source_errors,
         today=today,
@@ -189,6 +190,26 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
                 rec["consecutive_failures"],
                 rec["last_success"] or "never",
             )
+    # 1c. A source can also leave the counters entirely: pruned because it
+    #     reported nothing this run. That is correct — you cannot be stale if
+    #     nobody asked you anything — but it is the one way to make a STANDING
+    #     alarm disappear without fixing anything, and the digest cannot show it
+    #     (the ⚠️ health line is driven by the error map, and a pruned source is
+    #     in neither map). Worse, the drop resets the re-arm clock: restore the
+    #     config and the source comes back with no `first_seen` and no
+    #     `last_success`, needing another ALARM_THRESHOLD runs before it can
+    #     shout again. So a drop that took a live alarm with it gets one line in
+    #     the push — not an alarm, because nothing failed; a statement of what
+    #     stopped being watched. Self-clearing: the record is gone from the
+    #     state file after this run, so the next run says nothing.
+    drop_notice = source_health.render_drop_notice(prior_health, health)
+    for name, rec in source_health.dropped_while_stale(prior_health, health):
+        log.error(
+            "DROPPED WHILE STALE %s: pruned with %d consecutive failed runs on the clock",
+            name,
+            rec["consecutive_failures"],
+        )
+
     # Persisted before the push, not after: if the push itself blows up, the
     # failure that caused the alarm still happened and must survive the run.
     #
@@ -205,8 +226,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     if not events:
         log.warning("no events fetched from any source — pushing heartbeat")
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
-            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm))
+            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
+            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
     log.info("fetched %d events across all sources", len(events))
@@ -252,6 +273,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         today=today,
         source_errors=source_errors,
         staleness_alarm=staleness_alarm,
+        drop_notice=drop_notice,
     )
     if dry_run:
         log.info("dry-run — would push %d messages:", len(messages))
@@ -259,7 +281,12 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             print(m)
             print("---")
     else:
-        if not surfaced and not config.HK_EVENTS_PUSH_EMPTY and staleness_alarm is None:
+        if (
+            not surfaced
+            and not config.HK_EVENTS_PUSH_EMPTY
+            and staleness_alarm is None
+            and drop_notice is None
+        ):
             log.info("nothing surfaced — staying silent (HK_EVENTS_PUSH_EMPTY=0)")
         else:
             # A staleness alarm OVERRIDES the empty-digest silence above. The
@@ -268,6 +295,11 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             # for three runs, that same silence is the bug: "nothing found" and
             # "I could not look" would render identically, which is exactly how
             # CEDARS stayed broken for fifty days in the sibling bot.
+            #
+            # A drop notice overrides it for the same reason, one step removed:
+            # a source that was carrying a live alarm has just left the counters
+            # because it had no config. Staying silent about that is how a real
+            # alarm gets deleted by a YAML edit that nobody meant to make.
             push_messages(messages)
             log.info("pushed %d messages", len(messages))
 
@@ -284,7 +316,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             save_seen(source, seen)
 
     # 7. Vault archive (audit trail — after delivery is committed)
-    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm)
+    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
     if not dry_run:
         write_archive(today, archive_md)
 

@@ -442,3 +442,139 @@ class TestOrchestratorIntegration:
 
         assert source_health.load_health()["cedars"]["consecutive_failures"] == 0
         assert not h.pushed[0][0].startswith("🚨")
+
+
+class TestDropNoticeUnit:
+    """Pruning is right, but it is also the one way to make a LIVE alarm vanish
+    without fixing anything: drop the source's config key and the record goes
+    with it. The digest cannot show that — the ⚠️ health line is driven by the
+    error map and a pruned source is in neither map — and the drop resets the
+    re-arm clock, so the source comes back looking brand new and needs another
+    ALARM_THRESHOLD runs before it can shout again. One line in the push, no
+    schema change, no accrual."""
+
+    _STALE = {"cedars": {"consecutive_failures": 12, "last_success": "2026-07-04"}}
+
+    def test_a_pruned_source_at_the_threshold_produces_the_line(self):
+        current = source_health.update_health(
+            dict(self._STALE), succeeded=[], errors={}, today=_DAY
+        )
+        assert current == {}, "premise: the record really was pruned"
+
+        notice = source_health.render_drop_notice(self._STALE, current)
+
+        assert notice is not None
+        assert "cedars" in notice
+        assert "12-run failure streak" in notice
+        assert "dropped from health tracking" in notice
+
+    def test_exactly_at_the_threshold_counts(self):
+        prior = {"cedars": {"consecutive_failures": source_health.ALARM_THRESHOLD}}
+        assert source_health.render_drop_notice(prior, {}) is not None
+
+    def test_one_below_the_threshold_says_nothing(self):
+        """A source pruned while merely wobbling is not news — it never had a
+        standing alarm to lose."""
+        prior = {"cedars": {"consecutive_failures": source_health.ALARM_THRESHOLD - 1}}
+        assert source_health.render_drop_notice(prior, {}) is None
+
+    def test_a_source_that_is_still_tracked_is_not_a_drop(self):
+        """Still failing, still in the map, still alarming — not a drop."""
+        current = source_health.update_health(
+            dict(self._STALE), succeeded=[], errors={"cedars": "still dead"}, today=_DAY
+        )
+        assert source_health.render_drop_notice(self._STALE, current) is None
+        assert source_health.render_alarm(current) is not None
+
+    def test_it_claims_neither_failure_nor_success(self):
+        notice = source_health.render_drop_notice(self._STALE, {})
+        assert "🚨" not in notice
+        assert _DAY.isoformat() not in notice
+
+    def test_worst_streak_leads(self):
+        prior = {
+            "lever": {"consecutive_failures": 4},
+            "cedars": {"consecutive_failures": 20},
+            "ashby": {"consecutive_failures": 1},
+        }
+        lines = source_health.render_drop_notice(prior, {}).splitlines()
+        assert len(lines) == 2, "the sub-threshold source must not get a line"
+        assert "cedars" in lines[0]
+        assert "lever" in lines[1]
+
+
+class TestDropNoticeThroughTheOrchestrator:
+    def test_the_notice_reaches_the_push_on_an_empty_digest(
+        self, monkeypatch, _isolated_state
+    ):
+        """Telegram is the frontend; a journal warning is not a signal here.
+        This is the run where the reader is most likely to believe "none today"."""
+        source_health.save_health(
+            {"cedars": {"consecutive_failures": 12, "last_success": "2026-07-04"}}
+        )
+        # cedars in NEITHER set — exactly what an unconfigured source produces.
+        h = _Harness(
+            monkeypatch,
+            listings=[],
+            errors={},
+            succeeded=[s for s in orchestrator.enabled_sources() if s != "cedars"],
+        )
+
+        assert orchestrator.run() == 0
+
+        assert len(h.pushed) == 1
+        assert any("dropped from health tracking" in m for m in h.pushed[0])
+        assert any("12-run failure streak" in m for m in h.pushed[0])
+
+    def test_a_sub_threshold_drop_adds_no_bubble(self, monkeypatch, _isolated_state):
+        source_health.save_health({"cedars": {"consecutive_failures": 1}})
+        h = _Harness(
+            monkeypatch,
+            listings=[],
+            errors={},
+            succeeded=[s for s in orchestrator.enabled_sources() if s != "cedars"],
+        )
+
+        assert orchestrator.run() == 0
+
+        assert not any("dropped from health tracking" in m for m in h.pushed[0])
+
+    def test_the_notice_is_self_clearing(self, monkeypatch, _isolated_state):
+        """A deliberate disable costs one line, ONCE. The record is gone from
+        the state file after run one, so run two has nothing to report."""
+        source_health.save_health({"cedars": {"consecutive_failures": 12}})
+        others = [s for s in orchestrator.enabled_sources() if s != "cedars"]
+
+        first = _Harness(monkeypatch, listings=[], errors={}, succeeded=others)
+        assert orchestrator.run() == 0
+        assert any("dropped from health tracking" in m for m in first.pushed[0])
+
+        second = _Harness(monkeypatch, listings=[], errors={}, succeeded=others)
+        assert orchestrator.run() == 0
+        assert not any("dropped from health tracking" in m for m in second.pushed[0])
+
+    def test_dry_run_writes_nothing_and_pushes_nothing(self, monkeypatch, _isolated_state):
+        source_health.save_health({"cedars": {"consecutive_failures": 12}})
+        before = (_isolated_state / "source_health.json").read_text()
+        h = _Harness(
+            monkeypatch,
+            listings=[],
+            errors={},
+            succeeded=[s for s in orchestrator.enabled_sources() if s != "cedars"],
+        )
+
+        assert orchestrator.run(dry_run=True) == 0
+
+        assert (_isolated_state / "source_health.json").read_text() == before
+        assert h.pushed == []
+
+    def test_the_notice_also_lands_in_the_vault_archive(self):
+        md = render_vault_archive(
+            surfaced=[],
+            skipped=[],
+            today=_DAY,
+            source_errors=None,
+            drop_notice="ℹ️ *cedars* — dropped from health tracking",
+        )
+        assert "## ℹ️ Dropped from health tracking" in md
+        assert "> ℹ️ *cedars* — dropped from health tracking" in md

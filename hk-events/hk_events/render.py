@@ -71,13 +71,19 @@ def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
     return "\n".join(lines)
 
 
-def _prepend_alarm(messages: list[str], staleness_alarm: str | None) -> list[str]:
-    """Put the staleness alarm FIRST, ahead of the digest it invalidates.
+def _prepend_alarm(
+    messages: list[str],
+    staleness_alarm: str | None,
+    drop_notice: str | None = None,
+) -> list[str]:
+    """Put the standing banners FIRST, ahead of the digest they qualify.
 
-    Position is the point: a reader who stops after the first bubble must have
-    seen that a source is dead before they read "no new relevant events today".
+    Alarm before notice: "a source is dead" outranks "a source stopped being
+    tracked". Both go above the digest for the same reason — a reader who stops
+    after the first bubble must have seen it before they read "none today".
     """
-    return ([staleness_alarm] + messages) if staleness_alarm else messages
+    banners = [b for b in (staleness_alarm, drop_notice) if b]
+    return banners + messages
 
 
 def render(
@@ -89,6 +95,7 @@ def render(
     today: date,
     source_errors: dict[str, str] | None = None,
     staleness_alarm: str | None = None,
+    drop_notice: str | None = None,
 ) -> list[str]:
     """Build the chunked message list for /push. One event per bubble.
 
@@ -113,7 +120,7 @@ def render(
         ]
         if health:
             out.append(health)
-        return _prepend_alarm(out, staleness_alarm)
+        return _prepend_alarm(out, staleness_alarm, drop_notice)
 
     soon = [s for s in surfaced if s[2] == "soon"]
     fresh = [s for s in surfaced if s[2] != "soon"]
@@ -146,7 +153,7 @@ def render(
     else:
         footer += "_"
     messages.append(footer)
-    return _prepend_alarm(messages, staleness_alarm)
+    return _prepend_alarm(messages, staleness_alarm, drop_notice)
 
 
 def render_vault_archive(
@@ -156,6 +163,7 @@ def render_vault_archive(
     today: date,
     source_errors: dict[str, str] | None = None,
     staleness_alarm: str | None = None,
+    drop_notice: str | None = None,
 ) -> str:
     """Render the per-day Markdown archive that lands in the vault (audit trail)."""
     lines = [
@@ -175,6 +183,18 @@ def render_vault_archive(
         lines.append("_A source has failed on 3+ consecutive runs. Everything below is incomplete._")
         lines.append("")
         for line in staleness_alarm.splitlines():
+            lines.append(f"> {line}")
+        lines.append("")
+
+    if drop_notice:
+        lines.append("## ℹ️ Dropped from health tracking")
+        lines.append("")
+        lines.append(
+            "_A source carrying a standing alarm was pruned this run because it "
+            "had no config. Nothing failed — but nothing looked, either._"
+        )
+        lines.append("")
+        for line in drop_notice.splitlines():
             lines.append(f"> {line}")
         lines.append("")
 
