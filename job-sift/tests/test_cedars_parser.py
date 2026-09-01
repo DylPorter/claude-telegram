@@ -24,11 +24,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 from bs4 import BeautifulSoup
 
 from job_sift import orchestrator, source_health
-from job_sift.errors import SourceFetchError
+from job_sift.errors import SourceAuthError, SourceFetchError
 from job_sift.sources import cedars
 
 # The genuine adapter, captured at import — `conftest.stub_all_sources` replaces
@@ -90,6 +91,62 @@ def _real_portal_page_with_no_rows() -> str:
     return str(soup)
 
 
+def _real_portal_serving_a_maintenance_notice() -> str:
+    """The captured page with the results table swapped for a notice.
+
+    THE SHAPE THAT MATTERS MOST HERE. A maintenance page served BY CEDARS keeps
+    CEDARS' own header, menu and footer — so every portal anchor is satisfied
+    and the only thing missing is the results table. An earlier cut of this
+    module read that as "we reached the portal, so zero is the answer" and
+    returned `[]` on page 1, which is the fifty-day incident's exact mechanism.
+    """
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    table = soup.select_one("table.tablesorter")
+    notice = soup.new_tag("p")
+    notice.string = "NETjobs is undergoing scheduled maintenance. Please try again later."
+    table.replace_with(notice)
+    return str(soup)
+
+
+def _real_portal_with_a_renamed_table_class() -> str:
+    """The captured page with `tablesorter` renamed. Rows and chrome intact.
+
+    The third cause the old error message named. The listings are RIGHT THERE
+    and the selector no longer reaches them, so a quiet `[]` here would be a
+    fabricated zero standing next to the data it failed to read.
+    """
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    soup.select_one("table.tablesorter")["class"] = ["results-grid"]
+    return str(soup)
+
+
+def _real_portal_header_without_its_content() -> str:
+    """The captured page with `#content` removed — header, menu and footer kept.
+
+    What a truncated or half-rendered response looks like: all the chrome the
+    anchors read, none of the page that carries an answer.
+    """
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    soup.select_one("#content").decompose()
+    return str(soup)
+
+
+# The negatives, derived from the SAME captured page as the positives.
+#
+# The hand-written shapes in `_NOT_A_LISTINGS_PAGE` below are chrome-less by
+# construction, which makes them easy rejections: any anchor at all rejects a
+# page with no markup in it. These are the hard ones, and they are the realistic
+# ones — a page that is unmistakably CEDARS and still carries no answer. Since
+# rejection is the whole job, the negatives need to be at least as real as the
+# positives.
+_REAL_BUT_NOT_A_LISTINGS_PAGE = {
+    "portal_serving_maintenance": _real_portal_serving_a_maintenance_notice,
+    "portal_with_renamed_table_class": _real_portal_with_a_renamed_table_class,
+    "portal_header_without_content": _real_portal_header_without_its_content,
+    "portal_with_the_table_removed": _real_portal_page_without_its_table,
+}
+
+
 # Shapes a real portal can serve on a 200 that are NOT a listings page. The
 # point of the table is that none of them are exotic: the first is what an
 # expired session gets when the bounce target is not in the two-name whitelist.
@@ -148,10 +205,19 @@ class TestThePortalAnchor:
         """EVENT-INDEPENDENCE, direction 1. Same page, no data rows."""
         assert cedars._is_portal_page(_real_portal_page_with_no_rows()) is True
 
-    def test_the_real_portal_is_still_recognised_with_no_results_table_at_all(self):
-        """EVENT-INDEPENDENCE, direction 2. The anchor must not be reading the
-        results table — that is the very thing it is being consulted about."""
-        assert cedars._is_portal_page(_real_portal_page_without_its_table()) is True
+    @pytest.mark.parametrize("shape", sorted(_REAL_BUT_NOT_A_LISTINGS_PAGE))
+    def test_a_broken_portal_page_is_still_recognised_as_the_portal(self, shape):
+        """EVENT-INDEPENDENCE, direction 2 — and the reason this function does
+        NOT get to decide whether to raise.
+
+        All four of these ARE the CEDARS portal, and none of them is a listings
+        page. `_is_portal_page` says True to every one, correctly: it answers
+        "which site served this?", which is a genuinely different question from
+        "did we read the listings?". Wiring the first answer to the raise
+        decision is what reopened the silent zero — see
+        `TestATablelessPageAlwaysEscalates`.
+        """
+        assert cedars._is_portal_page(_REAL_BUT_NOT_A_LISTINGS_PAGE[shape]()) is True
 
     @pytest.mark.parametrize("shape", sorted(_NOT_A_LISTINGS_PAGE))
     def test_pages_that_are_not_the_portal_are_rejected(self, shape):
@@ -163,19 +229,47 @@ class TestThePortalAnchor:
         any host would pass."""
         assert cedars._is_portal_page(_page(_row("G2600001"))) is False
 
-    def test_either_anchor_alone_carries_it(self):
-        """Two independent signals, either sufficient — so a rename of one does
-        not take the source down. Verified by deleting each in turn."""
-        for gone, kept in (("#mega-menu-1", "search form"), ("form", "mega menu")):
+    def test_either_spelling_alone_carries_it_but_they_are_not_independent(self):
+        """Deleting one anchor leaves the other — and that is worth much less
+        than it looks, which is why the docstring no longer claims otherwise.
+
+        In the captured document `form#search_form` and `div#mega-menu-1` are
+        adjacent siblings under `div#container`, both from one shared header
+        include. Deleting them one at a time (the first two cases) says nothing
+        about the failure that would actually happen: a header redesign, which
+        takes both at once. The third case does that, and it is the honest
+        measure of the redundancy — near zero.
+        """
+        def _without(*selectors: str) -> str:
             soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
-            for el in soup.select(gone):
-                el.decompose()
-            assert cedars._is_portal_page(str(soup)) is True, f"{kept} alone should carry it"
+            for sel in selectors:
+                for el in soup.select(sel):
+                    el.decompose()
+            return str(soup)
+
+        assert cedars._is_portal_page(_without("#mega-menu-1")) is True
+        assert cedars._is_portal_page(_without("form")) is True
+        # Both anchors live in the same header include. One edit removes both.
+        assert cedars._is_portal_page(_without("#mega-menu-1", "form")) is False
 
 
-class TestTablelessPageEscalates:
-    """`fetch_cedars_listings` must turn a tableless page OFF THE PORTAL into a
-    raise — on any page number, not just page 1."""
+class TestATablelessPageAlwaysEscalates:
+    """No `table.tablesorter` is a failure on EVERY page, portal chrome or not.
+
+    Two rules were tried and both were wrong in the same direction. The first
+    read the PAGE NUMBER: page 1 raised, page 2+ degraded quietly — so a WAF
+    trip on page 2 of 5 reported a complete day with three pages unread. The
+    second read the PORTAL CHROME: chrome present meant "end of results" — so a
+    CEDARS-served maintenance page, which of course carries CEDARS chrome, went
+    quiet on page 1. That second rule was strictly worse than the code it
+    replaced: it reopened the fifty-day silent zero for two of the three causes
+    the error message itself named.
+
+    Neither rule was needed. The portal template emits the table shell even at
+    zero rows, so end-of-results is a table with NO ROWS — which the existing
+    `if not page_listings: break` already handles. "No table at all" has no
+    legitimate producer, so it never has to be tolerated.
+    """
 
     @pytest.fixture(autouse=True)
     def _real_cedars(self, monkeypatch):
@@ -232,32 +326,46 @@ class TestTablelessPageEscalates:
             cedars.fetch_cedars_listings(seen_ids=set())
         assert served == [1, 2], "it must have actually tried page 2"
 
-    def test_a_portal_page_two_with_no_results_table_keeps_page_one_and_stops(
-        self, monkeypatch
+    @pytest.mark.parametrize("shape", sorted(_REAL_BUT_NOT_A_LISTINGS_PAGE))
+    @pytest.mark.parametrize("page", [1, 2], ids=["page_one", "page_two"])
+    def test_a_real_portal_page_with_no_table_raises_on_any_page(
+        self, monkeypatch, shape, page
     ):
-        """The other direction, and the reason the fix is an anchor rather than
-        "always raise": a page that IS the portal and carries no results table
-        is the end of the walk, not a failure. Real captured markup, table
-        removed — see `_real_portal_page_without_its_table`.
-        """
-        served = self._serve(
-            monkeypatch,
-            [_page(_row("G2600001")), _real_portal_page_without_its_table()],
-        )
-        got = cedars.fetch_cedars_listings(seen_ids=set())
-        assert [L.external_id for L in got] == ["G2600001"]
-        assert served == [1, 2], "it must have actually tried page 2"
+        """THE REGRESSION THIS CLASS EXISTS FOR, in real markup.
 
-    def test_a_portal_page_one_with_no_results_table_is_a_quiet_zero(self, monkeypatch):
-        """Page 1 stops being a special case in BOTH directions.
-
-        The old rule read the page number: page 1 tableless meant "could not
-        look" no matter what the page said. Now the page decides. This one says,
-        in its own chrome, that it is the CEDARS portal, so zero is what the
-        portal told us.
+        Each of these IS the CEDARS portal — real captured chrome, header, menu,
+        footer — and none of them carries a results table. Under the chrome
+        rule every one returned `[]` and scored a SUCCESS. They must raise, and
+        the page number must not change the answer.
         """
-        self._serve(monkeypatch, [_real_portal_page_without_its_table()])
-        assert cedars.fetch_cedars_listings(seen_ids=set()) == []
+        broken = _REAL_BUT_NOT_A_LISTINGS_PAGE[shape]()
+        pages = [broken] if page == 1 else [_page(_row("G2600001")), broken]
+        served = self._serve(monkeypatch, pages)
+
+        with pytest.raises(SourceFetchError) as excinfo:
+            cedars.fetch_cedars_listings(seen_ids=set())
+        assert "tablesorter" in str(excinfo.value)
+        assert "NOT 'no jobs today'" in str(excinfo.value)
+        assert served == list(range(1, page + 1)), "it must have reached the broken page"
+
+    @pytest.mark.parametrize("shape", sorted(_REAL_BUT_NOT_A_LISTINGS_PAGE))
+    def test_the_error_names_the_portal_when_the_chrome_is_there(self, monkeypatch, shape):
+        """`_is_portal_page`'s ONLY remaining job. The operator's next move
+        differs — re-authenticate vs go look at the markup — so the message has
+        to say which of the two it is. It still does not affect the raise."""
+        self._serve(monkeypatch, [_REAL_BUT_NOT_A_LISTINGS_PAGE[shape]()])
+        with pytest.raises(SourceFetchError) as excinfo:
+            cedars.fetch_cedars_listings(seen_ids=set())
+        assert "we reached the NETjobs portal" in str(excinfo.value)
+
+    @pytest.mark.parametrize("shape", sorted(_NOT_A_LISTINGS_PAGE))
+    def test_the_error_says_we_were_off_the_portal_when_the_chrome_is_gone(
+        self, monkeypatch, shape
+    ):
+        self._serve(monkeypatch, [_NOT_A_LISTINGS_PAGE[shape]])
+        with pytest.raises(SourceFetchError) as excinfo:
+            cedars.fetch_cedars_listings(seen_ids=set())
+        assert "not on the portal at all" in str(excinfo.value)
 
     def test_a_real_portal_page_with_an_empty_table_is_a_quiet_zero(self, monkeypatch):
         """A quiet day, in real markup rather than the minimal one above."""
@@ -272,6 +380,82 @@ class TestTablelessPageEscalates:
         assert got, "the captured portal page must yield listings"
         assert all(L.source == "cedars" for L in got)
         assert all(L.external_id for L in got)
+
+
+class TestTheRedirectGuardWinsOverTheParser:
+    """`_fetch_listings_page`'s logged-out-bounce guard, which had no test.
+
+    Every other test in this file monkeypatches `_fetch_listings_page` out
+    wholesale, so the guard inside it — the one that turns a 302 to login.php /
+    main.php into `SourceAuthError` — was never executed by the suite. It is
+    load-bearing twice over: it is the ONE known shape where the portal serves
+    its full chrome around something that is not a listings page, and it is the
+    only error in this module that tells the operator to re-authenticate rather
+    than go read markup.
+
+    ORDER IS THE POINT. The guard runs before `return resp.text`, so it fires
+    before the parser ever sees the body. That was correct by inspection and is
+    now correct by test: the bodies below are real portal chrome with no results
+    table, which `_is_portal_page` accepts and which would otherwise raise the
+    generic `SourceFetchError`. `SourceAuthError` has to win, or an expired
+    cookie gets diagnosed as a markup change and nobody logs back in.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_cedars(self, monkeypatch):
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(cedars, "fetch_cedars_listings", _REAL_FETCH)
+        # A placeholder so `_load_cookies` does not short-circuit on a missing
+        # file. Never a real session value — see the repo's secrets rule.
+        monkeypatch.setattr(cedars, "_load_cookies", lambda: {"PHPSESSID": "not-a-real-session"})
+
+    def _land_on(self, monkeypatch, final_path: str, body: str):
+        """Patch the transport, not `_fetch_listings_page` — the guard is IN it."""
+
+        class _Resp:
+            status_code = 200
+            url = type("U", (), {"path": final_path})()
+            text = body
+
+        monkeypatch.setattr(httpx.Client, "get", lambda self, url, **kw: _Resp())
+
+    @pytest.mark.parametrize("bounce", ["login.php", "main.php"])
+    def test_a_bounce_raises_an_auth_error_not_a_parse_error(self, monkeypatch, bounce):
+        self._land_on(monkeypatch, f"/jobs/{bounce}", _real_portal_header_without_its_content())
+        with pytest.raises(SourceAuthError) as excinfo:
+            cedars.fetch_cedars_listings(seen_ids=set())
+        assert excinfo.value.source == "cedars"
+        assert bounce in str(excinfo.value)
+
+    @pytest.mark.parametrize("bounce", ["login.php", "main.php"])
+    def test_the_auth_error_beats_the_tableless_escalation(self, monkeypatch, bounce):
+        """Same body, and it IS a tableless portal page — so both guards have
+        something to say. The auth one must be the one that speaks."""
+        self._land_on(monkeypatch, f"/jobs/{bounce}", _real_portal_serving_a_maintenance_notice())
+        with pytest.raises(SourceAuthError):
+            cedars.fetch_cedars_listings(seen_ids=set())
+
+    def test_a_third_bounce_target_still_escalates_as_a_fetch_error(self, monkeypatch):
+        """The whitelist is two filenames, and that is the point of not relying
+        on it alone: a bounce to `notice.php` is not in it, falls through to the
+        parser, and must still raise rather than report an empty day."""
+        self._land_on(monkeypatch, "/jobs/notice.php", _real_portal_serving_a_maintenance_notice())
+        with pytest.raises(SourceFetchError):
+            cedars.fetch_cedars_listings(seen_ids=set())
+
+    def test_a_normal_landing_is_not_treated_as_a_bounce(self, monkeypatch):
+        """Premise: the guard must not fire on the ordinary results URL, or
+        every healthy run would report an expired session."""
+        self._land_on(monkeypatch, "/jobs/", _REAL_PORTAL_PAGE)
+        assert cedars.fetch_cedars_listings(seen_ids=set())
+
+    def test_the_error_carries_no_cookie_value(self, monkeypatch):
+        """The message reaches Telegram and the on-disk state file."""
+        self._land_on(monkeypatch, "/jobs/login.php", _REAL_PORTAL_PAGE)
+        with pytest.raises(SourceAuthError) as excinfo:
+            cedars.fetch_cedars_listings(seen_ids=set())
+        assert "not-a-real-session" not in str(excinfo.value)
+        assert "PHPSESSID" not in str(excinfo.value)
 
 
 class TestTheStreakSurvivesATablelessPage:

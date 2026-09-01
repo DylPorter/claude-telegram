@@ -414,12 +414,21 @@ class TestAnEmptyLocationAllowlistIsAConfigDefect:
         self._serve = _serve
 
     @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
-    @pytest.mark.parametrize("allowlist", [[], None], ids=["empty", "missing"])
+    @pytest.mark.parametrize(
+        "allowlist",
+        [[], None, ["   "], [""], ["", "  ", "\t"]],
+        ids=["empty", "missing", "whitespace_entry", "blank_entry", "all_blank"],
+    )
     def test_an_empty_allowlist_is_not_a_filter_that_matches_nothing(
         self, monkeypatch, name, module, fetch, payload, allowlist
     ):
         monkeypatch.setattr(module, "load_slugs", lambda vendor: ["a"])
-        monkeypatch.setattr(_ats_common, "load_location_allowlist", lambda: list(allowlist or []))
+        # NOT patching `load_location_allowlist` here — these cases are about
+        # what that function does with the raw YAML, so the real one has to run.
+        monkeypatch.setattr(
+            _ats_common, "_load_companies_yaml",
+            lambda: {"location_allowlist": list(allowlist)} if allowlist is not None else {},
+        )
         monkeypatch.setattr(httpx.Client, "get", self._serve(payload))
 
         with pytest.raises(SourceNotConfiguredError) as excinfo:

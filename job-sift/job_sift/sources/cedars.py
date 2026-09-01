@@ -100,71 +100,59 @@ _DETAIL_BASE = "https://web2.cedars.hku.hk/jobs/"
 # surface — not a page that merely mentions CEDARS.
 _SEARCH_ENDPOINT = "search.php"
 
-# The portal's industry / job-type navigation. A second, independent way to
-# recognise the same site.
+# The portal's industry / job-type navigation.
 _MEGA_MENU_SELECTOR = "#mega-menu-1"
 
 
 def _is_portal_page(html: str) -> bool:
-    """True if this HTML came from the CEDARS NETjobs PORTAL.
+    """Did this HTML come from the CEDARS NETjobs portal?
 
-    Sibling of `hk_events.sources.aitinkerers._is_chapter_page`, ported here
-    because CEDARS is where the pattern was needed first and got it last. HTTP
-    200 plus parseable HTML is not proof we read the page we meant to.
+    DIAGNOSIS ONLY. This chooses the wording of an error, never whether to
+    raise one. A missing `table.tablesorter` is a failure on every page number
+    whatever this returns — see `fetch_cedars_listings`. The distinction it
+    draws is still worth drawing, because the two causes need opposite
+    responses from the operator: "your session is bouncing you off NETjobs" vs
+    "you are on NETjobs and the results table is not where it used to be".
 
-    WHAT THIS REPLACES. `fetch_cedars_listings` used to decide "is a missing
-    results table a failure?" from the PAGE NUMBER: tableless page 1 raised,
-    tableless page 2+ logged a warning, stopped, and returned what it had. That
-    inferred a fact about the response from a fact about the request. The
-    rationale was self-contradictory too — page 1 was special-cased because the
-    template emits the table shell even at zero rows, but it is the same
-    template on page N, so walking off the end yields a zero-row table, which
-    `if not page_listings: break` already handles. Meanwhile `max_pages`
-    defaults to 5 against ~32 real pages, so a daily run stops on the cap and
-    never walks off the end at all — while a burst of sequential page fetches is
-    exactly what trips bot-detection. So the page-2+ branch was not catching
-    end-of-results; it was catching a WAF trip on page 2 of 5 and reporting it
-    as a complete day. Streak zeroed, `last_success` stamped, three unread pages
-    invisible.
-
-    EVENT-INDEPENDENCE IS THE WHOLE PROPERTY, and it is why this cannot just
-    look for listings. The anchor answers "is this the portal?" and must give
-    the same answer on a busy day and a dead-quiet one; an anchor that needed a
-    row would turn a genuinely empty portal into a fabricated failure — the
-    mirror image of the bug, and no more honest.
+    An earlier cut of this function decided the raise, on the theory that portal
+    chrome plus no table meant we had walked off the end of the pagination. That
+    was wrong, and wrong in the direction that matters: a CEDARS-served
+    maintenance page carries CEDARS chrome, so it satisfied every anchor below,
+    took the quiet arm, and returned `[]` — reopening the fifty-day silent zero
+    on page 1 for two of the three causes the error message itself named. The
+    refutation is in this module's own reasoning: the template emits the table
+    shell even at zero rows, so end-of-results is a table with NO ROWS, which
+    `if not page_listings: break` already handles. "Chrome but no table at all"
+    therefore has no legitimate producer.
 
     THE ANCHORS, read off the captured live page (see
-    tests/fixtures/cedars_listings_page.html), two independent signals, either
-    sufficient so a rename of one does not take the source down:
+    tests/fixtures/cedars_listings_page.html):
 
       * a `<form>` whose action is `search.php` — the NETjobs search surface.
-        The live page emits two (the header keyword box, and the advanced filter
-        form directly above the results table), both from the template that
-        emits the table itself, at any result count.
+        The live page emits two: the header keyword box, and the filter form
+        inside `#content` directly above the results table.
       * `#mega-menu-1` — the portal's industry / job-type mega menu.
 
-    DELIBERATELY NOT the footer (`#footer-contents`). It is a block of links to
-    cedars.hku.hk, which is precisely what a CEDARS maintenance or notice page
-    would also carry — a signal that would accept the pages this guard exists to
-    reject.
+    NOT INDEPENDENT, despite serving as alternatives. In the real document
+    `form#search_form` sits under `div#search < div#box < div#container` and
+    `div#mega-menu-1` under `div.nav < div#container` — adjacent siblings from
+    one shared header include, so a header redesign takes both at once. The only
+    structurally separate instance is the `#content` filter form, and it is
+    emitted by the same results template as the table, so it is the LEAST likely
+    of the three to outlive a page that has lost its table. Treat these as one
+    signal with redundant spellings, not as two witnesses; the claim of
+    independence was overstated and is retracted here. It costs little now that
+    the return value only picks a sentence.
 
-    RESIDUAL, stated rather than hidden: this trusts a chrome-bearing page. If
-    the portal ever renders its full chrome around a notice instead of the
-    results table — or renames `table.tablesorter` while keeping the chrome —
-    that reads as end-of-results and returns a quiet zero. The redirect
-    whitelist in `_fetch_listings_page` covers the known instance of that shape
-    (the logged-out bounce to login.php / main.php) by raising SourceAuthError
-    before the parser is reached. `_is_chapter_page` carries the same residual
-    for the same reason: an anchor tight enough to exclude it would have to read
-    the content, and then a quiet day would fail.
+    EVENT-INDEPENDENT, which still matters: the anchors say nothing about
+    whether any listing is present, so the diagnosis reads the same on a busy
+    day and a dead-quiet one.
     """
     soup = BeautifulSoup(html, "lxml")
     for form in soup.find_all("form"):
-        action = form.get("action") or ""
-        if _SEARCH_ENDPOINT in action:
+        if _SEARCH_ENDPOINT in (form.get("action") or ""):
             return True
     return soup.select_one(_MEGA_MENU_SELECTOR) is not None
-
 
 
 def _safe_date(s: str) -> date | None:
@@ -312,20 +300,25 @@ def fetch_cedars_listings(
     PARTIAL degrade, TOTAL escalation — the same rule `_ical_common
     .fetch_feed_group` follows in the sibling bot:
 
-      * A tableless page that IS NOT THE PORTAL raises `SourceFetchError`, on
-        ANY page number. A maintenance notice, a WAF interstitial or a bounce
-        the redirect whitelist missed means we never reached the listings — on
-        page 4 exactly as much as on page 1, and on page 4 it also means pages
-        5..N went unread. Escalating is what stops that being scored a success
-        and reported as "Surfaced: none today".
-      * A tableless page that IS the portal stops pagination and keeps what
-        pages 1..N-1 returned. The page says in its own chrome that we reached
-        CEDARS, so there is nothing more to read — a real end of the walk, not a
-        failure.
+      * NO `table.tablesorter` AT ALL raises `SourceFetchError`, on ANY page
+        number, with no exceptions. A maintenance notice, a WAF interstitial, a
+        bounce the redirect whitelist missed, or a renamed table class all mean
+        we did not read the listings — on page 4 exactly as much as on page 1,
+        and on page 4 it also means pages 5..N went unread. Escalating is what
+        stops that being scored a success and reported as "Surfaced: none
+        today". `_is_portal_page` picks the wording; it does not get a vote on
+        whether to raise.
+      * A TABLE WITH ZERO DATA ROWS returns `[]` and stops the walk. This is
+        the ONLY legitimate end-of-results, and it is why the page-number rule
+        was unnecessary rather than merely crude: the portal template emits the
+        table shell even at zero rows, so walking off the end yields an empty
+        table, which `if not page_listings: break` below already handles. There
+        is no page shape left for which "no table at all" is a normal outcome.
 
-    THE PAGE NUMBER IS NOT EVIDENCE and is no longer consulted; see
-    `_is_portal_page` for what replaced it and why the old page-1-only rule was
-    self-contradictory.
+    THE PAGE NUMBER IS NOT EVIDENCE and is no longer consulted. Neither is
+    portal chrome: an earlier cut let chrome-plus-no-table stop quietly, which
+    reopened the fifty-day silent zero on page 1 for a CEDARS-served maintenance
+    page (which carries CEDARS chrome). See `_is_portal_page`.
     """
     if os.environ.get("JOB_SIFT_STUB") == "1":
         log.info("cedars: STUB mode — returning sample listings")
@@ -342,26 +335,32 @@ def fetch_cedars_listings(
         page_listings = _parse_listings_html(html)
 
         if page_listings is None:
-            # No results table. Ask the PAGE whether we are on the portal —
-            # never the page number. See `_is_portal_page`.
-            if not _is_portal_page(html):
-                raise SourceFetchError(
-                    "cedars",
-                    f"page {page}: the CEDARS listings page carried no results table "
-                    f"(no `table.tablesorter` at {CEDARS_PORTAL_URL}) and none of the "
-                    "portal's own chrome either. Either the portal served a "
-                    "maintenance/interstitial page, the session bounced somewhere "
-                    "other than login.php/main.php, or we are not on NETjobs at all. "
-                    "Open the URL in a browser to tell those apart — this is NOT "
-                    f"'no jobs today', and pages {page + 1}+ went unread.",
+            # NO RESULTS TABLE. Always a failure, on every page — the only
+            # legitimate end-of-results is an EMPTY table, handled below.
+            # `_is_portal_page` chooses which of the two causes to name; the
+            # operator's next move differs, the raise does not.
+            if _is_portal_page(html):
+                detail = (
+                    "we reached the NETjobs portal — its search form and menu are "
+                    "on the page — but the results table was not there. Either the "
+                    "portal served a maintenance/interstitial notice inside its own "
+                    "chrome, or the results-table markup changed and "
+                    "`table.tablesorter` no longer selects it."
                 )
-            log.info(
-                "cedars: page %d is the portal but carries no results table — end of "
-                "results, stopping after %d listing(s)",
-                page,
-                len(all_listings),
+            else:
+                detail = (
+                    "the response carries none of the NETjobs chrome either, so we "
+                    "were not on the portal at all. Either the session bounced "
+                    "somewhere other than login.php/main.php, or something upstream "
+                    "(WAF, captive portal, proxy error page) answered instead."
+                )
+            raise SourceFetchError(
+                "cedars",
+                f"page {page}: no results table (no `table.tablesorter` at "
+                f"{CEDARS_PORTAL_URL}). {detail} Open the URL in a browser to "
+                f"confirm — this is NOT 'no jobs today', and pages {page + 1}+ "
+                "went unread.",
             )
-            break
 
         if not page_listings:
             log.info("cedars: page %d returned 0 listings — stopping", page)

@@ -49,9 +49,19 @@ def load_slugs(vendor: str) -> list[str]:
 
 
 def load_location_allowlist() -> list[str]:
-    """Return the shared location allowlist (lowercased substrings)."""
-    cfg = _load_companies_yaml()
-    return [s.lower() for s in (cfg.get("location_allowlist", []) or [])]
+    """Return the shared location allowlist (lowercased substrings).
+
+    Blank and whitespace-only entries are DROPPED, not lowercased and kept.
+    Both shapes reopen the config defect `require_location_allowlist` exists to
+    catch, and neither is visible in YAML: `['   ']` is truthy, so it passes a
+    list-truthiness guard and then matches no location, discarding every located
+    listing and scoring a fabricated zero — the exact bug. `['']` is worse in
+    the other direction: `"" in anything` is True, so it silently disables the
+    filter and lets every listing through. A guard that tests the container but
+    not its contents is not a guard.
+    """
+    raw = _load_companies_yaml().get("location_allowlist", []) or []
+    return [term for term in (str(s).strip().lower() for s in raw) if term]
 
 
 def require_location_allowlist(vendor: str) -> list[str]:
@@ -84,7 +94,7 @@ def require_location_allowlist(vendor: str) -> list[str]:
     if not allow:
         raise SourceNotConfiguredError(
             vendor,
-            "companies.yaml has no `location_allowlist:` entries — with nothing "
+            "companies.yaml has no usable `location_allowlist:` entries — with nothing "
             "to match on, every listing that has a location is filtered out and "
             "the source reports a fabricated zero. Nothing was polled.",
         )
