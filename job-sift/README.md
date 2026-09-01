@@ -62,7 +62,7 @@ JOB_SIFT_MODEL=haiku
 # Hard wall-clock budget for the whole (concurrent) source-fetch phase, in
 # seconds. Default 240. Anything still running when it expires is abandoned
 # and recorded as a failed source; the run continues with what landed.
-# Raise it only if you also raise the unit's TimeoutStartSec.
+# Raise it only if you also raise the unit's TimeoutStartSec (currently 900).
 # JOB_SIFT_FETCH_BUDGET_S=240
 ```
 

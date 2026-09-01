@@ -59,7 +59,7 @@ hk-events-specific knobs are in `.env.example` — notably:
   continues with what landed. This is the ceiling, because an httpx timeout does
   **not** bound a `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s
   fetches against `_ical_common`'s configured 25s timeout). Raise it only if you
-  also raise the unit's `TimeoutStartSec`.
+  also raise the unit's `TimeoutStartSec` (currently 900).
 
 ## Calendar writes (gws)
 

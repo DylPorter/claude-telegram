@@ -51,8 +51,8 @@ JOB_SIFT_MODEL = os.environ.get("JOB_SIFT_MODEL", "haiku")
 # 2026-09-01 DNS outage: an httpx timeout does NOT bound getaddrinfo, so the
 # ceiling has to be enforced from outside the fetch call.
 #
-# 240s leaves ~6 minutes of the unit's TimeoutStartSec=600 for classify, push
-# and state-save.
+# 240s leaves ~11 minutes of the unit's TimeoutStartSec=900 for classify, push
+# and state-save. Raise this only if you raise TimeoutStartSec with it.
 FETCH_BUDGET_ENV = "JOB_SIFT_FETCH_BUDGET_S"
 FETCH_BUDGET_DEFAULT_S = 240.0
 
