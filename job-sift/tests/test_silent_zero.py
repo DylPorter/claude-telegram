@@ -59,6 +59,24 @@ _ADAPTERS = [
 _IDS = [a[0] for a in _ADAPTERS]
 
 
+def _with_location(vendor: str, payload, location: str):
+    """The same one-job payload, given a location, in that vendor's own shape.
+
+    The three ATSs disagree about where a location lives — Greenhouse nests it
+    under `location.name`, Lever under `categories.location`, Ashby puts it flat
+    on `location`. The allowlist tests below are about a listing that HAS a
+    location (a listing without one passes the filter unconditionally, which
+    would make them vacuous), so the shape has to be right per vendor.
+    """
+    if vendor == "greenhouse":
+        return {"jobs": [dict(payload["jobs"][0], location={"name": location})]}
+    if vendor == "lever":
+        return [dict(payload[0], categories={"location": location})]
+    if vendor == "ashby":
+        return {"jobs": [dict(payload["jobs"][0], location=location)]}
+    raise AssertionError(f"unknown vendor {vendor!r}")
+
+
 class TestAdapterEscalatesTotalFailure:
     @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
     def test_every_slug_failing_raises_instead_of_returning_empty(
@@ -357,3 +375,104 @@ class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
         assert "greenhouse" not in health
         assert health["cedars"]["consecutive_failures"] == 3
         assert source_health.render_alarm(health) is not None
+
+
+class TestAnEmptyLocationAllowlistIsAConfigDefect:
+    """#6 — the seventh costume, one level below the adapters.
+
+    `location_matches` returns True for a listing with NO location (let a human
+    decide) and otherwise asks whether any allowlist substring appears in it.
+    With the allowlist empty, `any(...)` over an empty sequence is False, so
+    EVERY located listing is filtered out. The adapter polls fine, keeps
+    nothing, raises nothing, and returns `[]` — which `source_health` scores a
+    SUCCESS: streak zeroed, `last_success` stamped. Verified before the fix:
+    `allowlist empty -> HK listing matches? False`.
+
+    That is a config defect wearing the "I looked and there was nothing" costume
+    — the same overload the whole branch exists to make unrepresentable. It is
+    NOT a fetch failure either: nothing was wrong with the network or the board.
+    Nobody ever asked a real question, so it belongs in the third bucket with
+    the missing-slugs case — `SourceNotConfiguredError`, pruned by
+    `update_health`, scored neither success nor failure.
+
+    The opposite error would be just as bad, so it is pinned below: a POPULATED
+    allowlist that legitimately matches zero listings today is a real fetch of a
+    real answer and must keep counting as a success.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reachable_boards(self, monkeypatch):
+        """One live board per vendor, so the only thing under test is config.
+
+        Without this the empty-allowlist tests could pass for the wrong reason
+        (total-failure escalation) rather than because the allowlist was checked.
+        """
+
+        def _serve(payload):
+            return lambda self, url, **kw: _Resp(payload)
+
+        self._serve = _serve
+
+    @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
+    @pytest.mark.parametrize("allowlist", [[], None], ids=["empty", "missing"])
+    def test_an_empty_allowlist_is_not_a_filter_that_matches_nothing(
+        self, monkeypatch, name, module, fetch, payload, allowlist
+    ):
+        monkeypatch.setattr(module, "load_slugs", lambda vendor: ["a"])
+        monkeypatch.setattr(_ats_common, "load_location_allowlist", lambda: list(allowlist or []))
+        monkeypatch.setattr(httpx.Client, "get", self._serve(payload))
+
+        with pytest.raises(SourceNotConfiguredError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+        assert "location_allowlist" in str(excinfo.value)
+
+    @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
+    def test_it_raises_before_spending_a_single_request(
+        self, monkeypatch, name, module, fetch, payload
+    ):
+        """Fail fast, like the missing-slugs check: there is nothing to learn
+        from polling ten boards whose every result we are about to discard."""
+        monkeypatch.setattr(module, "load_slugs", lambda vendor: ["a", "b", "c"])
+        monkeypatch.setattr(_ats_common, "load_location_allowlist", list)
+
+        def _never(*_a, **_kw):
+            raise AssertionError("it polled a board before checking its own config")
+
+        monkeypatch.setattr(httpx.Client, "get", _never)
+
+        with pytest.raises(SourceNotConfiguredError):
+            fetch()
+
+    @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
+    def test_a_populated_allowlist_matching_nothing_today_is_still_a_success(
+        self, monkeypatch, name, module, fetch, payload
+    ):
+        """THE DIRECTION THAT MUST NOT REGRESS.
+
+        The listing is in Reykjavik and the allowlist says Hong Kong. We looked,
+        we read a real board, and the honest answer is zero — a success, and one
+        that must keep resetting the failure streak. Manufacturing a failure
+        here would be the mirror image of the bug being fixed, and just as
+        dishonest.
+        """
+        located = _with_location(name, payload, "Reykjavik, Iceland")
+        monkeypatch.setattr(module, "load_slugs", lambda vendor: ["a"])
+        monkeypatch.setattr(_ats_common, "load_location_allowlist", lambda: ["hong kong"])
+        monkeypatch.setattr(httpx.Client, "get", self._serve(located))
+
+        assert fetch() == []
+
+    @pytest.mark.parametrize("name,module,fetch,payload", _ADAPTERS, ids=_IDS)
+    def test_the_premise_a_populated_allowlist_still_matches_what_it_should(
+        self, monkeypatch, name, module, fetch, payload
+    ):
+        """Without this the test above could pass on an adapter that had simply
+        stopped returning anything at all."""
+        located = _with_location(name, payload, "Hong Kong")
+        monkeypatch.setattr(module, "load_slugs", lambda vendor: ["a"])
+        monkeypatch.setattr(_ats_common, "load_location_allowlist", lambda: ["hong kong"])
+        monkeypatch.setattr(httpx.Client, "get", self._serve(located))
+
+        got = fetch()
+        assert [L.source for L in got] == [name]
