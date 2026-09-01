@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 
+from hk_events.errors import SourceNotConfiguredError
 from hk_events.sources import aitinkerers, cyberport, luma, luma_discover, meetup, startmeuphk
 
 # (module, attribute) for every source fetcher the orchestrator can call.
@@ -61,15 +62,31 @@ def real_sources(monkeypatch):
     return _restore
 
 
+def _not_opted_in():
+    raise SourceNotConfiguredError(
+        "test-stub", "this source was not opted into by the test (see tests/conftest.py)"
+    )
+
+
 @pytest.fixture(autouse=True)
 def stub_all_sources(monkeypatch):
-    """Every source returns [] unless the test patches it with something else.
+    """Every source is neutralised unless the test patches it with something else.
 
     monkeypatch.setattr is last-write-wins and this fixture runs first, so a test
     that patches `orchestrator.luma.fetch_luma_events` still gets its own stub.
+
+    THE DEFAULT RAISES `SourceNotConfiguredError`, and the choice matters. The
+    obvious stub is `lambda: []` — but `[]` is precisely the value this branch
+    exists to distinguish from a raise, and `no_network` cannot catch it because a
+    stub opens no socket. With `[]`, an un-opted-in source lands in `succeeded`,
+    so a vacuous assertion like `succeeded == [...]` or `errors == {}` PASSES for
+    a source the test never thought about. `SourceNotConfiguredError` puts it in
+    NEITHER `succeeded` nor `errors` — the orchestrator's documented "nobody asked
+    me anything" outcome — so a test that meant to assert something about that
+    source fails loudly instead.
     """
     for module, attr in _FETCHERS:
-        monkeypatch.setattr(module, attr, lambda: [], raising=True)
+        monkeypatch.setattr(module, attr, _not_opted_in, raising=True)
 
 
 @pytest.fixture(autouse=True)

@@ -103,7 +103,19 @@ def _to_datetime(value) -> datetime | None:
 
 def _within_horizon(start: datetime | None) -> bool:
     """Keep events starting from yesterday up to the rolling horizon. Events with
-    no start time are kept (let the classifier / human decide)."""
+    no start time are kept (let the classifier / human decide).
+
+    ⚠️ `start is None` therefore returns True, and that policy is now reachable
+    from a HISTORY-SHAPED source. It was written for .ics feeds, where a dateless
+    VEVENT is rare and usually imminent. The AI Tinkerers homepage is mostly an
+    archive of past meetups, so an entry with a missing or unparseable `startDate`
+    never ages out: it is kept every run, and `Event.stable_hash` buckets it under
+    "nodate". It still only notifies ONCE (the seen-set is keyed on the schema.org
+    @id, which is stable), and `_is_soon` returns False for it so it never fires a
+    reminder — so this is a permanent classifier cost, not a repeat-push bug.
+    Left as-is deliberately: dropping dateless events would silently discard a
+    real upcoming event whose date we merely failed to parse, which is worse.
+    """
     if start is None:
         return True
     now = datetime.now(timezone.utc)

@@ -24,6 +24,7 @@ from hk_events.dedupe import (
     STAGE_SOON,
     collapse_cross_source,
     filter_due,
+    mirror_collapsed,
     log_classification,
     record_verdict,
     save_seen,
@@ -282,6 +283,14 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         log.info("[%s/%s] %s — %s: %s", event.source, stage, event.title[:50], result.tag, result.reason)
 
     log.info("%d surfaced, %d dropped", len(surfaced), len(dropped))
+
+    # 3b. Propagate each surviving event's seen-record back to the source(s) that
+    #     lost the collapse. Without this the loser's state file never learns the
+    #     event exists, so the run where the winner stops reporting it — the city
+    #     page is a ~12-event listing, the .ics horizon is 45 days, so this is the
+    #     normal life cycle, not an edge case — re-pushes it and writes a second
+    #     calendar entry. AFTER record_verdict so the tag rides along.
+    mirror_collapsed(seen_by_source, collapsed)
 
     # 4. Calendar sync (idempotent; gated by HK_EVENTS_CALENDAR_ENABLED + dry_run)
     calendar_stats = sync_events([e for e, _, _ in surfaced], dry_run=dry_run)

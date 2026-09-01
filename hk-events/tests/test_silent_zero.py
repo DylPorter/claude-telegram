@@ -20,7 +20,8 @@ import pytest
 
 from hk_events import config, orchestrator, source_health
 from hk_events.errors import SourceFetchError, SourceNotConfiguredError
-from hk_events.sources import _ical_common, luma, meetup
+from hk_events.schema import Event
+from hk_events.sources import _ical_common, aitinkerers, luma, luma_discover, meetup
 
 _DAY = date(2026, 9, 1)
 
@@ -56,6 +57,92 @@ def _outage(*_a, **_kw):
 
 _SOURCES = [("meetup", meetup.fetch_meetup_events), ("luma", luma.fetch_luma_events)]
 _IDS = [s[0] for s in _SOURCES]
+
+# The structured-data page adapters. They share the SAME contract as the .ics
+# feeds above but a different implementation of it (`_html_common` rather than
+# `_ical_common.fetch_feed_group`), so the escalation paths have to be pinned
+# separately — the .ics parametrisation above cannot reach them.
+_PAGE_SOURCES = [
+    ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+    ("luma_discover", luma_discover.fetch_luma_discover_events),
+]
+_PAGE_IDS = [s[0] for s in _PAGE_SOURCES]
+
+
+class TestPageAdaptersEscalateToo:
+    """`_html_common.fetch_html`'s failure branches.
+
+    A page adapter has ONE URL, so any failure is already a total failure for the
+    source — there is no per-feed degrade to do, and returning `[]` would be the
+    same fabricated success the .ics escalation above exists to prevent.
+
+    The non-200 branch in particular had zero coverage until this class: the
+    mutation `if resp.status_code != 200:` → `if False:` left the whole suite
+    green, which means nothing was asserting that a 403/500 is a failure at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real(self, real_sources):
+        # These tests call the genuine adapters, not conftest's neutralised stubs.
+        real_sources()
+
+    @pytest.mark.parametrize("status", [403, 404, 429, 500, 503])
+    @pytest.mark.parametrize("name,fetch", _PAGE_SOURCES, ids=_PAGE_IDS)
+    def test_a_non_200_raises_instead_of_returning_empty(
+        self, monkeypatch, name, fetch, status
+    ):
+        monkeypatch.setattr(
+            httpx.Client, "get", lambda *a, **k: _Resp("<html>nope</html>", status)
+        )
+        with pytest.raises(SourceFetchError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+        assert str(status) in str(excinfo.value)
+
+    @pytest.mark.parametrize("name,fetch", _PAGE_SOURCES, ids=_PAGE_IDS)
+    def test_a_network_error_raises_instead_of_returning_empty(
+        self, monkeypatch, name, fetch
+    ):
+        monkeypatch.setattr(httpx.Client, "get", _outage)
+        with pytest.raises(SourceFetchError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+
+    @pytest.mark.parametrize("name,fetch", _PAGE_SOURCES, ids=_PAGE_IDS)
+    def test_a_200_that_is_not_the_expected_page_also_raises(
+        self, monkeypatch, name, fetch
+    ):
+        """HTTP 200 is not proof we read the right thing. A redirect onto a
+        marketing or consent page returns a perfectly valid document with no
+        events in it; scoring that a success is the silent zero."""
+        monkeypatch.setattr(
+            httpx.Client,
+            "get",
+            lambda *a, **k: _Resp("<html><body><h1>Luma</h1></body></html>", 200),
+        )
+        with pytest.raises(SourceFetchError) as excinfo:
+            fetch()
+        assert excinfo.value.source == name
+
+    @pytest.mark.parametrize("name,fetch", _PAGE_SOURCES, ids=_PAGE_IDS)
+    def test_a_200_with_the_right_shape_and_no_events_is_a_success(
+        self, monkeypatch, name, fetch
+    ):
+        """The other side of the contract: an empty-but-genuine page returns []."""
+        empty = {
+            "aitinkerers": (
+                '<html><body><script type="application/ld+json">'
+                '{"@type":"ItemList","itemListElement":[]}</script></body></html>'
+            ),
+            "luma_discover": (
+                '<html><body><script id="__NEXT_DATA__" type="application/json">'
+                '{"props":{"pageProps":{"initialData":{"kind":"discover-place",'
+                '"data":{"place":{"api_id":"discplace-x"},"events":[]}}}}}'
+                "</script></body></html>"
+            ),
+        }[name]
+        monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: _Resp(empty, 200))
+        assert fetch() == []
 
 
 class TestFeedGroupEscalatesTotalFailure:
@@ -200,6 +287,15 @@ class TestStreakSurvivesATotalOutage:
         assert source_health.render_alarm(health) is not None
 
 
+_LIVE_EVENT = Event(
+    source="luma",
+    external_id="evt-live@events.lu.ma",
+    title="A source that really did report",
+    url="https://lu.ma/live",
+    start=datetime(2026, 9, 10, tzinfo=timezone.utc),
+)
+
+
 class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
     """The third outcome — "nobody asked me anything" — and the second way the
     staleness alarm could still be silently wrong.
@@ -284,14 +380,21 @@ class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
                 SourceNotConfiguredError("meetup", "no feeds configured")
             ),
         )
+        monkeypatch.setattr(
+            orchestrator.luma, "fetch_luma_events", lambda: [_LIVE_EVENT]
+        )
+
         _events, errors, succeeded = orchestrator._fetch_all_sources()
 
         assert "meetup" not in succeeded
         assert "meetup" not in errors
-        # The run is otherwise untouched: one dead config is not a dead run.
-        # (conftest stubs every other adapter to a clean, empty fetch.)
+        # Nothing is INVENTED as an error either — the two sources this test did
+        # not opt in to are neutralised by conftest with the same
+        # SourceNotConfiguredError, so they land in neither set for the same
+        # reason meetup does.
         assert errors == {}
-        assert set(succeeded) == set(orchestrator.enabled_sources()) - {"meetup"}
+        # The run is otherwise untouched: one dead config is not a dead run.
+        assert succeeded == ["luma"]
 
     def test_the_record_is_pruned_not_reset(self):
         """The consequence in the state file: no fabricated success.

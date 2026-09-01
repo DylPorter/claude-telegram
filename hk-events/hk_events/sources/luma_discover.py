@@ -86,6 +86,51 @@ def _location(obj: dict) -> str | None:
     return None
 
 
+def _discovery_container(node, _depth: int = 0):
+    """Find the props container that proves this is the CITY DISCOVERY page.
+
+    Without this, host drift fails silently in the most likely way. A hard
+    cutover (404, or a page with no `__NEXT_DATA__`) already raises. But lu.ma is
+    actively redirecting to luma.com — live, `lu.ma/hong-kong` 301s to
+    `luma.com/hong-kong` and 307s again to `luma.com/hongkong` — and a redirect
+    that lands on a DIFFERENT valid Next.js page (marketing, consent, a login
+    wall) still serves well-formed `__NEXT_DATA__`. Its JSON parses, the event
+    walk finds nothing, and the adapter returns `[]`: scored a SUCCESS by
+    `source_health`, resetting the failure streak and stamping a `last_success`
+    for a page we never actually read. That silent zero is the exact failure this
+    whole branch exists to prevent, so the anchor is a hard requirement.
+
+    Two independent signals, either sufficient, because `kind` is the more
+    likely of the two to be renamed:
+      * `kind` beginning "discover-" alongside a `data` object  (live value:
+        "discover-place"), or
+      * a `place` object whose api_id is a `discplace-…`.
+
+    Deliberately NOT a fixed path. The anchor answers "is this the right PAGE";
+    where the events themselves sit is left to `_iter_event_objects`, which stays
+    structural.
+    """
+    if _depth > 24:
+        return None
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if isinstance(kind, str) and kind.startswith("discover-") and isinstance(node.get("data"), dict):
+            return node
+        place = node.get("place")
+        if isinstance(place, dict) and str(place.get("api_id", "")).startswith("discplace-"):
+            return node
+        for value in node.values():
+            found = _discovery_container(value, _depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _discovery_container(value, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def _iter_event_objects(node, _depth: int = 0) -> list[dict]:
     """Walk the whole props tree for objects carrying both `name` and `start_at`.
 
@@ -120,6 +165,16 @@ def _event_from_obj(obj: dict) -> Event | None:
         log.warning("%s: skipping event with no api_id: %r", _SOURCE, name[:60])
         return None
     api_id = api_id.strip()
+    # The walk keys off "has a name and a start_at", which is a SHAPE, not a type.
+    # Luma hangs plenty of other things off ids in the same tree — calendars
+    # (`cal-`), ticket types (`tix-`), discovery places (`discplace-`) — and some
+    # carry both fields. Only `evt-` is an event, and only `evt-` can collide with
+    # the .ics adapter, whose UIDs are `evt-<api_id>@events.lu.ma` (see
+    # luma._uid_canonical_id). Anything else is a phantom that would reach the
+    # digest AND the calendar.
+    if not api_id.startswith("evt-"):
+        log.debug("%s: skipping non-event object %s (%r)", _SOURCE, api_id, name[:60])
+        return None
 
     slug = obj.get("url")
     slug = slug.strip() if isinstance(slug, str) and slug.strip() else ""
@@ -170,6 +225,15 @@ def _parse_next_data(html: str) -> list[Event]:
         data = json.loads(text)
     except (ValueError, TypeError) as exc:
         raise SourceFetchError(_SOURCE, f"{_NEXT_DATA_ID} did not parse as JSON: {exc}") from exc
+
+    if _discovery_container(data) is None:
+        raise SourceFetchError(
+            _SOURCE,
+            f"{_NEXT_DATA_ID} parsed but carries no discovery-listing container "
+            "(no discover-* kind, no discplace- place) — we were almost certainly "
+            "redirected to a different lu.ma/luma.com page. Returning zero events "
+            "here would be scored a SUCCESS and stamp a last_success we never earned.",
+        )
 
     events: dict[str, Event] = {}
     for obj in _iter_event_objects(data):

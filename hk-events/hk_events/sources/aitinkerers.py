@@ -178,26 +178,45 @@ def _parse_jsonld_events(html: str) -> list[Event]:
             bad += 1
             log.warning("%s: skipping unparseable ld+json block: %s", _SOURCE, exc)
             continue
-        # A block may hold one object or a bare list of them.
-        docs.extend(d for d in (doc if isinstance(doc, list) else [doc]) if isinstance(d, dict))
+        # A block may hold one object, a bare list of them, or a JSON-LD
+        # @graph envelope — all three are legal and all three occur in the wild.
+        for item in doc if isinstance(doc, list) else [doc]:
+            if not isinstance(item, dict):
+                continue
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                docs.extend(g for g in graph if isinstance(g, dict))
+            else:
+                docs.append(item)
     if bad == len(blocks):
         raise SourceFetchError(
             _SOURCE,
             f"all {len(blocks)} ld+json block(s) failed to parse as JSON",
         )
 
-    events: dict[str, Event] = {}
+    # An Event can sit at the top level of its own block as easily as inside an
+    # ItemList — schema.org does not require the list, and the site could drop it
+    # at any time. Descending ONLY into ItemLists would turn that into a silent
+    # zero: the blocks parse, we find nothing, and `[]` is scored as a successful
+    # "quiet week". So collect both shapes.
+    candidates: list[dict] = []
     for doc in docs:
-        if doc.get("@type") != "ItemList":
+        if doc.get("@type") == "ItemList":
+            candidates.extend(_iter_list_members(doc))
+        else:
+            candidates.append(doc)
+
+    events: dict[str, Event] = {}
+    for obj in candidates:
+        if obj.get("@type") != "Event":
+            # Organization / WebSite / CollectionPage / BreadcrumbList at the top
+            # level; BlogPosting / TechArticle / CreativeWork inside the lists.
             continue
-        for obj in _iter_list_members(doc):
-            if obj.get("@type") != "Event":
-                continue  # BlogPosting / TechArticle / CreativeWork share these lists
-            event = _event_from_jsonld(obj)
-            # First writer wins: the two overlapping ItemLists carry the same
-            # events, and the earlier block has the fuller description.
-            if event is not None and event.external_id not in events:
-                events[event.external_id] = event
+        event = _event_from_jsonld(obj)
+        # First writer wins: the two overlapping ItemLists carry the same events,
+        # and the earlier block has the fuller description.
+        if event is not None and event.external_id not in events:
+            events[event.external_id] = event
 
     log.info("%s: parsed %d distinct Event objects from %d ld+json block(s)",
              _SOURCE, len(events), len(blocks))

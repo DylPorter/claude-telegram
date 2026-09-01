@@ -175,6 +175,79 @@ def collapse_cross_source(
     return kept, collapsed
 
 
+def mirror_collapsed(
+    seen_by_source: dict[str, dict[str, dict]],
+    collapsed: list[tuple[Event, Event]],
+) -> None:
+    """Write the winner's seen-record into every LOSER's seen-set too.
+
+    THE BUG THIS FIXES (found in review, and it was live, not theoretical).
+    `collapse_cross_source` picks one survivor, so only the winner's source ever
+    reaches `filter_due` — and `filter_due` populates `seen_by_source` from the
+    events it iterates, so the loser's state file is never written. The winner is
+    stable only while BOTH sources keep reporting the event. They don't:
+
+        run 1  city page only            → notified, recorded in seen_luma_discover
+        run 2  both sources              → luma_discover wins (continuity), luma
+                                           still never recorded
+        run 3  ages off the city page,   → luma wins by default, finds nothing in
+               still on the .ics            seen_luma, and RE-NOTIFIES
+
+    Run 3 re-pushes to Telegram and writes a SECOND calendar entry, because
+    `stable_hash` mixes the source into the digest. The trigger is routine, not
+    exotic: the city page is a bounded listing of the next ~12 events while the
+    .ics horizon is 45 days (config.HK_EVENTS_HORIZON_DAYS), so an event ageing
+    off the listing while still on a followed calendar is the NORMAL life cycle.
+
+    THE FIX, and why this one. The alternative was to key the seen-sets on
+    `identity_key` instead of `external_id`. Rejected: most events have no
+    canonical id, so their key would change from `<external_id>` to
+    `<source>:<external_id>`, every record in the existing `seen_luma.json` /
+    `seen_meetup.json` would stop matching, and the first run after deploy would
+    re-push the entire backlog as newly discovered. Mirroring is additive — it
+    only ever writes keys that were missing — so it needs no migration and cannot
+    invalidate existing state.
+
+    Call this AFTER `record_verdict`, so the mirrored record carries the
+    classifier tag. That matters beyond bookkeeping: a mirrored `"drop"` verdict
+    means the loser's source will not resurface an event the filter already
+    rejected.
+
+    RESIDUAL, stated so nobody assumes otherwise: this can only mirror an overlap
+    a run actually observed. If an event were on the city page in one run and
+    on the .ics in a later run with NO run in between seeing both, there is
+    nothing to mirror and it would still be re-notified once. In practice the
+    .ics window (45 days) strictly contains the city-page window (~12 nearest
+    events), so a run that sees both is near-certain.
+    """
+    for winner, loser in collapsed:
+        winner_rec = seen_by_source.get(winner.source, {}).get(winner.external_id)
+        if winner_rec is None:
+            continue
+        if loser.source not in seen_by_source:
+            seen_by_source[loser.source] = load_seen(loser.source)
+        seen = seen_by_source[loser.source]
+        existing = seen.get(loser.external_id)
+        if existing is None:
+            seen[loser.external_id] = {
+                "stages": list(winner_rec.get("stages") or [STAGE_NEW]),
+                "tag": winner_rec.get("tag"),
+            }
+            log.info(
+                "mirrored seen-record to %s/%s from winner %s/%s",
+                loser.source, loser.external_id, winner.source, winner.external_id,
+            )
+            continue
+        # Already tracked on the loser's side: merge rather than overwrite, so a
+        # reminder already fired there is not re-armed.
+        stages = existing.setdefault("stages", [STAGE_NEW])
+        for stage in winner_rec.get("stages") or []:
+            if stage not in stages:
+                stages.append(stage)
+        if existing.get("tag") is None:
+            existing["tag"] = winner_rec.get("tag")
+
+
 def _is_soon(event: Event, *, now: datetime | None = None) -> bool:
     """True if the event starts within the reminder window and hasn't started yet.
 

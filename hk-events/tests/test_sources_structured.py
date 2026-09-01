@@ -18,15 +18,18 @@ Two things are under test, and the second matters more than the first:
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
-from hk_events.dedupe import collapse_cross_source
+from hk_events import config, dedupe, orchestrator
+from hk_events.dedupe import collapse_cross_source, mirror_collapsed
 from hk_events.errors import SourceFetchError, SourceNotConfiguredError
-from hk_events.schema import Event
-from hk_events.sources import aitinkerers, luma, luma_discover
+from hk_events.schema import Event, RelevanceResult
+from hk_events.sources import _ical_common, aitinkerers, luma, luma_discover
 from hk_events.sources._html_common import load_page_url
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -152,6 +155,35 @@ def test_aitinkerers_accepts_a_flattened_itemlist():
     assert events[0].url == "https://x/p/a"
 
 
+def test_aitinkerers_finds_a_top_level_event_outside_any_itemlist():
+    """schema.org does not require the ItemList wrapper, and the site could drop
+    it. Descending only into ItemLists would turn that into a silent zero: the
+    blocks parse, we find nothing, and `[]` is scored as a quiet week."""
+    html = (
+        '<html><body><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@type":"Event","@id":"https://x/p/solo#event",'
+        '"name":"Standalone Event","startDate":"2026-09-20T18:00:00+08:00"}'
+        "</script></body></html>"
+    )
+    events = aitinkerers._parse_jsonld_events(html)
+    assert [e.title for e in events] == ["Standalone Event"]
+
+
+def test_aitinkerers_unwraps_a_graph_envelope():
+    """`{"@context":…,"@graph":[…]}` is the other very common JSON-LD shape —
+    it is what most CMS SEO plugins emit."""
+    html = (
+        '<html><body><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@graph":['
+        '{"@type":"Organization","name":"AI Tinkerers"},'
+        '{"@type":"Event","@id":"https://x/p/g#event","name":"Graph Event",'
+        '"startDate":"2026-09-21T18:00:00+08:00"}]}'
+        "</script></body></html>"
+    )
+    events = aitinkerers._parse_jsonld_events(html)
+    assert [e.title for e in events] == ["Graph Event"]
+
+
 def test_aitinkerers_is_still_auto_tagged_founder_ai():
     """The classifier short-circuits this source without an LLM call. The rewrite
     kept the source NAME, so that must still hold."""
@@ -242,21 +274,46 @@ def test_luma_discover_raises_on_unparseable_next_data():
         luma_discover._parse_next_data(html)
 
 
-def test_luma_discover_returns_empty_on_a_genuinely_quiet_page():
-    html = (
+def _next_data(payload: str) -> str:
+    """A __NEXT_DATA__ document that PROVES it is the city discovery page.
+
+    The `kind`/`place` anchor is what separates "the right page, quiet week" from
+    "we were redirected somewhere else" — see `_discovery_container`. Tests that
+    are about event parsing carry it so they are testing what they claim to.
+    """
+    envelope = {
+        "props": {
+            "pageProps": {
+                "initialData": {
+                    "kind": "discover-place",
+                    "data": {
+                        "place": {"api_id": "discplace-z9B5Guglh2WINA1", "name": "Hong Kong"},
+                        "events": json.loads(payload),
+                    },
+                }
+            }
+        }
+    }
+    return (
         '<html><body><script id="__NEXT_DATA__" type="application/json">'
-        '{"props": {"pageProps": {"initialData": {"data": {"events": []}}}}}'
-        "</script></body></html>"
+        + json.dumps(envelope)
+        + "</script></body></html>"
     )
-    assert luma_discover._parse_next_data(html) == []
+
+
+def test_luma_discover_returns_empty_on_a_genuinely_quiet_page():
+    assert luma_discover._parse_next_data(_next_data("[]")) == []
 
 
 def test_luma_discover_finds_events_at_an_unexpected_path():
     """The walk is structural, not path-based, because __NEXT_DATA__ is an
-    internal build artefact Luma can reshape without notice."""
+    internal build artefact Luma can reshape without notice. The anchor gate
+    proves we are on the right PAGE; it must not pin where the events sit."""
     html = (
         '<html><body><script id="__NEXT_DATA__" type="application/json">'
-        '{"props":{"somethingNew":{"rows":[{"item":{"api_id":"evt-ZZZ",'
+        '{"props":{"pageProps":{"initialData":{"kind":"discover-place",'
+        '"data":{"place":{"api_id":"discplace-z9B5Guglh2WINA1"}}}},'
+        '"somethingNew":{"rows":[{"item":{"api_id":"evt-ZZZ",'
         '"name":"Moved Event","start_at":"2026-09-20T10:00:00.000Z","url":"abc123"}}]}}}'
         "</script></body></html>"
     )
@@ -264,15 +321,52 @@ def test_luma_discover_finds_events_at_an_unexpected_path():
     assert [(e.external_id, e.url) for e in events] == [("evt-ZZZ", "https://lu.ma/abc123")]
 
 
+def test_luma_discover_raises_when_redirected_to_another_valid_next_js_page():
+    """IMPORTANT: a 200 with well-formed __NEXT_DATA__ is NOT proof we read the
+    city page. lu.ma is actively redirecting to luma.com, and a redirect landing
+    on a marketing / consent / login page still serves valid Next.js props: the
+    JSON parses, the walk finds nothing, and `[]` gets scored as a SUCCESS —
+    resetting the failure streak and stamping a last_success we never earned.
+    That silent zero is the exact failure this branch exists to prevent."""
+    marketing = (
+        '<html><body><script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"pageProps":{"marketing":true}}}'
+        "</script></body></html>"
+    )
+    with pytest.raises(SourceFetchError) as exc:
+        luma_discover._parse_next_data(marketing)
+    assert "discovery-listing container" in str(exc.value)
+
+
+@pytest.mark.parametrize("api_id", ["cal-ABC123", "tix-Q1", "discplace-z9B5", "usr-EmFxsO7"])
+def test_luma_discover_skips_non_event_objects_that_share_the_shape(api_id):
+    """The walk keys off "has name AND start_at", which is a shape, not a type.
+    Luma hangs calendars, ticket types, places and users off ids in the same tree
+    and some carry both fields. Only `evt-` is an event — and only `evt-` can
+    collide with the .ics adapter. A phantom here would reach the digest AND the
+    calendar."""
+    payload = (
+        f'[{{"api_id":"{api_id}","name":"Not An Event",'
+        '"start_at":"2026-09-20T10:00:00.000Z","url":"x"}]'
+    )
+    assert luma_discover._parse_next_data(_next_data(payload)) == []
+
+
+def test_luma_discover_keeps_evt_objects_alongside_the_phantoms():
+    """The prefix guard must not be so eager it drops real events."""
+    payload = (
+        '[{"api_id":"cal-ABC","name":"A Calendar","start_at":"2026-09-20T10:00:00.000Z"},'
+        '{"api_id":"evt-REAL","name":"A Real Event","start_at":"2026-09-20T10:00:00.000Z","url":"r"}]'
+    )
+    events = luma_discover._parse_next_data(_next_data(payload))
+    assert [e.external_id for e in events] == ["evt-REAL"]
+
+
 def test_luma_discover_skips_an_event_with_no_api_id():
     """Without an api_id there is no stable id and no way to collide with the
     .ics adapter — it would be re-notified every run AND double-reported."""
-    html = (
-        '<html><body><script id="__NEXT_DATA__" type="application/json">'
-        '{"props":{"events":[{"name":"Anonymous","start_at":"2026-09-20T10:00:00.000Z"}]}}'
-        "</script></body></html>"
-    )
-    assert luma_discover._parse_next_data(html) == []
+    payload = '[{"name":"Anonymous","start_at":"2026-09-20T10:00:00.000Z"}]'
+    assert luma_discover._parse_next_data(_next_data(payload)) == []
 
 
 def test_the_shipped_config_actually_configures_both_pages():
@@ -414,3 +508,327 @@ def test_both_new_sources_are_wired_into_the_run():
 
     assert "aitinkerers" in orchestrator.enabled_sources()
     assert "luma_discover" in orchestrator.enabled_sources()
+
+
+# ---------------------------------------------------------------------------
+# END-TO-END: the two halves joined
+#
+# The tests above proved `_uid_canonical_id` maps a UID correctly, and proved
+# `collapse_cross_source` merges Events that already carry a matching
+# `raw["canonical_id"]`. Both halves passed in ISOLATION while the wiring between
+# them could be deleted without a single failure — review confirmed that
+# `luma.py`'s `canonical_id=_uid_canonical_id` could be changed to `None`, and
+# that the orchestrator's collapse call could be replaced with `collapsed = []`,
+# and the suite stayed green either way.
+#
+# These tests join them: real .ics bytes in one side, the real city page in the
+# other, one survivor out.
+# ---------------------------------------------------------------------------
+
+_ICS_FIXTURE = "luma_startupshk_calendar.ics"
+# The genuine overlap, observed live 2026-09-01: this event was on the startupshk
+# calendar feed AND on lu.ma/hong-kong at the same time.
+_OVERLAP_API_ID = "evt-cuDFACZOa8zGKRu"
+
+
+@pytest.fixture
+def luma_ics_feed(monkeypatch, real_sources):
+    """Serve the captured .ics through the REAL `luma.fetch_luma_events` path.
+
+    Horizon filtering is neutralised because the fixture is verbatim captured
+    bytes — the overlapping event is dated 2026-09-05, so a real horizon check
+    would make this test start passing vacuously (0 events, 0 collapses) the
+    moment that date goes by. Rewriting the fixture's DTSTART to a rolling future
+    date was the alternative and is worse: a fixture edited until the test passes
+    is not evidence about the real feed. This test is about the collapse join,
+    not about the window.
+    """
+    real_sources()  # these tests drive the genuine adapters, not conftest's stubs
+    monkeypatch.setattr(_ical_common, "_within_horizon", lambda start: True)
+    monkeypatch.setattr(_ical_common, "load_feed_urls", lambda group: ["https://api.lu.ma/ics/get?id=cal-x"])
+
+    class _Resp:
+        status_code = 200
+        text = (FIXTURES / _ICS_FIXTURE).read_text()
+
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: _Resp())
+
+
+def test_the_ics_adapter_really_stamps_a_canonical_id(luma_ics_feed):
+    """`luma.fetch_luma_events` end-to-end, not `_uid_canonical_id` in a vacuum.
+
+    Kills the mutation `canonical_id=_uid_canonical_id` → `canonical_id=None`.
+    """
+    events = luma.fetch_luma_events()
+    by_uid = {e.external_id: e for e in events}
+
+    overlapping = by_uid[f"{_OVERLAP_API_ID}@events.lu.ma"]
+    assert overlapping.raw["canonical_id"] == f"luma-evt:{_OVERLAP_API_ID}"
+    assert overlapping.identity_key == f"luma-evt:{_OVERLAP_API_ID}"
+
+    # The `calev-` row in the same feed gets none, and falls back to dedup_key.
+    calendar_row = by_uid["calev-1huzvBb6z8QJmNv@events.lu.ma"]
+    assert "canonical_id" not in calendar_row.raw
+    assert calendar_row.identity_key == calendar_row.dedup_key
+
+
+def test_real_ics_and_real_city_page_collapse_to_one_survivor(luma_ics_feed):
+    """The whole point of the feature, through both real adapters and both real
+    fixtures. No hand-stuffed `raw` dicts anywhere in this test."""
+    from_ics = luma.fetch_luma_events()
+    from_page = luma_discover._parse_next_data(_fixture("luma_hong_kong.html"))
+
+    # Precondition: the same event really is in both fixtures, by two different
+    # external_ids. If this ever stops holding, the assertions below are vacuous.
+    assert f"{_OVERLAP_API_ID}@events.lu.ma" in {e.external_id for e in from_ics}
+    assert _OVERLAP_API_ID in {e.external_id for e in from_page}
+
+    kept, collapsed = collapse_cross_source(from_ics + from_page, seen_lookup=lambda s: {})
+
+    assert len(kept) == len(from_ics) + len(from_page) - 1
+    assert [w.identity_key for w, _ in collapsed] == [f"luma-evt:{_OVERLAP_API_ID}"]
+    survivors = [e for e in kept if e.identity_key == f"luma-evt:{_OVERLAP_API_ID}"]
+    assert len(survivors) == 1
+    assert survivors[0].title == "Paperclip-maxxing Capitalism"
+
+
+def test_the_orchestrator_collapses_before_the_seen_set_diff(monkeypatch, tmp_path, luma_ics_feed):
+    """Pins the ORDER, not just the existence, of the collapse.
+
+    `filter_due` keeps a separate seen-set per source, so a duplicate that reaches
+    it is diffed twice, classified twice, and calendared twice. Running the
+    collapse after it would be useless. Kills the mutation
+    `events, collapsed = collapse_cross_source(events)` → `collapsed = []`.
+    """
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+
+    page_events = luma_discover._parse_next_data(_fixture("luma_hong_kong.html"))
+    monkeypatch.setattr(
+        orchestrator.luma_discover, "fetch_luma_discover_events", lambda: page_events
+    )
+    # meetup and aitinkerers back to a clean zero: `luma_ics_feed` patches
+    # `load_feed_urls` and `httpx.Client.get` globally, so an un-stubbed meetup
+    # would parse the Luma .ics fixture as its own events.
+    monkeypatch.setattr(orchestrator.meetup, "fetch_meetup_events", lambda: [])
+    monkeypatch.setattr(orchestrator.aitinkerers, "fetch_aitinkerers_events", lambda: [])
+
+    seen_by_filter: list[Event] = []
+    real_filter_due = orchestrator.filter_due
+
+    def _spy(events, **kwargs):
+        seen_by_filter.extend(events)
+        return real_filter_due(events, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "filter_due", _spy)
+    monkeypatch.setattr(
+        orchestrator, "classify", lambda e: RelevanceResult(tag="founder_ai", reason="test")
+    )
+
+    assert orchestrator.run(dry_run=True) == 0
+
+    reaching_filter = [e for e in seen_by_filter if e.identity_key == f"luma-evt:{_OVERLAP_API_ID}"]
+    assert len(reaching_filter) == 1, (
+        "the duplicate reached filter_due twice — the collapse either did not run "
+        "or ran after the seen-set diff"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The cross-source hand-off: what happens when the WINNER stops reporting
+# ---------------------------------------------------------------------------
+
+class TestSeenSetSurvivesTheHandOff:
+    """`collapse_cross_source` picks one survivor, so only the winner's source
+    reaches `filter_due` — and `filter_due` builds its seen-sets from the events
+    it iterates, so the LOSER's state file is never written. The winner is stable
+    only while both sources keep reporting.
+
+    They don't. The city page is a bounded listing of the next ~12 events; the
+    .ics horizon is 45 days. An event ageing off the listing while still on a
+    followed calendar is the NORMAL life cycle, and on that run `luma` wins by
+    default, finds nothing in `seen_luma.json`, and re-notifies — re-pushing to
+    Telegram and writing a SECOND calendar entry, because `stable_hash` mixes the
+    source into the digest.
+
+    `mirror_collapsed` closes it by writing the winner's record into the loser's
+    seen-set as well. These tests walk the exact four-run sequence.
+    """
+
+    API_ID = "evt-handoff01"
+    START = datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc)
+
+    def _pair(self):
+        canonical = f"luma-evt:{self.API_ID}"
+        ics = Event(
+            source="luma",
+            external_id=f"{self.API_ID}@events.lu.ma",
+            title="Hand-off Test Event",
+            url="https://luma.com/handoff",
+            start=self.START,
+            raw={"uid": f"{self.API_ID}@events.lu.ma", "canonical_id": canonical},
+        )
+        page = Event(
+            source="luma_discover",
+            external_id=self.API_ID,
+            title="Hand-off Test Event",
+            url="https://lu.ma/handoff",
+            start=self.START,
+            raw={"api_id": self.API_ID, "canonical_id": canonical},
+        )
+        return ics, page
+
+    @staticmethod
+    def _run(events: list[Event], state: pathlib.Path, monkeypatch) -> tuple[list, list]:
+        """One full run's worth of dedupe: collapse → diff → verdict → mirror →
+        persist. Mirrors `orchestrator.run` steps 1d through 3b and 6."""
+        monkeypatch.setattr(config, "STATE_DIR", state)
+        monkeypatch.setattr(dedupe, "STATE_DIR", state)
+        kept, collapsed = collapse_cross_source(events)
+        due, seen_by_source = dedupe.filter_due(kept)
+        for event, _stage, _tag in due:
+            dedupe.record_verdict(seen_by_source, event, "founder_ai")
+        mirror_collapsed(seen_by_source, collapsed)
+        for source, seen in seen_by_source.items():
+            dedupe.save_seen(source, seen)
+        return kept, [(e.source, stage) for e, stage, _ in due]
+
+    def test_the_event_is_notified_exactly_once_across_the_hand_off(self, tmp_path, monkeypatch):
+        ics, page = self._pair()
+
+        # run 1 — standalone: only the city page has it.
+        kept, due = self._run([page], tmp_path, monkeypatch)
+        assert [e.source for e in kept] == ["luma_discover"]
+        assert due == [("luma_discover", "new")]
+
+        # run 2 — the host attaches it to a followed calendar. Both sources now
+        # carry it; continuity keeps luma_discover as the winner.
+        kept, due = self._run([ics, page], tmp_path, monkeypatch)
+        assert [e.source for e in kept] == ["luma_discover"]
+        assert due == []
+
+        # run 3 — THE REGRESSION. It ages off the 12-event city listing but is
+        # still inside the 45-day .ics horizon, so `luma` wins by default.
+        kept, due = self._run([ics], tmp_path, monkeypatch)
+        assert [e.source for e in kept] == ["luma"]
+        assert due == [], "re-notified on the hand-off — the loser's seen-set was never written"
+
+        # run 4 — back on the listing (a host bump, a recurrence). Still silent.
+        kept, due = self._run([ics, page], tmp_path, monkeypatch)
+        assert due == []
+
+    def test_the_mirror_is_what_writes_the_losers_state_file(self, tmp_path, monkeypatch):
+        """Names the mechanism, so a future refactor that drops the mirror fails
+        here with a readable reason rather than only in the sequence above."""
+        ics, page = self._pair()
+        self._run([page], tmp_path, monkeypatch)
+        assert not (tmp_path / "seen_luma.json").exists()
+
+        self._run([ics, page], tmp_path, monkeypatch)
+        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
+        assert ics.external_id in seen_luma
+        # The verdict rides along, so the loser's source will not resurface an
+        # event the classifier already rejected.
+        assert seen_luma[ics.external_id]["tag"] == "founder_ai"
+
+    def test_a_dropped_verdict_is_mirrored_too(self, tmp_path, monkeypatch):
+        """A "drop" that only reached the winner's file would let the loser's
+        source resurface an event the filter already rejected."""
+        ics, page = self._pair()
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+
+        kept, collapsed = collapse_cross_source([ics, page])
+        due, seen_by_source = dedupe.filter_due(kept)
+        for event, _stage, _tag in due:
+            dedupe.record_verdict(seen_by_source, event, "drop")
+        mirror_collapsed(seen_by_source, collapsed)
+        for source, seen in seen_by_source.items():
+            dedupe.save_seen(source, seen)
+
+        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
+        assert seen_luma[ics.external_id]["tag"] == "drop"
+
+    def test_the_mirror_does_not_re_arm_a_reminder_already_fired(self, tmp_path, monkeypatch):
+        """If the loser's side already tracked the event and had fired its
+        reminder, merging must not drop that stage and let it fire again."""
+        ics, page = self._pair()
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+        dedupe.save_seen(
+            "luma", {ics.external_id: {"stages": ["new", "soon"], "tag": "founder_ai"}}
+        )
+
+        kept, collapsed = collapse_cross_source([ics, page])
+        due, seen_by_source = dedupe.filter_due(kept)
+        mirror_collapsed(seen_by_source, collapsed)
+        for source, seen in seen_by_source.items():
+            dedupe.save_seen(source, seen)
+
+        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
+        assert seen_luma[ics.external_id]["stages"] == ["new", "soon"]
+
+    # ------------------------------------------------------------------
+    # ...and the same sequence through the REAL orchestrator.
+    #
+    # The four-run test above drives the dedupe functions directly, which is
+    # readable but reproduces the exact isolation failure this review caught
+    # elsewhere: deleting `mirror_collapsed(...)` from `orchestrator.run` left
+    # that test green, because the test re-implemented the call itself. This one
+    # runs the actual pipeline, so the WIRING is under test, not just the
+    # function.
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def orchestrated(self, monkeypatch, tmp_path):
+        """Run `orchestrator.run` for real, minus delivery.
+
+        `dry_run=True` cannot be used: the seen-set save lives in the non-dry-run
+        branch, and persistence is precisely what is under test here. So the run
+        is real and only its outbound edges are stubbed.
+        """
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(orchestrator.config, "assert_required", lambda: None)
+        monkeypatch.setattr(orchestrator, "push_messages", lambda messages: None)
+        monkeypatch.setattr(orchestrator, "write_archive", lambda today, md: None)
+        monkeypatch.setattr(orchestrator, "sync_events", lambda events, dry_run: None)
+        monkeypatch.setattr(orchestrator.source_health, "save_health", lambda health: None)
+        monkeypatch.setattr(
+            orchestrator, "classify", lambda e: RelevanceResult(tag="founder_ai", reason="test")
+        )
+
+        def _run(*, ics: list[Event], page: list[Event]) -> None:
+            monkeypatch.setattr(orchestrator.meetup, "fetch_meetup_events", lambda: [])
+            monkeypatch.setattr(orchestrator.aitinkerers, "fetch_aitinkerers_events", lambda: [])
+            monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", lambda: list(ics))
+            monkeypatch.setattr(
+                orchestrator.luma_discover, "fetch_luma_discover_events", lambda: list(page)
+            )
+            assert orchestrator.run() == 0
+
+        return _run
+
+    def test_the_orchestrator_does_not_re_push_across_the_hand_off(
+        self, orchestrated, tmp_path
+    ):
+        ics, page = self._pair()
+
+        orchestrated(ics=[], page=[page])
+        assert self.API_ID in json.loads((tmp_path / "seen_luma_discover.json").read_text())
+
+        # Both sources carry it. This is the only run that can teach `luma` the
+        # event exists, and it only does so because the orchestrator calls
+        # `mirror_collapsed`.
+        orchestrated(ics=[ics], page=[page])
+        seen_luma = json.loads((tmp_path / "seen_luma.json").read_text())
+        assert ics.external_id in seen_luma, (
+            "orchestrator.run did not mirror the collapsed event into the loser's "
+            "seen-set — the next run will re-push it and double-book the calendar"
+        )
+
+        # It ages off the city listing. `luma` now wins, and must stay silent.
+        orchestrated(ics=[ics], page=[])
+        after = json.loads((tmp_path / "seen_luma.json").read_text())
+        assert after[ics.external_id]["stages"] == ["new"]
+        assert after[ics.external_id]["tag"] == "founder_ai"

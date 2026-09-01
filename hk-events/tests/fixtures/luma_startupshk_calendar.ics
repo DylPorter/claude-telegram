@@ -1,0 +1,38 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Luma//Hong Kong Startup Events Calendar//EN
+X-WR-CALNAME:Hong Kong Startup Events Calendar
+X-WR-CALDESC:Luma Calendar
+REFRESH-INTERVAL;VALUE=DURATION:PT12H
+X-PUBLISHED-TTL:PT12H
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+DTSTART:20241023T020000Z
+DTEND:20241023T080000Z
+DTSTAMP:20260901T151757Z
+ORGANIZER;CN="Louder Connect":MAILTO:calendar-invite@lu.ma
+UID:calev-1huzvBb6z8QJmNv@events.lu.ma
+SUMMARY:Louder Connect 2024
+DESCRIPTION:Find more information on https://luma.com/startupshk
+LOCATION:https://www.louderconnect.com/
+GEO:22.286612;114.161999
+SEQUENCE:210439077
+STATUS:TENTATIVE
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20260905T070000Z
+DTEND:20260905T093000Z
+DTSTAMP:20260901T151757Z
+ORGANIZER;CN="Leo Lau":MAILTO:calendar-invite@lu.ma
+UID:evt-cuDFACZOa8zGKRu@events.lu.ma
+SUMMARY:Paperclip-maxxing Capitalism
+DESCRIPTION:Get up-to-date information at: https://luma.com/10d30z36\n\nAd
+ dress:\nACO Books\nHong Kong Island, Hong Kong\n\nHosted by Leo Lau
+LOCATION:ACO Books, Hong Kong, Wan Chai, Hennessy Rd, 365-367號, Foo Tak 
+ Building, 14 樓
+GEO:22.2789653;114.17943
+SEQUENCE:210439077
+STATUS:TENTATIVE
+END:VEVENT
+END:VCALENDAR
