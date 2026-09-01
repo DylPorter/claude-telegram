@@ -58,7 +58,18 @@ JOB_SIFT_MODEL=haiku
 
 # Vault archive subfolder (defaults to "Inbox/Job Sift")
 # JOB_SIFT_ARCHIVE_DIR=Inbox/Job Sift
+
+# Hard wall-clock budget for the whole (concurrent) source-fetch phase, in
+# seconds. Default 240. Anything still running when it expires is abandoned
+# and recorded as a failed source; the run continues with what landed.
+# Raise it only if you also raise the unit's TimeoutStartSec.
+# JOB_SIFT_FETCH_BUDGET_S=240
 ```
+
+Sources are fetched in parallel, so the fetch phase costs `max(t)` rather than
+`sum(t)`. The budget is the ceiling: an httpx timeout does **not** bound a
+`getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s fetches against a
+configured 25s timeout), so it has to be enforced from outside the fetch call.
 
 ## Cookie export (one-time, repeat when session expires)
 

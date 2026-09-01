@@ -12,11 +12,13 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import date
 
 from hk_events import config
 from hk_events.calendar_sync import sync_events
 from hk_events.classifier import classify
+from hk_events.concurrency import run_with_budget
 from hk_events.dedupe import (
     STAGE_NEW,
     STAGE_SOON,
@@ -49,22 +51,29 @@ def _setup_logging() -> None:
 
 
 def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
-    """Run every source adapter, return (combined events, per-source errors).
+    """Run every source adapter CONCURRENTLY, return (combined events, errors).
 
     Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
     are caught so one dead source never kills the run — but they are recorded
     in the returned error map (keyed by source name) so the digest + archive
     can surface a ⚠️ health line, the same way job-sift already does.
 
-    Feed (iCal) sources first — clean. Scrape sources after — brittle, each one
-    already degrades to [] internally, but we also wrap here for belt-and-braces.
+    Sources run in parallel under a hard wall-clock budget (see
+    hk_events/concurrency.py for why an httpx timeout is not enough — this
+    module's own `_ical_common._TIMEOUT = 25.0` did not stop a 135s DNS
+    block). A source that blows the budget is abandoned, its partial result
+    discarded, and it lands in the SAME error map as a crashed source — a
+    timeout is a failed source, not a quiet zero.
     """
     events: list[Event] = []
     errors: dict[str, str] = {}
-    fetchers = [
+
+    # Built per call so tests (and hot-patches) that swap a module attribute
+    # still take effect; the previous serial loop had the same property.
+    tasks: list[tuple[str, Callable[[], list[Event]]]] = [
         # Clean iCal/feed tier
-        (meetup.fetch_meetup_events, "meetup"),
-        (luma.fetch_luma_events, "luma"),
+        ("meetup", meetup.fetch_meetup_events),
+        ("luma", luma.fetch_luma_events),
         # DISABLED 2026-08-09 — these three returned 0 events on every run for
         # two months and only added latency + log noise:
         #   aitinkerers  — no public feed exists (email-only chapter)
@@ -72,19 +81,28 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
         #   startmeuphk  — scraper selectors never landed, parses 0
         # The adapters are kept so re-enabling is a one-line change once any of
         # them has a real feed.
-        # (aitinkerers.fetch_aitinkerers_events, "aitinkerers"),
-        # (cyberport.fetch_cyberport_events, "cyberport"),
-        # (startmeuphk.fetch_startmeuphk_events, "startmeuphk"),
+        # ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        # ("cyberport", cyberport.fetch_cyberport_events),
+        # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
     ]
-    for fetch_fn, name in fetchers:
+
+    budget_s = config.fetch_budget_s()
+    settled, abandoned = run_with_budget(tasks, budget_s, thread_name_prefix="hk-events-fetch")
+
+    for name, future in settled:
         try:
-            got = fetch_fn()
+            got = future.result()
             log.info("%s: %d events", name, len(got))
             events.extend(got)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
             errors[name] = f"fetch failed: {exc}"
+
+    for name in abandoned:
+        log.error("%s fetch failed: exceeded the %.0fs fetch budget", name, budget_s)
+        errors[name] = f"fetch failed: exceeded the {budget_s:.0f}s fetch budget"
+
     return events, errors
 
 

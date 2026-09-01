@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -12,6 +13,8 @@ BOT_ROOT = PROJECT_ROOT.parent  # claude-telegram/
 
 load_dotenv(BOT_ROOT / ".env")
 load_dotenv(PROJECT_ROOT / ".env", override=False)
+
+log = logging.getLogger(__name__)
 
 # Vault root for archiving the daily events digest.
 _vault_env = (
@@ -38,6 +41,41 @@ PUSH_URL = f"http://{PUSH_HOST}:{PUSH_PORT}/push"
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 # Haiku is plenty for per-event binary room classification.
 HK_EVENTS_MODEL = os.environ.get("HK_EVENTS_MODEL", "haiku")
+
+# ---------------------------------------------------------------------------
+# Hard wall-clock budget for the whole source-fetch phase, in seconds.
+#
+# Sources are fetched concurrently (see hk_events/concurrency.py); anything still
+# running when this expires is abandoned, recorded as a failed source, and the
+# run continues with whatever landed. This is the guard that survived the
+# 2026-09-01 DNS outage: an httpx timeout does NOT bound getaddrinfo, so the
+# ceiling has to be enforced from outside the fetch call.
+#
+# 240s leaves ~6 minutes of the unit's TimeoutStartSec=600 for classify, push
+# and state-save.
+FETCH_BUDGET_ENV = "HK_EVENTS_FETCH_BUDGET_S"
+FETCH_BUDGET_DEFAULT_S = 240.0
+
+
+def fetch_budget_s() -> float:
+    """Resolve the fetch budget.
+
+    Read at CALL time, not import time, so a one-off run (or a test) can
+    override it with HK_EVENTS_FETCH_BUDGET_S without re-importing the package.
+    """
+    raw = os.environ.get(FETCH_BUDGET_ENV, "").strip()
+    if not raw:
+        return FETCH_BUDGET_DEFAULT_S
+    try:
+        budget = float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number — using %.0fs", FETCH_BUDGET_ENV, raw, FETCH_BUDGET_DEFAULT_S)
+        return FETCH_BUDGET_DEFAULT_S
+    if budget <= 0:
+        log.warning("%s=%s must be positive — using %.0fs", FETCH_BUDGET_ENV, raw, FETCH_BUDGET_DEFAULT_S)
+        return FETCH_BUDGET_DEFAULT_S
+    return budget
+
 
 # gws (Google Workspace CLI) binary — used for calendar writes. Same tool
 # signal-brief uses for Gmail. On PATH by default; override if needed.

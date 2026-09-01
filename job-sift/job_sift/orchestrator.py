@@ -6,10 +6,12 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import date
 
 from job_sift import config
 from job_sift.classifier import classify, classify_batch, classify_scope_only
+from job_sift.concurrency import run_with_budget
 from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
 from job_sift.errors import SourceAuthError
 from job_sift.open_roles import (
@@ -47,20 +49,50 @@ def _setup_logging() -> None:
 
 
 def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str]]:
-    """Run every source adapter, return (combined listings, per-source errors).
+    """Run every source adapter CONCURRENTLY, return (combined listings, errors).
 
     Individual failures are caught so one dead source never kills the run — but
     they are recorded in the returned error map (keyed by source name) so the
     digest + archive can surface a ⚠️ health line. An auth failure raising
     SourceAuthError is the load-bearing case: it turns a silent "None today"
     into a visible "this source did not run".
+
+    Sources run in parallel under a hard wall-clock budget (see
+    job_sift/concurrency.py for why an httpx timeout is not enough). A source
+    that blows the budget is abandoned, its partial result discarded, and it
+    lands in the SAME error map as a crashed source — a timeout is a failed
+    source, not a quiet zero.
     """
     listings: list[JobListing] = []
     errors: dict[str, str] = {}
 
-    def _run(name: str, fetch_fn) -> None:
+    # CEDARS uses the seen-set to drive its greedy pagination (fetch page 1,
+    # then 2, ... stopping at the first all-seen page), so the set has to be
+    # pre-loaded and handed in. Load it HERE, on the main thread, before the
+    # fan-out — the workers must not race each other on the state files.
+    cedars_seen = load_seen("cedars")
+
+    # Built per call so tests (and hot-patches) that swap a module attribute
+    # still take effect; the previous serial loop had the same property.
+    tasks: list[tuple[str, Callable[[], list[JobListing]]]] = [
+        # CEDARS — greedy pagination with the pre-loaded seen-set
+        ("cedars", lambda: cedars.fetch_cedars_listings(seen_ids=cedars_seen)),
+        # Standardized-ATS sources — public JSON APIs, no pagination needed
+        ("greenhouse", greenhouse.fetch_greenhouse_listings),
+        ("lever", lever.fetch_lever_listings),
+        ("ashby", ashby.fetch_ashby_listings),
+        # LinkedIn — gws CLI Gmail digest email parsing
+        ("linkedin", linkedin.fetch_linkedin_listings),
+    ]
+
+    budget_s = config.fetch_budget_s()
+    settled, abandoned = run_with_budget(tasks, budget_s, thread_name_prefix="job-sift-fetch")
+
+    for name, future in settled:
         try:
-            listings.extend(fetch_fn())
+            got = future.result()
+            log.info("%s: %d listings", name, len(got))
+            listings.extend(got)
         except SourceAuthError as exc:
             log.error("%s auth failure: %s", name, exc.message)
             errors[name] = exc.message
@@ -68,17 +100,9 @@ def _fetch_all_sources() -> tuple[list[JobListing], dict[str, str]]:
             log.error("%s fetch failed: %s", name, exc)
             errors[name] = f"fetch failed: {exc}"
 
-    # CEDARS — uses seen-set for greedy pagination, so pre-load it
-    cedars_seen = load_seen("cedars")
-    _run("cedars", lambda: cedars.fetch_cedars_listings(seen_ids=cedars_seen))
-
-    # Standardized-ATS sources — public JSON APIs, no pagination needed
-    _run("greenhouse", greenhouse.fetch_greenhouse_listings)
-    _run("lever", lever.fetch_lever_listings)
-    _run("ashby", ashby.fetch_ashby_listings)
-
-    # LinkedIn — gws CLI Gmail digest email parsing
-    _run("linkedin", linkedin.fetch_linkedin_listings)
+    for name in abandoned:
+        log.error("%s fetch failed: exceeded the %.0fs fetch budget", name, budget_s)
+        errors[name] = f"fetch failed: exceeded the {budget_s:.0f}s fetch budget"
 
     return listings, errors
 
