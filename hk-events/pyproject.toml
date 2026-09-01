@@ -15,6 +15,9 @@ dependencies = [
     "anthropic>=0.40.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 hk-events = "hk_events.orchestrator:main"
 

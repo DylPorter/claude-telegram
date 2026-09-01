@@ -48,13 +48,19 @@ def _setup_logging() -> None:
     )
 
 
-def _fetch_all_sources() -> list[Event]:
-    """Run every source adapter, swallow individual failures, return combined events.
+def _fetch_all_sources() -> tuple[list[Event], dict[str, str]]:
+    """Run every source adapter, return (combined events, per-source errors).
+
+    Mirrors job_sift/orchestrator.py::_fetch_all_sources. Individual failures
+    are caught so one dead source never kills the run — but they are recorded
+    in the returned error map (keyed by source name) so the digest + archive
+    can surface a ⚠️ health line, the same way job-sift already does.
 
     Feed (iCal) sources first — clean. Scrape sources after — brittle, each one
     already degrades to [] internally, but we also wrap here for belt-and-braces.
     """
     events: list[Event] = []
+    errors: dict[str, str] = {}
     fetchers = [
         # Clean iCal/feed tier
         (meetup.fetch_meetup_events, "meetup"),
@@ -78,7 +84,8 @@ def _fetch_all_sources() -> list[Event]:
             events.extend(got)
         except Exception as exc:
             log.error("%s fetch failed: %s", name, exc)
-    return events
+            errors[name] = f"fetch failed: {exc}"
+    return events, errors
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -93,11 +100,18 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         config.assert_required()
 
     # 1. Fetch raw events from all sources
-    events = _fetch_all_sources()
+    events, source_errors = _fetch_all_sources()
+    if source_errors:
+        log.warning(
+            "source health: %d source(s) did not run: %s",
+            len(source_errors),
+            ", ".join(sorted(source_errors)),
+        )
     if not events:
         log.warning("no events fetched from any source — pushing heartbeat")
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today))
+            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors))
+            write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors))
         return 0
 
     log.info("fetched %d events across all sources", len(events))
@@ -141,6 +155,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         total_processed=len(events),
         calendar_stats=calendar_stats,
         today=today,
+        source_errors=source_errors,
     )
     if dry_run:
         log.info("dry-run — would push %d messages:", len(messages))
@@ -154,7 +169,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         log.info("pushed %d messages", len(messages))
 
     # 6. Vault archive (audit trail)
-    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today)
+    archive_md = render_vault_archive(surfaced=surfaced, dropped=dropped, today=today, source_errors=source_errors)
     if not dry_run:
         write_archive(today, archive_md)
 
