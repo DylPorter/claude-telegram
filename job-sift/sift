@@ -27,7 +27,13 @@ tried=""
 for b in "$BROWSER" firefox chrome chromium brave; do
   case " $tried " in *" $b "*) continue ;; esac
   tried="$tried $b"
-  if "$PY" -m job_sift.refresh_cookie --browser "$b" >/dev/null 2>&1; then
+  # Stdout only (the "wrote N cookie(s)" success line, no cookie value in it)
+  # is suppressed here — we print our own one-line summary below. stderr is
+  # left alone: refresh_cookie prints "not logged in" for a benign miss, but
+  # also anything else that goes wrong (bad permissions, corrupt profile,
+  # missing dependency), and those must stay visible in the journal rather
+  # than being indistinguishable from a plain miss.
+  if "$PY" -m job_sift.refresh_cookie --browser "$b" >/dev/null; then
     refreshed="$b"
     break
   fi

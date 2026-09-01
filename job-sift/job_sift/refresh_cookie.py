@@ -10,9 +10,21 @@ Defaults to Firefox — that's where the HKU Portal / CEDARS login actually
 lives. (It used to default to Chrome, which meant a missing cookie looked like
 a session-expiry failure rather than a wrong-browser one.)
 
-Interactive-only: decrypting the browser's cookie DB needs your unlocked OS
-keyring, so this cannot run from the headless systemd timer — it's for the
-manual "sift now" path. Usage:
+Chromium-family browsers (chrome/chromium/brave) decrypt their cookie DB via
+an unlocked OS keyring (SecretService/KWallet), so `--browser chrome` etc.
+really is interactive-only and will not work from a headless systemd unit.
+
+Firefox is different: browser_cookie3's `FirefoxBased` loader never touches
+dbus/SecretService at all — it just globs the profile dir and reads the
+plaintext `cookies.sqlite` with sqlite3. That means the Firefox default DOES
+work headless, with no session/keyring dependency, and is what
+`job-sift.service` invokes daily via the `sift` wrapper before scraping —
+verified under a `systemd-run --user` transient unit (see
+task-3-report.md). The residual limit: this only helps while Firefox itself
+still holds a live CEDARS session — if you log out of CEDARS in Firefox, or
+Firefox itself hasn't been opened/logged-in recently enough for the session
+to still be valid, the daily refresh has nothing to pull and falls back to
+the (likely stale) stored cookie. Usage:
 
     python -m job_sift.refresh_cookie            # pull from Firefox (default)
     python -m job_sift.refresh_cookie --browser chrome
