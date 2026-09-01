@@ -1,10 +1,15 @@
 # hk-events source configuration.
 #
-# Two tiers (see README):
-#   ical_feeds  — clean .ics feeds. PREFERRED. Per-feed degrade.
-#   scrape      — brittle HTML scrapers, wired in code (cyberport, startmeuphk).
-#                 Listed here only for documentation; the scraper adapters hold
-#                 their own URLs.
+# Three tiers (see README):
+#   ical_feeds   — clean .ics feeds. PREFERRED. Per-feed degrade.
+#   scrape_pages — pages that SERVER-RENDER their events as structured data
+#                  (schema.org JSON-LD, Next.js __NEXT_DATA__). Nearly as clean
+#                  as a feed: one <script> lookup + json.loads, no CSS selectors
+#                  to rot. The adapter reads its URL from here, so an entry left
+#                  empty or marked TODO parks the source instead of breaking it.
+#   scrape       — brittle DOM scrapers, wired in code (cyberport, startmeuphk).
+#                  Listed here only for documentation; those adapters hold their
+#                  own URLs.
 #
 # To add an iCal feed: paste the verified .ics URL under the right group.
 # Entries whose url is empty or starts with "TODO" are SKIPPED by the loader,
@@ -46,11 +51,14 @@ ical_feeds:
     # this calendar. Wired anyway: it costs one HTTP call and starts working the
     # moment they attach anything.
     #
-    # ⚠️ KNOWN ARCHITECTURAL GAP — standalone Luma events belong to no calendar,
-    # so NO iCal feed can ever see them. Catching those needs a discovery-page
-    # scrape (Luma's public discover API 404s on the obvious endpoints, and the
-    # page is JS-rendered, so it'd need Playwright). Deliberately not bolted on
-    # here. This is why CodeChella never reached the digest.
+    # ✅ GAP CLOSED 2026-09-01 — see scrape_pages.luma_discover below. The claim
+    # that this needed Playwright was wrong: lu.ma is a Next.js app, so the city
+    # page's event list is server-rendered into <script id="__NEXT_DATA__"> in
+    # the initial HTML. (The other half of the old note stands: every
+    # api.lu.ma/discover/* JSON endpoint really does 404.) Standalone events
+    # still reach no .ics feed — they are picked up by the `luma_discover`
+    # source instead, and duplicates across the two are collapsed on the Luma
+    # evt- api_id (see dedupe.collapse_cross_source).
     - name: Codechella  # lu.ma/codechella
       url: https://api.lu.ma/ics/get?entity=calendar&id=cal-MZrFS0AVVLJSPpy
     # HKWeb3 (267 events) DISABLED 2026-06-02 for the initial ship: it's a
@@ -60,15 +68,41 @@ ical_feeds:
     # - name: HKWeb3 Events Calendar  # lu.ma/hkweb3 — 267 events
     #   url: https://api.lu.ma/ics/get?entity=calendar&id=cal-5ui6MCnj5wN7WVI
 
-  aitinkerers:
-    - name: AI Tinkerers Hong Kong
-      # CHECKED 2026-06-01: no public iCal/RSS feed — the site exposes only a
-      # blog-email "Subscribe" widget, not a calendar feed. the operator is subscribed
-      # to the chapter and gets event emails directly. Left empty (skipped)
-      # unless a scraper for hong-kong.aitinkerers.org is added later.
-      url:
+  # aitinkerers has NO ical_feeds entry on purpose. CHECKED 2026-06-01 and still
+  # true: the chapter site exposes no public iCal/RSS feed, only a blog-email
+  # "Subscribe" widget. What was NOT true was the conclusion drawn from that —
+  # the homepage publishes the same events as schema.org JSON-LD, so the source
+  # is wired under scrape_pages below rather than left dead.
 
-# Scrape sources (documentation only — URLs live in the adapter modules):
+# Server-rendered structured-data pages. The adapter fetches exactly this URL;
+# an empty value or one starting with "TODO" is treated as UNCONFIGURED, which
+# the orchestrator scores as neither a success nor a failure (it prunes the
+# health record) rather than as a quiet zero.
+scrape_pages:
+  aitinkerers:
+    # VERIFIED 2026-09-01: HTTP 200 (the 403 recorded here on 2026-06-01 is
+    # GONE — it now serves fine to the browser-like User-Agent the .ics adapters
+    # already send). The page server-renders 9 <script type="application/ld+json">
+    # blocks; two are ItemLists of full schema.org Event objects (name,
+    # description, startDate, endDate, nested Place/PostalAddress, @id as the
+    # event URL). 7 distinct events at time of verification, 2 of them upcoming.
+    # The same blocks also carry Organization / WebSite / CollectionPage /
+    # BreadcrumbList / BlogPosting / TechArticle / CreativeWork — the adapter
+    # filters on @type == "Event".
+    url: https://hong-kong.aitinkerers.org/
+
+  luma_discover:
+    # VERIFIED 2026-09-01: 12 upcoming HK events server-rendered inside
+    # <script id="__NEXT_DATA__"> (lu.ma is Next.js — the props are in the
+    # initial HTML before any JS runs). This is the ONLY way we see standalone
+    # Luma events, which belong to no calendar and so appear in no .ics feed.
+    #
+    # ⚠️ It is lu.ma/hong-kong, NOT lu.ma/hk. `lu.ma/hk` looks like a city slug
+    # and is not: it is a stale 2023 event that happens to own that slug.
+    # ⚠️ Do not "improve" this to an api.lu.ma/discover/* endpoint. They all 404.
+    url: https://lu.ma/hong-kong
+
+# Brittle DOM-scrape sources (documentation only — URLs live in the adapter modules):
 #   cyberport    → https://www.cyberport.hk/en/news/events/        (selectors TODO)
 #   startmeuphk  → https://www.startmeup.hk/upcoming-events/events-calendar/  (selectors TODO;
 #                  CHECKED 2026-06-01: ?ical=1 returns HTML not a calendar feed — no clean

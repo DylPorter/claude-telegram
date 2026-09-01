@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -124,12 +125,24 @@ def _link_from_description(description: str | None) -> str:
     return m.group(0) if m else ""
 
 
-def parse_ics(text: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
+def parse_ics(
+    text: str,
+    *,
+    source: Source,
+    organizer_default: str | None = None,
+    canonical_id: Callable[[str], str | None] | None = None,
+) -> list[Event]:
     """Parse VEVENTs from an .ics document into horizon-filtered Event objects.
 
     The VEVENT UID is used as the stable per-source external_id. Past events and
     events beyond the horizon are filtered out here so downstream stages only see
     relevant candidates.
+
+    `canonical_id`, when given, maps a UID to a CROSS-source identity for the same
+    real-world event (or None when it cannot). It is how the Luma .ics feeds
+    collide with the Luma city-page adapter instead of double-reporting — see
+    `Event.identity_key`. Feeds with no twin (Meetup) pass nothing and fall back
+    to the source-prefixed `dedup_key`.
     """
     try:
         cal = Calendar.from_ical(text)
@@ -161,6 +174,12 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
         loc_link = location if (location and location.lower().startswith("http")) else ""
         link = url or loc_link or _link_from_description(description)
 
+        raw: dict = {"uid": uid}
+        if canonical_id is not None:
+            canon = canonical_id(uid)
+            if canon:
+                raw["canonical_id"] = canon
+
         events.append(
             Event(
                 source=source,
@@ -172,7 +191,7 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
                 location=location,
                 description=description,
                 organizer=organizer,
-                raw={"uid": uid},
+                raw=raw,
             )
         )
 
@@ -180,7 +199,13 @@ def parse_ics(text: str, *, source: Source, organizer_default: str | None = None
     return events
 
 
-def fetch_feed_group(group: str, *, source: Source, organizer_default: str | None = None) -> list[Event]:
+def fetch_feed_group(
+    group: str,
+    *,
+    source: Source,
+    organizer_default: str | None = None,
+    canonical_id: Callable[[str], str | None] | None = None,
+) -> list[Event]:
     """Fetch + parse every configured feed for a group.
 
     PARTIAL degrade, TOTAL escalation. One dead feed out of four is a partial
@@ -220,7 +245,14 @@ def fetch_feed_group(group: str, *, source: Source, organizer_default: str | Non
         if text is None:
             failed += 1
             continue
-        events.extend(parse_ics(text, source=source, organizer_default=organizer_default))
+        events.extend(
+            parse_ics(
+                text,
+                source=source,
+                organizer_default=organizer_default,
+                canonical_id=canonical_id,
+            )
+        )
     if failed == len(urls):
         raise SourceFetchError(
             str(source),

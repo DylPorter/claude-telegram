@@ -154,11 +154,19 @@ class TestAbsenceIsNotFailure:
         ]
 
     def test_the_disabled_adapters_are_not_attempted(self):
-        """aitinkerers/cyberport/startmeuphk are commented out of the fetch
-        list. They must never accrue a counter, let alone alarm."""
+        """cyberport/startmeuphk are commented out of the fetch list. They must
+        never accrue a counter, let alone alarm.
+
+        aitinkerers used to be on this list. It was un-disabled 2026-09-01: the
+        403 that justified parking it is gone, and its events are readable as
+        schema.org JSON-LD, so it is now a live source that SHOULD accrue
+        counters. Asserted below rather than just dropped from the tuple, so
+        nobody quietly re-parks it."""
         enabled = orchestrator.enabled_sources()
-        for dead in ("aitinkerers", "cyberport", "startmeuphk"):
+        for dead in ("cyberport", "startmeuphk"):
             assert dead not in enabled
+        for live in ("aitinkerers", "luma_discover"):
+            assert live in enabled
 
         health: dict = {}
         for _ in range(10):

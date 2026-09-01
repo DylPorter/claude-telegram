@@ -22,6 +22,7 @@ from hk_events.concurrency import run_with_budget
 from hk_events.dedupe import (
     STAGE_NEW,
     STAGE_SOON,
+    collapse_cross_source,
     filter_due,
     log_classification,
     record_verdict,
@@ -34,6 +35,7 @@ from hk_events.sources import (
     aitinkerers,
     cyberport,
     luma,
+    luma_discover,
     meetup,
     startmeuphk,
 )
@@ -61,16 +63,27 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
         # Clean iCal/feed tier
         ("meetup", meetup.fetch_meetup_events),
         ("luma", luma.fetch_luma_events),
-        # DISABLED 2026-08-09 — these three returned 0 events on every run for
-        # two months and only added latency + log noise:
-        #   aitinkerers  — no public feed exists (email-only chapter)
+        # Server-rendered structured-data tier (2026-09-01). Not DOM scraping:
+        # both read a JSON island the server already ships in the initial HTML
+        # (schema.org JSON-LD, and Next.js __NEXT_DATA__), so there are no CSS
+        # selectors to rot. Each closes a hole the repo had written off:
+        #   aitinkerers    — the recorded 403 is gone; the homepage serves the
+        #                    chapter's events as schema.org Event objects.
+        #   luma_discover  — standalone Luma events belong to no calendar and so
+        #                    reach NO .ics feed (this is why CodeChella Week was
+        #                    invisible). The city page lists them.
+        # luma_discover overlaps `luma` on purpose — collapse_cross_source below
+        # merges the duplicates.
+        ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        ("luma_discover", luma_discover.fetch_luma_discover_events),
+        # DISABLED 2026-08-09 — these two returned 0 events on every run for two
+        # months and only added latency + log noise:
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
-        # The adapters are kept so re-enabling is a one-line change once any of
-        # them has a real feed. Being absent from this list also keeps them out
-        # of the staleness counters: they never run, so they never land in the
-        # error map or the succeeded list, and update_health prunes them.
-        # ("aitinkerers", aitinkerers.fetch_aitinkerers_events),
+        # The adapters are kept so re-enabling is a one-line change once either
+        # has a real feed. Being absent from this list also keeps them out of the
+        # staleness counters: they never run, so they never land in the error map
+        # or the succeeded list, and update_health prunes them.
         # ("cyberport", cyberport.fetch_cyberport_events),
         # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
@@ -231,6 +244,16 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         return 0
 
     log.info("fetched %d events across all sources", len(events))
+
+    # 1d. Collapse events that two sources both reported. MUST run before the
+    #     seen-set diff: `filter_due` keeps a separate seen-set per source, so a
+    #     duplicate that survives to that point is notified twice, classified
+    #     twice, and written to the calendar twice. `luma` and `luma_discover`
+    #     really do overlap — see dedupe.collapse_cross_source.
+    events, collapsed = collapse_cross_source(events)
+    if collapsed:
+        log.info("collapsed %d cross-source duplicate(s) — %d events remain",
+                 len(collapsed), len(events))
 
     # 2. Diff against seen-sets (per-source). Two notification stages: newly
     #    discovered, and starting within HK_EVENTS_REMINDER_DAYS.

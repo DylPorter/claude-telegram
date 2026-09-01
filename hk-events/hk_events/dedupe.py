@@ -84,6 +84,97 @@ def save_seen(source: str, seen: dict[str, dict]) -> None:
     _seen_path(source).write_text(json.dumps(seen, indent=2, sort_keys=True))
 
 
+# Which source wins when two of them carry the same real-world event and NEITHER
+# has been seen before. Earlier = preferred. `luma` outranks `luma_discover`
+# because the .ics carries a description and an organizer, which the city-page
+# listing card does not, and the classifier reads both.
+#
+# This ordering is only ever the TIE-BREAK. Continuity outranks it — see
+# collapse_cross_source.
+_SOURCE_PRECEDENCE = ["meetup", "luma", "aitinkerers", "luma_discover", "cyberport", "startmeuphk"]
+
+
+def _precedence(event: Event) -> tuple[int, str]:
+    try:
+        rank = _SOURCE_PRECEDENCE.index(event.source)
+    except ValueError:
+        rank = len(_SOURCE_PRECEDENCE)
+    return (rank, event.source)
+
+
+def collapse_cross_source(
+    events: list[Event], *, seen_lookup=load_seen
+) -> tuple[list[Event], list[tuple[Event, Event]]]:
+    """Collapse events that two sources both reported, BEFORE the seen-set diff.
+
+    Returns `(kept, collapsed)`, where each `collapsed` pair is `(kept, dropped)`
+    so the caller can log what it merged.
+
+    WHY THIS EXISTS. Nothing in this pipeline used to compare events across
+    sources. `dedup_key` is source-prefixed, `stable_hash` mixes the source into
+    the digest, and `filter_due` loads a SEPARATE seen-set per source — so two
+    adapters holding one event produced two "new event" notifications, two
+    classifier calls, and two Google Calendar inserts. That was latent until
+    `luma_discover` landed: the city page and the calendar .ics feeds genuinely
+    overlap, and a standalone event getting attached to a followed calendar puts
+    it in both. Verified in live data 2026-09-01 — `evt-cuDFACZOa8zGKRu`
+    ("Paperclip-maxxing Capitalism") was on the startupshk .ics and on
+    lu.ma/hong-kong simultaneously.
+
+    The collision key is `Event.identity_key`; for the Luma pair that resolves to
+    `luma-evt:<api_id>`, which both adapters derive independently.
+
+    CONTINUITY BEATS PRECEDENCE, and that is the subtle half. Picking a winner by
+    a fixed source ranking alone would trade a same-run double-report for a
+    across-run one: an event first found by `luma_discover` is recorded in
+    `seen_luma_discover.json`, so if a later run switched the winner to `luma`,
+    that run would look the event up in `seen_luma.json`, miss, and notify it a
+    second time — plus write a second calendar entry, since `stable_hash` mixes
+    the source in. So a candidate whose OWN source has already seen it wins. The
+    fixed ranking only decides a genuinely first sighting, where no seen-set has
+    an opinion and either choice is equally new.
+
+    `seen_lookup` is injected so tests can drive this without touching
+    `.data/state/`.
+    """
+    by_identity: dict[str, list[Event]] = {}
+    order: list[str] = []
+    for event in events:
+        key = event.identity_key
+        if key not in by_identity:
+            by_identity[key] = []
+            order.append(key)
+        by_identity[key].append(event)
+
+    seen_cache: dict[str, dict[str, dict]] = {}
+
+    def _already_seen(event: Event) -> bool:
+        if event.source not in seen_cache:
+            seen_cache[event.source] = seen_lookup(event.source)
+        return event.external_id in seen_cache[event.source]
+
+    kept: list[Event] = []
+    collapsed: list[tuple[Event, Event]] = []
+    for key in order:
+        group = by_identity[key]
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        # sorted() is stable, so equal keys preserve fetch order — the result is
+        # deterministic even when two candidates tie on both criteria.
+        winner = sorted(group, key=lambda e: (not _already_seen(e), _precedence(e)))[0]
+        kept.append(winner)
+        for other in group:
+            if other is not winner:
+                collapsed.append((winner, other))
+                log.info(
+                    "collapsed duplicate %s: keeping %s/%s, dropping %s/%s (%s)",
+                    key, winner.source, winner.external_id,
+                    other.source, other.external_id, winner.title[:60],
+                )
+    return kept, collapsed
+
+
 def _is_soon(event: Event, *, now: datetime | None = None) -> bool:
     """True if the event starts within the reminder window and hasn't started yet.
 

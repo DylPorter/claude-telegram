@@ -159,22 +159,27 @@ class TestStreakSurvivesATotalOutage:
         monkeypatch.setenv("HK_EVENTS_STUB", "0")
         return tmp_path
 
-    def _total_outage(self, monkeypatch):
+    def _total_outage(self, monkeypatch, real_sources):
+        # This class is about what the REAL adapters do when the network dies, so
+        # it opts out of conftest's blanket stub. All four live sources go through
+        # httpx.Client.get — the two .ics feeds and the two structured-data pages
+        # — so patching it covers every one of them.
+        real_sources()
         monkeypatch.setattr(
             _ical_common, "load_feed_urls", lambda group: ["https://a/x.ics", "https://b/y.ics"]
         )
         monkeypatch.setattr(httpx.Client, "get", _outage)
 
-    def test_every_source_lands_in_the_error_map(self, monkeypatch):
-        self._total_outage(monkeypatch)
+    def test_every_source_lands_in_the_error_map(self, monkeypatch, real_sources):
+        self._total_outage(monkeypatch, real_sources)
         events, errors, succeeded = orchestrator._fetch_all_sources()
 
         assert events == []
         assert succeeded == []
         assert set(errors) == set(orchestrator.enabled_sources())
 
-    def test_the_streak_grows_and_last_success_does_not_advance(self, monkeypatch):
-        self._total_outage(monkeypatch)
+    def test_the_streak_grows_and_last_success_does_not_advance(self, monkeypatch, real_sources):
+        self._total_outage(monkeypatch, real_sources)
         _events, errors, succeeded = orchestrator._fetch_all_sources()
 
         health = source_health.update_health(
@@ -279,14 +284,14 @@ class TestUnconfiguredSourceIsNeitherSuccessNorFailure:
                 SourceNotConfiguredError("meetup", "no feeds configured")
             ),
         )
-        monkeypatch.setattr(orchestrator.luma, "fetch_luma_events", lambda: [])
-
         _events, errors, succeeded = orchestrator._fetch_all_sources()
 
         assert "meetup" not in succeeded
         assert "meetup" not in errors
         # The run is otherwise untouched: one dead config is not a dead run.
-        assert succeeded == ["luma"]
+        # (conftest stubs every other adapter to a clean, empty fetch.)
+        assert errors == {}
+        assert set(succeeded) == set(orchestrator.enabled_sources()) - {"meetup"}
 
     def test_the_record_is_pruned_not_reset(self):
         """The consequence in the state file: no fabricated success.

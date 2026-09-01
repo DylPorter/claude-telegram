@@ -19,15 +19,43 @@ run is not evidence about this source either way.
 Configured calendars (all verified): startupshk, lunatechs, moomeetup,
 codechella. hkweb3 is deliberately commented out — see sources.yaml.
 
-KNOWN GAP: standalone Luma events belong to no calendar, so no iCal feed can
-ever see them. Catching those needs a discovery-page scrape. See sources.yaml.
+THE STANDALONE-EVENT GAP IS CLOSED (2026-09-01), just not here. A standalone
+Luma event belongs to no calendar, so no .ics feed can ever see it; that is now
+`sources/luma_discover.py`, which reads the lu.ma/hong-kong city page. The two
+overlap by design, which is what `_uid_canonical_id` below is for.
 """
 
 from __future__ import annotations
 
+import re
+
 from hk_events.schema import Event
 from hk_events.sources._ical_common import fetch_feed_group
+from hk_events.sources.luma_discover import canonical_id
+
+# Luma emits TWO VEVENT UID shapes on a calendar feed, and the difference matters:
+#
+#   evt-<api_id>@events.lu.ma    a real Luma-hosted event that happens to be on
+#                                this calendar. `<api_id>` is the SAME id the
+#                                city page reports, so this is the one that can
+#                                collide with `luma_discover`.
+#   calev-<row_id>@events.lu.ma  a calendar ROW for something not hosted on Luma
+#                                (its DESCRIPTION just points back at the
+#                                calendar page). No api_id exists, and no city-
+#                                page event can ever be this — so returning None
+#                                and falling back to the source-prefixed
+#                                `dedup_key` is correct, not a gap.
+#
+# Both shapes confirmed against the live startupshk feed 2026-09-01: 142 `evt-`
+# and 35 `calev-` UIDs.
+_EVT_UID_RE = re.compile(r"^(evt-[A-Za-z0-9]+)@", re.IGNORECASE)
+
+
+def _uid_canonical_id(uid: str) -> str | None:
+    """Recover the cross-source Luma identity from a VEVENT UID, if it has one."""
+    m = _EVT_UID_RE.match(uid.strip())
+    return canonical_id(m.group(1)) if m else None
 
 
 def fetch_luma_events() -> list[Event]:
-    return fetch_feed_group("luma", source="luma")
+    return fetch_feed_group("luma", source="luma", canonical_id=_uid_canonical_id)

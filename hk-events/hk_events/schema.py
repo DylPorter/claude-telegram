@@ -14,11 +14,13 @@ from typing import Literal
 # Feed sources are clean (iCal); scrape sources are brittle and must degrade
 # cleanly per-source the way signal-brief's per-source try/except does.
 Source = Literal[
-    "meetup",       # per-group Meetup .ics feeds
-    "luma",         # lu.ma calendar .ics feeds
-    "aitinkerers",  # AI Tinkerers Hong Kong feed
-    "cyberport",    # scrape — cyberport.hk events
-    "startmeuphk",  # scrape — startmeup.hk events calendar
+    "meetup",         # per-group Meetup .ics feeds
+    "luma",           # lu.ma calendar .ics feeds
+    "luma_discover",  # lu.ma/hong-kong city page — catches STANDALONE Luma events,
+                      # which belong to no calendar and so appear in no .ics feed
+    "aitinkerers",    # AI Tinkerers HK — schema.org JSON-LD on the chapter homepage
+    "cyberport",      # scrape — cyberport.hk events
+    "startmeuphk",    # scrape — startmeup.hk events calendar
 ]
 
 # Relevance bucket. job-sift uses prestige+scope; here the analogue is which
@@ -47,6 +49,31 @@ class Event:
         """Globally unique key across sources. Prefix source to avoid id collisions
         between platforms that reuse the same UID/hash format."""
         return f"{self.source}:{self.external_id}"
+
+    @property
+    def identity_key(self) -> str:
+        """Identity of the REAL-WORLD event, across sources.
+
+        `dedup_key` answers "have I seen this row from this source before"; this
+        answers "is this the same happening as that other row". Two adapters that
+        independently saw one event must agree here, or the digest reports it twice.
+
+        Concretely: `luma` (calendar .ics) and `luma_discover` (the lu.ma/hong-kong
+        city page) genuinely overlap. A standalone Luma event is invisible to every
+        .ics feed — that is why `luma_discover` exists — but the moment its host
+        attaches it to a followed calendar, BOTH sources carry it, with different
+        `external_id`s: the .ics UID is `evt-<api_id>@events.lu.ma`, the city page
+        gives a bare `evt-<api_id>`. So each Luma adapter writes the shared
+        `luma-evt:<api_id>` into `raw["canonical_id"]` and they collide here.
+        Verified against live data 2026-09-01: `evt-cuDFACZOa8zGKRu`
+        ("Paperclip-maxxing Capitalism", 5 Sep) is on the startupshk .ics AND on
+        lu.ma/hong-kong right now.
+
+        Sources with no cross-source twin fall back to `dedup_key`, which is
+        source-prefixed and therefore can never collide with anything else.
+        """
+        canonical = (self.raw or {}).get("canonical_id")
+        return str(canonical) if canonical else self.dedup_key
 
     @property
     def stable_hash(self) -> str:
