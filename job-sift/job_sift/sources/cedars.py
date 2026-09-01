@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -155,6 +156,67 @@ def _is_portal_page(html: str) -> bool:
     return soup.select_one(_MEGA_MENU_SELECTOR) is not None
 
 
+_PAGINATION_SELECTOR = "div.pagination"
+_TOTAL_PAGES_RE = re.compile(r"\((\d+)\s*pages?\)", re.IGNORECASE)
+
+
+def _parse_total_pages(html: str) -> int | None:
+    """How many result pages the portal says exist. None if it does not say.
+
+    WHY THIS EXISTS. Deleting the tableless quiet arm made one previously-
+    tolerated event fatal: walking off the last page. Nobody can say what CEDARS
+    serves for `page=33` of 32 without an authenticated live fetch, and we are
+    not doing one. Both branches were executed against the corrected code — if
+    past-the-end serves the table shell with no rows we return cleanly, and if
+    it serves no table we now RAISE, discarding a whole full-scan's listings and
+    contradicting this module's own "PARTIAL degrade" promise.
+
+    The evidence leans safe (the capture prints `<b>631</b> job(s) found.` from
+    a COUNT query independent of LIMIT/OFFSET, so a conventional
+    `if ($total > 0)` wrapper would still emit the shell on page 33) — but that
+    is an inference about someone else's PHP, not a fact. So rather than pick a
+    branch, remove the question: read the real page count and never request page
+    33 at all. That also stops the pointless trailing request every full scan
+    used to make.
+
+    TWO READINGS, in order, both off the real `div.pagination` block:
+      * `<div class="results">Showing 1 to 20 of <b>631 job(s)</b> (32 Pages)`
+        — the portal stating the count in words.
+      * failing that, the largest `?page=N` in the block's own links (the live
+        `>|` last-page link carries it).
+
+    NEVER RAISES, and that is deliberate. A missing or reworded pagination
+    widget is NOT evidence that we are off the portal — the table-presence check
+    already owns that decision, and it owns it on real markup. Turning a
+    cosmetic change in a navigation widget into a hard source failure would be
+    the exact inversion of the bug this branch spent two rounds fixing: an
+    adapter that reports "I could not look" when it looked fine. So an
+    unreadable block returns None, the caller logs it and falls back to the
+    `max_pages` cap — the behaviour that shipped for months.
+    """
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        block = soup.select_one(_PAGINATION_SELECTOR)
+        if block is None:
+            return None
+
+        match = _TOTAL_PAGES_RE.search(block.get_text(" ", strip=True))
+        if match:
+            total = int(match.group(1))
+            return total if total > 0 else None
+
+        # Fallback: the highest page number the block links to.
+        linked = [
+            int(m.group(1))
+            for m in (re.search(r"[?&]page=(\d+)", a.get("href") or "") for a in block.find_all("a"))
+            if m
+        ]
+        return max(linked) if linked else None
+    except (ValueError, AttributeError) as exc:
+        log.warning("cedars: could not read the pagination block: %s", exc)
+        return None
+
+
 def _safe_date(s: str) -> date | None:
     s = s.strip()
     if not s:
@@ -288,10 +350,17 @@ def fetch_cedars_listings(
     If `seen_ids` is None, fetches only the first page (no greedy logic) —
     used by stub mode and by initial-bootstrap runs.
 
+    The walk is bounded by `min(max_pages, total_pages)`, where `total_pages`
+    is read off the portal's own pagination block on the first fetch — so a
+    generously-set cap can no longer request a page past the end. If that block
+    cannot be read we fall back to `max_pages` alone rather than failing; see
+    `_parse_total_pages`.
+
     Env overrides (for a one-time deep catch-up after an outage, without
     changing the cheap daily defaults):
-      - JOB_SIFT_CEDARS_MAX_PAGES : raise the page cap (default 5; ~11 pages
-        cover all ~215 open listings).
+      - JOB_SIFT_CEDARS_MAX_PAGES : raise the page cap (default 5; the live
+        portal reported 32 pages / 631 listings in the captured sample). The
+        real page count still wins when it is lower.
       - JOB_SIFT_CEDARS_FULL=1    : disable the greedy 0-new stop, so it scans
         every page up to the cap even when the newest pages are all-seen. This
         is REQUIRED to reach the older backlog (pages 6+) once a normal run has
@@ -329,9 +398,34 @@ def fetch_cedars_listings(
     full_scan = os.environ.get("JOB_SIFT_CEDARS_FULL") == "1"
 
     all_listings: list[JobListing] = []
-    for page in range(1, max_pages + 1):
-        log.info("cedars: fetching page %d", page)
+    # Bounded by `max_pages` until page 1 tells us the real number, then by
+    # whichever is smaller. See `_parse_total_pages` for why we never walk off
+    # the end any more, and why an unreadable pagination block is not an error.
+    page_cap = max_pages
+    page = 0
+    while page < page_cap:
+        page += 1
+        log.info("cedars: fetching page %d of at most %d", page, page_cap)
         html = _fetch_listings_page(page)
+
+        if page == 1:
+            total_pages = _parse_total_pages(html)
+            if total_pages is None:
+                log.warning(
+                    "cedars: no readable pagination block — falling back to the "
+                    "max_pages cap of %d. NOT an error: the results table is what "
+                    "says whether we read the portal, and it is there.",
+                    max_pages,
+                )
+            else:
+                page_cap = min(max_pages, total_pages)
+                log.info(
+                    "cedars: portal reports %d page(s); walking %d (cap %d)",
+                    total_pages,
+                    page_cap,
+                    max_pages,
+                )
+
         page_listings = _parse_listings_html(html)
 
         if page_listings is None:

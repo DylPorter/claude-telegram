@@ -131,6 +131,38 @@ def _real_portal_header_without_its_content() -> str:
     return str(soup)
 
 
+def _real_portal_page_claiming(total_pages: int) -> str:
+    """The captured page, with its pagination block rewritten to claim N pages.
+
+    The live capture says "(32 Pages)". Rewriting it lets a test assert on the
+    walk's bound with a handful of fetches instead of 32, without inventing the
+    markup around it.
+    """
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    results = soup.select_one("div.pagination div.results")
+    results.clear()
+    results.append(f"Showing 1 to 20 of 631 job(s) ({total_pages} Pages)")
+    for a in soup.select("div.pagination a"):
+        a.decompose()
+    return str(soup)
+
+
+def _real_portal_page_without_pagination() -> str:
+    """The captured page with the whole pagination widget gone."""
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    soup.select_one("div.pagination").decompose()
+    return str(soup)
+
+
+def _real_portal_page_with_garbled_pagination() -> str:
+    """Pagination block present, but saying nothing a number can be read from."""
+    soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+    block = soup.select_one("div.pagination")
+    block.clear()
+    block.append("Page navigation temporarily unavailable")
+    return str(soup)
+
+
 # The negatives, derived from the SAME captured page as the positives.
 #
 # The hand-written shapes in `_NOT_A_LISTINGS_PAGE` below are chrome-less by
@@ -380,6 +412,113 @@ class TestATablelessPageAlwaysEscalates:
         assert got, "the captured portal page must yield listings"
         assert all(L.source == "cedars" for L in got)
         assert all(L.external_id for L in got)
+
+
+class TestTheWalkNeverGoesPastTheLastPage:
+    """The loop is bounded by the portal's own page count, not just our cap.
+
+    THE HOLE THIS CLOSES. Deleting the tableless quiet arm made one previously-
+    tolerated event fatal: requesting page 33 of 32. What CEDARS serves there is
+    genuinely unknown — determining it needs an authenticated live fetch, which
+    is out of scope — and the two possibilities diverge. Table shell with no
+    rows: fine, we return cleanly. No table at all: we now RAISE, and because
+    the raise propagates out of `fetch_cedars_listings`, a full-scan catch-up
+    would lose every listing it had already collected.
+
+    Production cannot reach it today (`max_pages` defaults to 5 against 32 real
+    pages, and nothing in the repo, `sift`, or the systemd units sets
+    `JOB_SIFT_CEDARS_FULL` or `JOB_SIFT_CEDARS_MAX_PAGES`), so this is a manual
+    backlog catch-up with an over-set cap. Rather than guess which branch the
+    portal takes, the walk stops asking: page 1 reports the real count and the
+    loop is bounded by `min(max_pages, total_pages)`. Page 33 is never
+    requested, so which branch CEDARS would have taken stops mattering.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_cedars(self, monkeypatch):
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(cedars, "fetch_cedars_listings", _REAL_FETCH)
+
+    def _serve(self, monkeypatch, page_html: str):
+        """Serve the same page for every page number, and record the requests.
+
+        Deliberately bottomless: nothing here stops the walk, so anything that
+        stops it is the code under test.
+        """
+        served: list[int] = []
+
+        def _fetch(page: int = 1) -> str:
+            served.append(page)
+            return page_html
+
+        monkeypatch.setattr(cedars, "_fetch_listings_page", _fetch)
+        return served
+
+    def test_the_reported_page_count_bounds_the_walk(self, monkeypatch):
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        served = self._serve(monkeypatch, _real_portal_page_claiming(3))
+        cedars.fetch_cedars_listings(seen_ids=set(), max_pages=50)
+        assert served == [1, 2, 3], "it must stop at the portal's own last page"
+
+    def test_a_lower_cap_still_wins(self, monkeypatch):
+        """`min`, not "trust the portal". The cap is the cheap-daily-run knob and
+        must keep working when the portal has far more pages than we want."""
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        served = self._serve(monkeypatch, _real_portal_page_claiming(32))
+        cedars.fetch_cedars_listings(seen_ids=set(), max_pages=3)
+        assert served == [1, 2, 3]
+
+    def test_a_full_scan_with_an_over_set_cap_never_asks_past_the_end(self, monkeypatch):
+        """The point of the exercise, in the shape that could actually bite: the
+        manual catch-up invocation, FULL=1 with a deliberately generous cap."""
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        monkeypatch.setenv("JOB_SIFT_CEDARS_MAX_PAGES", "100")
+        served = self._serve(monkeypatch, _real_portal_page_claiming(5))
+        cedars.fetch_cedars_listings(seen_ids=set())
+        assert served == [1, 2, 3, 4, 5]
+        assert 6 not in served, "page 6 of 5 must never be requested"
+
+    def test_the_real_capture_reports_its_own_page_count(self):
+        """Premise: read off the untouched capture, not a rewritten one."""
+        assert cedars._parse_total_pages(_REAL_PORTAL_PAGE) == 32
+
+    def test_the_page_links_are_a_fallback_reading(self):
+        """The live block's `>|` last-page link carries the count too. Kept as a
+        second reading so a reworded "(32 Pages)" string does not blind us."""
+        soup = BeautifulSoup(_REAL_PORTAL_PAGE, "lxml")
+        soup.select_one("div.pagination div.results").decompose()
+        assert cedars._parse_total_pages(str(soup)) == 32
+
+    @pytest.mark.parametrize(
+        "shape",
+        [_real_portal_page_without_pagination, _real_portal_page_with_garbled_pagination],
+        ids=["block_missing", "block_garbled"],
+    )
+    def test_an_unreadable_pagination_block_falls_back_and_does_not_raise(
+        self, monkeypatch, shape
+    ):
+        """RESOLVED TOWARDS TOLERANCE, deliberately.
+
+        A missing or reworded navigation widget is not evidence that we are off
+        the portal — the results table already owns that call, and it is present
+        here. Escalating a cosmetic markup change to a source failure would be
+        the inverse of the bug this branch exists to fix: an adapter reporting
+        "I could not look" when it looked fine. So the count reads None, the
+        caller logs it, and the `max_pages` cap governs exactly as it did before
+        any of this work.
+        """
+        assert cedars._parse_total_pages(shape()) is None
+
+        monkeypatch.setenv("JOB_SIFT_CEDARS_FULL", "1")
+        served = self._serve(monkeypatch, shape())
+        got = cedars.fetch_cedars_listings(seen_ids=set(), max_pages=2)
+        assert served == [1, 2], "the cap alone must still bound the walk"
+        assert got, "and the listings it did read must still come back"
+
+    def test_a_nonsense_page_count_is_ignored_rather_than_trusted(self):
+        """Zero pages on a page that is visibly showing listings is not a number
+        to obey — it would truncate the walk to nothing."""
+        assert cedars._parse_total_pages(_real_portal_page_claiming(0)) is None
 
 
 class TestTheRedirectGuardWinsOverTheParser:
