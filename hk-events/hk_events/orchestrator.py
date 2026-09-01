@@ -82,9 +82,14 @@ def _source_tasks() -> list[tuple[str, Callable[[], list[Event]]]]:
         #   cyberport    — HTTP 403 on every fetch (bot-blocked at the edge)
         #   startmeuphk  — scraper selectors never landed, parses 0
         # The adapters are kept so re-enabling is a one-line change once either
-        # has a real feed. Being absent from this list also keeps them out of the
-        # staleness counters: they never run, so they never land in the error map
-        # or the succeeded list, and update_health prunes them.
+        # has a real feed — and as of 2026-09-02 that is TRUE rather than
+        # aspirational: both were ported to the SourceFetchError contract, so
+        # uncommenting a line no longer reintroduces the silent zero (they used
+        # to `return []` on an HTTP 403 and on any exception, which
+        # source_health scores as a success). Being absent from this list also
+        # keeps them out of the staleness counters: they never run, so they
+        # never land in the error map or the succeeded list, and update_health
+        # prunes them.
         # ("cyberport", cyberport.fetch_cyberport_events),
         # ("startmeuphk", startmeuphk.fetch_startmeuphk_events),
         # Extension points (clean to add later): hktdc, hkstp, aws_summit_hk
@@ -150,7 +155,7 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
             # anything, so this run is no evidence about it — scoring it a
             # success would reset a real failure streak and stamp a
             # `last_success` we never observed. Absent from both `succeeded`
-            # and `errors`, update_health PRUNES it, the same as the three
+            # and `errors`, update_health PRUNES it, the same as the two
             # adapters commented out of _source_tasks. Not a digest health line
             # either: nothing failed.
             log.warning("%s not configured — skipped, health record pruned: %s", name, exc.message)
@@ -229,7 +234,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #
     # NOT under --stub, mirroring job-sift. hk-events is not vulnerable TODAY
     # — its two stub adapters (cyberport, startmeuphk) are both commented out
-    # of _source_tasks, so a stub run still fetches meetup/luma for real — but
+    # of _source_tasks, so a stub run still fetches all four live sources
+    # (meetup, luma, aitinkerers, luma_discover) for real — but
     # the hazard is latent: re-enabling either is a documented one-line change,
     # and it would silently start resetting counters from canned data. A stub
     # run is not evidence about the real world, so it does not get to write the

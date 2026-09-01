@@ -2,7 +2,9 @@
 
 Source page: https://www.startmeup.hk/upcoming-events/events-calendar/ — InvestHK's
 HK startup-ecosystem events calendar. No clean public feed, so this is a brittle
-HTML scraper that MUST degrade cleanly (catch all, return [] on failure).
+HTML scraper that MUST degrade cleanly — but degrading means raising
+`SourceFetchError`, NEVER returning `[]`. An empty list from here is a claim
+that the page was read and held nothing.
 
 **v0 STATUS: stub** — returns hardcoded sample events for pipeline testing.
 Gated by HK_EVENTS_STUB, same pattern as cyberport + job-sift's cedars.
@@ -24,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from bs4 import BeautifulSoup
 
+from hk_events.errors import SourceFetchError
 from hk_events.schema import Event
 
 log = logging.getLogger(__name__)
@@ -90,7 +93,20 @@ def _parse_events_html(html: str) -> list[Event]:
 
 
 def fetch_startmeuphk_events() -> list[Event]:
-    """Public entry point. Degrades to [] on any failure."""
+    """Public entry point.
+
+    RAISES `SourceFetchError` when it could not look; returns `[]` only when it
+    DID look and the page held no events. This adapter is commented out of
+    `orchestrator._source_tasks`, and the comment there advertises re-enabling
+    it as a one-line change — so it has to already honour the contract the rest
+    of the branch runs on. Under the old `return []`-on-anything behaviour that
+    one line would have handed `source_health` a fabricated success on every
+    403, resetting the failure streak and stamping a `last_success` nobody
+    observed. That is the exact shape of the fifty-day CEDARS outage.
+
+    This has only ONE endpoint, so there is no partial degrade to preserve:
+    every failure here is a total failure for the source.
+    """
     if os.environ.get("HK_EVENTS_STUB") == "1":
         log.info("startmeuphk: STUB mode — returning sample events")
         return _stub_events()
@@ -98,10 +114,20 @@ def fetch_startmeuphk_events() -> list[Event]:
     try:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, headers=_HEADERS) as client:
             resp = client.get(_EVENTS_URL)
-        if resp.status_code != 200:
-            log.warning("startmeuphk: HTTP %d — skipping", resp.status_code)
-            return []
+    except Exception as exc:
+        raise SourceFetchError(
+            "startmeuphk", f"fetching {_EVENTS_URL} failed: {exc}"
+        ) from exc
+    if resp.status_code != 200:
+        raise SourceFetchError(
+            "startmeuphk",
+            f"{_EVENTS_URL} returned HTTP {resp.status_code} — the events listing "
+            "was not read (this source was disabled in 2026-08 for exactly this: a "
+            "403 at the edge on every run).",
+        )
+    try:
         return _parse_events_html(resp.text)
     except Exception as exc:
-        log.warning("startmeuphk: fetch/parse failed: %s — skipping", exc)
-        return []
+        raise SourceFetchError(
+            "startmeuphk", f"parsing {_EVENTS_URL} failed: {exc}"
+        ) from exc
