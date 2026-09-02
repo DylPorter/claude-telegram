@@ -9,21 +9,31 @@ import sys
 from collections.abc import Callable
 from datetime import date
 
-from job_sift import config, source_health
+from job_sift import config, liveness, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
-from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
+from job_sift.dedupe import (
+    collapse_duplicates,
+    filter_new,
+    load_seen,
+    log_classification,
+    mirror_collapsed,
+    save_seen,
+)
 from job_sift.errors import SourceAuthError, SourceNotConfiguredError
 from job_sift.open_roles import (
     OpenRole,
     active_roles,
     age_roles,
+    apply_liveness,
     apply_status_overrides,
     closing_within,
+    collapse_register,
     in_lane,
     load_open_roles,
     parse_status_overrides,
     prune,
+    roles_due_liveness_check,
     save_open_roles,
     upsert_roles,
 )
@@ -158,6 +168,46 @@ def _classify_one(listing: JobListing) -> ClassifierResult:
     return classify(listing)
 
 
+def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
+    """Re-check a bounded slice of the undated LinkedIn rows. Issue #1c.
+
+    Wrapped whole in a try/except for the same reason every source adapter is:
+    an ageing convenience must never be able to take down a run that has already
+    fetched, classified and is about to push. A failure here leaves the register
+    exactly as it was.
+
+    Per-row failures are handled a level down — `liveness.probe_linkedin` never
+    raises and returns UNKNOWN for anything it could not read, and
+    `apply_liveness` treats UNKNOWN as "no change at all". So a total LinkedIn
+    outage costs a few timeouts and changes nothing, which is the correct
+    outcome: not being able to ask is not an answer.
+    """
+    limit = config.liveness_max_per_run()
+    if limit <= 0:
+        return roles
+    try:
+        due = roles_due_liveness_check(
+            roles, today, interval_days=config.liveness_interval_days(), limit=limit
+        )
+        if not due:
+            return roles
+        verdicts: dict[str, str] = {}
+        for role in due:
+            job_id = role.dedup_key.split(":", 1)[-1]
+            verdicts[role.dedup_key] = liveness.probe_linkedin(job_id)
+        checked = apply_liveness(roles, verdicts, today)
+        closed = sum(1 for v in verdicts.values() if v == liveness.CLOSED)
+        unknown = sum(1 for v in verdicts.values() if v == liveness.UNKNOWN)
+        log.info(
+            "liveness: checked %d role(s) — %d closed, %d could not be checked",
+            len(due), closed, unknown,
+        )
+        return checked
+    except Exception as exc:  # noqa: BLE001 — never let this kill a run
+        log.warning("liveness pass failed, register left untouched: %s", exc)
+        return roles
+
+
 def _update_open_roles(
     surfaced: list[tuple[JobListing, ClassifierResult]],
     today: date,
@@ -183,9 +233,26 @@ def _update_open_roles(
     # The lane travels with the role so the register can keep the two headings
     # apart on days a listing's source does not re-list it.
     merged = upsert_roles(existing, [(l, r.reason, r.lane) for l, r in surfaced], today)
+    # Fold rows that are the same posting under two ids. Runs BEFORE ageing so
+    # the ager judges the merged `last_seen` and deadline, not one half of a
+    # split record. See open_roles.collapse_register — this is the half of #1b
+    # that catches duplicates which arrived on different days, and no fetch-time
+    # collapse could ever have seen them together.
+    collapsed_count = len(merged)
+    merged = collapse_register(merged)
+    collapsed_count -= len(merged)
+    # Then retire anything LinkedIn has already closed (#1c). Also before
+    # ageing, so a row confirmed closed today is `expired` in this run's note
+    # rather than next run's. Skipped on a dry run and under --stub: it is the
+    # one part of the register update that reaches the network, and neither mode
+    # is allowed to.
+    if not dry_run and os.environ.get("JOB_SIFT_STUB") != "1":
+        merged = _liveness_pass(merged, today)
     aged = age_roles(merged, today)
     kept = prune(aged, today)
 
+    if collapsed_count:
+        log.info("open-roles register: collapsed %d duplicate row(s)", collapsed_count)
     added = sum(1 for r in merged if r.dedup_key not in known_keys)
     updated = len(surfaced) - added
     expired = sum(1 for r in kept if r.status in ("expired", "stale"))
@@ -291,9 +358,27 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     log.info("fetched %d listings across all sources", len(listings))
 
-    # 2. Diff against seen-sets (per-source)
+    # 2a. Collapse listings that are the same posting under two ids, BEFORE the
+    #     seen-set diff — a repost carries a NEW id, so the seen-set cannot see
+    #     past it, and running this afterwards would only ever inspect the rows
+    #     that were new today. See dedupe.collapse_duplicates for why the key is
+    #     source-scoped and refuses to merge across sources.
+    # `seen_lookup=load_seen` is passed explicitly rather than left to the
+    # default so it resolves through THIS module's name — the same hook the
+    # cedars pagination already uses, and the one tests patch to keep off the
+    # real state files.
+    listings, collapsed = collapse_duplicates(listings, seen_lookup=load_seen)
+    if collapsed:
+        log.info("collapsed %d duplicate listing(s) before the seen-set diff", len(collapsed))
+
+    # 2b. Diff against seen-sets (per-source)
     new_listings, seen_by_source = filter_new(listings)
     log.info("%d new listings (after dedupe)", len(new_listings))
+
+    # 2c. Record the dropped ids against the winner's sighting, so the next run
+    #     that hands over from one id to the other does not re-notify. Additive
+    #     only — it never re-keys existing state.
+    mirror_collapsed(seen_by_source, collapsed, seen_lookup=load_seen)
 
     # 3. Classify all new listings in one batched pass (≤1 LLM call per ~20
     #    listings per route) — see classifier.classify_batch. The old per-listing

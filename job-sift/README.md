@@ -128,6 +128,40 @@ Roles age out automatically: past deadline → `expired`, no deadline and unseen
 for 30 days → `stale`. Non-open records are pruned 60 days after `last_seen`
 (except `applied`, kept as history).
 
+### Duplicate collapse
+
+One posting can reach the register under two ids — a LinkedIn repost gets a new
+job id, so the seen-set (keyed on the id) cannot tell it is the same role.
+Duplicates are collapsed in two places: `dedupe.collapse_duplicates`, before the
+seen-set diff, for two rows in one run; and `open_roles.collapse_register`, for
+the ones that arrived days apart and never met in a single fetch. A collapse
+merges history (earliest `first_seen`, latest `last_seen`) and a hand-set
+`applied`/`dismissed` always survives onto the surviving row.
+
+The collision key is `JobListing.identity_key` — source, employer, title,
+location, exact after case/punctuation normalisation. It is **source-scoped on
+purpose**: CEDARS and LinkedIn share no id and appear in no payload of each
+other's, so merging them would mean matching on prose, and a wrong merge
+silently deletes a real job while a missed one merely shows it twice. The same
+posting listed by two sources is therefore knowingly left as two rows.
+
+### LinkedIn liveness re-check
+
+LinkedIn alert emails carry no deadline and list a posting exactly once, so
+`last_seen` never moves and the 30-day `stale` rule was the only thing that
+could ever close one — a role that shut two days after it was mailed sat open
+for a month. Each run re-checks a bounded slice of the undated LinkedIn rows
+against the posting page and retires the ones that say *No longer accepting
+applications*.
+
+It fails safe by construction: only an HTTP 200 carrying that banner closes a
+row. Every other outcome — transport error, timeout, redirect, 403, 404, 429,
+5xx, an unreadably short body — is `unknown`, which changes nothing, not even
+the `last_checked` date. A failed request is not evidence about a job. The pass
+is skipped under `--dry-run` and `--stub`, and a crash inside it is caught and
+logged rather than allowed to kill a run that has already fetched and
+classified.
+
 Mark a role applied/dismissed by editing its hidden marker in the note —
 `<!-- status:open cedars:123 -->` → `<!-- status:applied cedars:123 -->`. Those
 two statuses are sticky: no later run reverts them to open.
@@ -159,6 +193,12 @@ JOB_SIFT_MODEL=haiku
 # and recorded as a failed source; the run continues with what landed.
 # Raise it only if you also raise the unit's TimeoutStartSec (currently 900).
 # JOB_SIFT_FETCH_BUDGET_S=240
+
+# LinkedIn liveness re-check (see "Rolling Open Roles register" above).
+# How many undated LinkedIn rows to re-check per run. 0 disables the pass.
+# JOB_SIFT_LIVENESS_MAX=10
+# Per-row cooldown in days before the same row is re-checked.
+# JOB_SIFT_LIVENESS_INTERVAL_DAYS=7
 ```
 
 Sources are fetched in parallel, so the fetch phase costs `max(t)` rather than

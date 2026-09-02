@@ -22,8 +22,9 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import date
 
+from job_sift import liveness
 from job_sift.config import STATE_DIR
-from job_sift.schema import JobListing
+from job_sift.schema import JobListing, normalise
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,14 @@ class OpenRole:
     # Defaults to "prestige" so a register written before the floor lane
     # existed loads with every role under the heading it was surfaced under.
     lane: str = "prestige"
+    # Part of `identity_key`. A register written before this field existed loads
+    # with None, which simply means those rows key on employer+title alone and
+    # will not collapse against a freshly-written row carrying a location — a
+    # missed collapse, which is the direction we want to fail in.
+    location: str | None = None
+    # ISO date of the last liveness re-check, or None for "never asked". Only
+    # ever stamped when a check actually came back with an answer.
+    last_checked: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,7 +86,25 @@ class OpenRole:
             reason=d.get("reason", ""),
             status=status if status in VALID_STATUSES else "open",
             lane=lane if lane in VALID_LANES else "prestige",
+            location=d.get("location"),
+            last_checked=d.get("last_checked"),
         )
+
+    @property
+    def identity_key(self) -> str:
+        """Same identity as `JobListing.identity_key`, computed off the register.
+
+        Kept deliberately in lockstep with the listing property (same fields,
+        same `normalise`) so a stored row and the listing that produced it agree
+        — otherwise `collapse_register` would split a posting the fetch-time
+        collapse had already merged. Read that docstring for why the key is
+        source-scoped and why it is exact rather than fuzzy.
+        """
+        employer = normalise(self.employer)
+        title = normalise(self.title)
+        if not employer or not title:
+            return self.dedup_key
+        return f"{self.source}|{employer}|{title}|{normalise(self.location)}"
 
     @property
     def deadline_date(self) -> date | None:
@@ -160,6 +187,7 @@ def upsert_roles(
                 reason=reason,
                 status="open",
                 lane=lane,
+                location=listing.location,
             )
             merged.append(role)
             by_key[key] = role
@@ -172,11 +200,181 @@ def upsert_roles(
         current.deadline = deadline if deadline is not None else current.deadline
         current.reason = reason or current.reason
         current.lane = lane
+        current.location = listing.location or current.location
         if current.status not in STICKY_STATUSES:
             # Seen again today → it is live, whatever the ager decided earlier.
             current.status = "open"
 
     return merged
+
+
+# Sources whose rows can be liveness-checked. LinkedIn is the only one today,
+# and the only one that needs it: every other source re-lists a role for as long
+# as it is open, so `last_seen` is already a live signal there, and CEDARS
+# carries a real deadline on top.
+LIVENESS_SOURCES = frozenset({"linkedin"})
+
+
+def _sticky_rank(role: OpenRole) -> int:
+    """`applied` outranks `dismissed` outranks everything else, for a merge.
+
+    An application is a fact about what the operator did; a dismissal is a
+    preference. If one posting somehow carries both marks under two ids, the
+    fact survives.
+    """
+    if role.status == "applied":
+        return 0
+    if role.status == "dismissed":
+        return 1
+    return 2
+
+
+def _merge_key(role: OpenRole) -> tuple:
+    """Order within a duplicate group; the first element is the survivor.
+
+    Sticky first (see `_sticky_rank`), then the most recently seen row — that is
+    the id the source is still listing, so it is the one whose `apply_url` still
+    points somewhere useful. `sorted` is stable, so an exact tie keeps register
+    order.
+    """
+    return (_sticky_rank(role), _invert_iso(role.last_seen))
+
+
+def _invert_iso(value: str) -> str:
+    """Sort ISO dates DESCENDING inside an otherwise-ascending tuple."""
+    # Complementing each digit turns "2026-08-20" into a string that sorts
+    # before "2026-08-01" — cheaper and clearer than splitting the sort.
+    return "".join(chr(0x7E - ord(c)) if c.isdigit() else c for c in value or "")
+
+
+def collapse_register(roles: list[OpenRole]) -> list[OpenRole]:
+    """Fold register rows that are the same posting into one. Returns a NEW list.
+
+    `dedupe.collapse_duplicates` handles duplicates that arrive in the SAME run.
+    This handles the ones that do not, which is the reported case: the two IMC
+    rows in issue #1b came from alert emails days apart, so no single fetch ever
+    held both and nothing upstream could have seen them together. The register
+    is the only place they ever coexist.
+
+    Merging rules, in the order they matter:
+
+    1. A HAND-SET STATUS SURVIVES. If any row in the group is `applied` or
+       `dismissed`, that row wins outright, so collapsing can never resurrect a
+       decision the operator already took. This is the one rule that is not
+       about tidiness.
+    2. Otherwise the most recently seen row wins — it is the id the source is
+       still listing.
+    3. History is unioned, not taken from the winner: earliest `first_seen`,
+       latest `last_seen`. Collapsing must not make a role look newer than it is.
+    4. A deadline is never lost. If the winner has none and a dropped row does,
+       the later of the known deadlines is carried over — later, so a merge can
+       never make the ager expire a role sooner than the evidence supports.
+
+    The dropped row's `<!-- status:... -->` marker in the note becomes an
+    orphan; `apply_status_overrides` simply stops matching it, and rule 1 has
+    already moved anything it was carrying onto the survivor.
+    """
+    groups: dict[str, list[OpenRole]] = {}
+    order: list[str] = []
+    for role in roles:
+        key = role.identity_key
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(role)
+
+    out: list[OpenRole] = []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            out.append(OpenRole(**group[0].to_dict()))
+            continue
+        ranked = sorted(group, key=_merge_key)
+        winner = OpenRole(**ranked[0].to_dict())
+        first_seens = [r.first_seen for r in group if r.first_seen]
+        last_seens = [r.last_seen for r in group if r.last_seen]
+        if first_seens:
+            winner.first_seen = min(first_seens)
+        if last_seens:
+            winner.last_seen = max(last_seens)
+        if winner.deadline is None:
+            deadlines = [r.deadline for r in group if r.deadline]
+            if deadlines:
+                winner.deadline = max(deadlines)
+        for other in ranked[1:]:
+            log.info(
+                "collapsed duplicate register row: keeping %s, dropping %s (%s — %s)",
+                winner.dedup_key, other.dedup_key, winner.employer[:40], winner.title[:60],
+            )
+        out.append(winner)
+    return out
+
+
+def roles_due_liveness_check(
+    roles: list[OpenRole],
+    today: date,
+    *,
+    interval_days: int = 7,
+    limit: int = 10,
+) -> list[OpenRole]:
+    """Pick the rows worth re-checking this run, cheapest-value-first.
+
+    Deliberately narrow. Only `open` rows from `LIVENESS_SOURCES` that have NO
+    deadline are eligible — a row with a real deadline already has an ageing
+    mechanism, and a row the operator marked or the ager closed is none of this
+    function's business.
+
+    `limit` is a hard cap and `interval_days` a per-row cooldown, so the whole
+    pass costs a bounded, small number of requests per run rather than one per
+    open role. Never-checked rows sort first, then least-recently-checked.
+    """
+    due: list[OpenRole] = []
+    for role in roles:
+        if role.status != "open":
+            continue
+        if role.source not in LIVENESS_SOURCES:
+            continue
+        if role.deadline_date is not None:
+            continue
+        last = _parse_date(role.last_checked or "")
+        if last is not None and (today - last).days < interval_days:
+            continue
+        due.append(role)
+    due.sort(key=lambda r: (r.last_checked or "", r.first_seen))
+    return due[:limit]
+
+
+def apply_liveness(
+    roles: list[OpenRole], verdicts: dict[str, str], today: date
+) -> list[OpenRole]:
+    """Fold liveness verdicts (keyed by `dedup_key`) into the register.
+
+    Returns a NEW list. Three things this must never do, all of them the same
+    hazard wearing different clothes:
+
+    * `UNKNOWN` changes NOTHING — not the status, and not `last_checked`
+      either. Stamping the date on a failed check would buy a week of silence
+      with no evidence behind it, so a source that is blocking us would look
+      exactly like a source that keeps saying "still open".
+    * A confirmed-closed row becomes `expired`, an existing terminal status the
+      renderer and the pruner already understand. No new status word, so nothing
+      downstream has to learn one.
+    * `applied` / `dismissed` are untouchable, as everywhere else. A posting
+      closing does not un-apply the operator's application.
+    """
+    out = [OpenRole(**r.to_dict()) for r in roles]
+    iso = today.isoformat()
+    for role in out:
+        verdict = verdicts.get(role.dedup_key)
+        if verdict is None or verdict == liveness.UNKNOWN:
+            continue
+        if role.status in STICKY_STATUSES:
+            continue
+        role.last_checked = iso
+        if verdict == liveness.CLOSED:
+            log.info("liveness: retiring %s — the posting is closed", role.dedup_key)
+            role.status = "expired"
+    return out
 
 
 def age_roles(

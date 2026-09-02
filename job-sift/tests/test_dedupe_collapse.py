@@ -1,0 +1,275 @@
+"""Duplicate listings must collapse to one row — issue #1b.
+
+Two failure shapes from the live register:
+
+  * one source re-listing the same posting under a NEW id (LinkedIn reposts get
+    a fresh job id, so the seen-set — keyed on the id — cannot tell), and
+  * the same posting arriving from two different sources.
+
+Only the FIRST is fixable with a key worth trusting; see
+`JobListing.identity_key` for why the cross-source half is deliberately
+declined. These tests pin both halves: that same-source duplicates collapse,
+and that cross-source rows are NEVER merged.
+
+The collapse must also be invisible to the seen-set: whichever row survives, the
+dropped row's id has to end up recorded, or the next run's hand-off re-notifies.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+
+from job_sift.dedupe import collapse_duplicates, mirror_collapsed
+from job_sift.open_roles import OpenRole, collapse_register
+from job_sift.schema import JobListing
+
+TODAY = date(2026, 9, 1)
+
+
+def _listing(source, ext_id, employer, title, location="Hong Kong", deadline=None):
+    return JobListing(
+        source=source,
+        external_id=ext_id,
+        employer=employer,
+        title=title,
+        apply_url=f"https://example.test/{source}/{ext_id}",
+        location=location,
+        deadline=deadline,
+    )
+
+
+# --------------------------------------------------------------------------
+# identity_key
+# --------------------------------------------------------------------------
+
+
+class TestIdentityKey:
+    def test_punctuation_and_case_do_not_split_one_posting(self):
+        a = _listing("linkedin", "1", "IMC Trading", "Software Engineer Intern")
+        b = _listing("linkedin", "2", "IMC  trading.", "software engineer intern")
+        assert a.identity_key == b.identity_key
+
+    def test_two_sources_never_share_an_identity(self):
+        """The declined half, asserted so nobody quietly enables it.
+
+        A false merge silently DROPS a real job, which is strictly worse than
+        the duplicate it would fix, and CEDARS and LinkedIn share no id.
+        """
+        a = _listing("cedars", "G2600001", "HSBC", "Global Banking Programme")
+        b = _listing("linkedin", "1000000003", "HSBC", "Global Banking Programme")
+        assert a.identity_key != b.identity_key
+
+    def test_a_different_location_is_a_different_posting(self):
+        a = _listing("linkedin", "1", "HSBC", "Graduate Programme", location="Hong Kong")
+        b = _listing("linkedin", "2", "HSBC", "Graduate Programme", location="Singapore")
+        assert a.identity_key != b.identity_key
+
+    def test_an_unusable_key_falls_back_to_the_per_source_id(self):
+        """No employer means nothing to key on — fall back, never merge."""
+        a = _listing("linkedin", "1", "", "Software Engineer Intern")
+        b = _listing("linkedin", "2", "", "Software Engineer Intern")
+        assert a.identity_key == a.dedup_key
+        assert a.identity_key != b.identity_key
+
+
+# --------------------------------------------------------------------------
+# collapse_duplicates + mirror_collapsed
+# --------------------------------------------------------------------------
+
+
+class TestCollapseDuplicates:
+    def test_a_repost_collapses_to_one_listing(self):
+        old = _listing("linkedin", "1000000001", "IMC", "Software Engineer Intern 2027")
+        new = _listing("linkedin", "1000000002", "IMC", "software engineer intern 2027")
+        kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: set())
+        assert len(kept) == 1
+        assert len(collapsed) == 1
+
+    def test_the_already_seen_row_wins_so_nothing_re_notifies(self):
+        old = _listing("linkedin", "111", "IMC", "SWE Intern")
+        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        kept, _ = collapse_duplicates([new, old], seen_lookup=lambda s: {"111"})
+        assert [l.external_id for l in kept] == ["111"]
+
+    def test_cross_source_duplicates_are_left_alone(self):
+        a = _listing("cedars", "G2600001", "HSBC", "CIB Programme")
+        b = _listing("linkedin", "1000000003", "HSBC", "CIB Programme")
+        kept, collapsed = collapse_duplicates([a, b], seen_lookup=lambda s: set())
+        assert len(kept) == 2
+        assert collapsed == []
+
+    def test_the_dropped_id_is_mirrored_into_the_seen_set(self):
+        """Without this the next hand-off between ids re-pushes the role."""
+        old = _listing("linkedin", "111", "IMC", "SWE Intern")
+        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        _kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: {"111"})
+        seen_by_source = {"linkedin": {"111"}}
+        mirror_collapsed(seen_by_source, collapsed, seen_lookup=lambda s: set())
+        assert seen_by_source["linkedin"] == {"111", "222"}
+
+    def test_mirroring_never_invents_a_source_bucket_it_cannot_fill(self):
+        """A collapse whose winner was not recorded must not fabricate state."""
+        old = _listing("linkedin", "111", "IMC", "SWE Intern")
+        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        _kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: set())
+        seen_by_source: dict[str, set[str]] = {}
+        mirror_collapsed(seen_by_source, collapsed, seen_lookup=lambda s: set())
+        assert seen_by_source == {}
+
+    def test_the_order_of_untouched_listings_is_preserved(self):
+        a = _listing("cedars", "A", "Alpha", "One")
+        b = _listing("cedars", "B", "Beta", "Two")
+        c = _listing("cedars", "C", "Gamma", "Three")
+        kept, collapsed = collapse_duplicates([a, b, c], seen_lookup=lambda s: set())
+        assert [l.external_id for l in kept] == ["A", "B", "C"]
+        assert collapsed == []
+
+
+# --------------------------------------------------------------------------
+# collapse_register — the duplicates that arrived on DIFFERENT days
+# --------------------------------------------------------------------------
+
+
+def _role(key, *, employer="IMC", title="SWE Intern", source="linkedin",
+          status="open", first_seen="2026-08-01", last_seen="2026-08-01",
+          location="Hong Kong", deadline=None):
+    return OpenRole(
+        dedup_key=key,
+        source=source,
+        employer=employer,
+        title=title,
+        apply_url=f"https://example.test/{key}",
+        deadline=deadline,
+        first_seen=first_seen,
+        last_seen=last_seen,
+        reason="because",
+        status=status,
+        location=location,
+    )
+
+
+class TestCollapseRegister:
+    def test_two_rows_for_one_posting_become_one(self):
+        """The reported symptom: both IMC ids sit in the register as `open`."""
+        a = _role("linkedin:1000000001", title="Software Engineer Intern 2027")
+        b = _role("linkedin:1000000002", title="software engineer intern 2027",
+                  last_seen="2026-08-20")
+        out = collapse_register([a, b])
+        assert len(out) == 1
+
+    def test_the_most_recently_seen_row_survives(self):
+        a = _role("linkedin:1", last_seen="2026-08-01")
+        b = _role("linkedin:2", last_seen="2026-08-20")
+        out = collapse_register([a, b])
+        assert out[0].dedup_key == "linkedin:2"
+
+    def test_history_is_carried_across_the_merge(self):
+        a = _role("linkedin:1", first_seen="2026-07-01", last_seen="2026-08-01")
+        b = _role("linkedin:2", first_seen="2026-08-01", last_seen="2026-08-20")
+        out = collapse_register([a, b])
+        assert out[0].first_seen == "2026-07-01"
+        assert out[0].last_seen == "2026-08-20"
+
+    @pytest.mark.parametrize("sticky", ["applied", "dismissed"])
+    def test_a_hand_set_status_survives_the_merge(self, sticky):
+        """Collapsing must never resurrect a decision the operator already took."""
+        marked = _role("linkedin:1", status=sticky, last_seen="2026-08-01")
+        fresh = _role("linkedin:2", status="open", last_seen="2026-08-30")
+        out = collapse_register([marked, fresh])
+        assert len(out) == 1
+        assert out[0].status == sticky
+
+    def test_cross_source_register_rows_are_never_merged(self):
+        a = _role("cedars:G2600001", source="cedars", employer="HSBC", title="CIB")
+        b = _role("linkedin:1000000003", employer="HSBC", title="CIB")
+        assert len(collapse_register([a, b])) == 2
+
+    def test_a_deadline_is_not_lost_when_the_undated_row_wins(self):
+        dated = _role("linkedin:1", deadline="2026-10-01", last_seen="2026-08-01")
+        undated = _role("linkedin:2", last_seen="2026-08-20")
+        out = collapse_register([dated, undated])
+        assert out[0].dedup_key == "linkedin:2"
+        assert out[0].deadline == "2026-10-01"
+
+    def test_it_does_not_mutate_the_input(self):
+        a = _role("linkedin:1", last_seen="2026-08-01")
+        b = _role("linkedin:2", last_seen="2026-08-20")
+        collapse_register([a, b])
+        assert a.last_seen == "2026-08-01"
+
+
+# --------------------------------------------------------------------------
+# Wiring: the collapse is worthless if it runs on the wrong side of the diff
+# --------------------------------------------------------------------------
+
+
+class TestOrchestratorWiring:
+    """`run()` must collapse BEFORE `filter_new`, then mirror after it.
+
+    Unit-testing the two functions in isolation cannot catch the ordering
+    mistake this exists to prevent: a collapse that runs after the seen-set diff
+    only ever sees today's new rows, so the common case — a repost arriving
+    while the original is already seen — walks straight past it. These assert on
+    what `filter_new` was actually handed during a real run.
+    """
+
+    def _run(self, monkeypatch, tmp_path, listings, *, seen=None):
+        from job_sift import config, orchestrator
+        from job_sift.schema import ClassifierResult
+
+        seen = seen or {}
+        handed_to_filter: list[list[JobListing]] = []
+        saved: dict[str, set] = {}
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: (list(listings), {}, ["linkedin"])
+        )
+        monkeypatch.setattr(orchestrator, "load_seen", lambda s: set(seen.get(s, set())))
+        monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+        monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
+        monkeypatch.setattr(
+            orchestrator,
+            "classify_batch",
+            lambda ls: [ClassifierResult("skip", "out_of_scope", "nope") for _ in ls],
+        )
+
+        real_filter = orchestrator.filter_new
+
+        def _spy(ls):
+            handed_to_filter.append(list(ls))
+            return real_filter(ls)
+
+        monkeypatch.setattr(orchestrator, "filter_new", _spy)
+        monkeypatch.setattr(
+            orchestrator, "save_seen", lambda source, s: saved.__setitem__(source, s)
+        )
+        assert orchestrator.run() == 0
+        return handed_to_filter[0], saved
+
+    def test_the_duplicate_is_gone_before_the_seen_set_ever_sees_it(
+        self, monkeypatch, tmp_path
+    ):
+        old = _listing("linkedin", "111", "IMC", "SWE Intern")
+        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        handed, _saved = self._run(monkeypatch, tmp_path, [old, new])
+        assert [l.external_id for l in handed] == ["111"]
+
+    def test_the_dropped_id_is_persisted_by_the_run(self, monkeypatch, tmp_path):
+        """Otherwise the next run hands over to the other id and re-pushes."""
+        old = _listing("linkedin", "111", "IMC", "SWE Intern")
+        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        _handed, saved = self._run(monkeypatch, tmp_path, [old, new])
+        assert saved["linkedin"] == {"111", "222"}
+
+    def test_two_sources_still_both_reach_the_classifier(self, monkeypatch, tmp_path):
+        a = _listing("cedars", "G2600001", "HSBC", "CIB Programme")
+        b = _listing("linkedin", "1000000003", "HSBC", "CIB Programme")
+        handed, _saved = self._run(monkeypatch, tmp_path, [a, b])
+        assert len(handed) == 2
