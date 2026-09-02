@@ -163,6 +163,32 @@ def _canonical_apply_url(job_id: str) -> str:
 def _parse_alert_email(html: str) -> Iterator[JobListing]:
     """Extract JobListing objects from one LinkedIn digest email.
 
+    Thin wrapper over `_parse_alert_email_detailed` — see there for the card
+    count the total-failure guard needs. Kept because "iterate the listings" is
+    what almost every caller wants.
+    """
+    yield from _parse_alert_email_detailed(html)[0]
+
+
+def _parse_alert_email_detailed(html: str) -> tuple[list[JobListing], int]:
+    """Parse one digest email. Returns `(listings, job_cards_offered)`.
+
+    THE SECOND VALUE IS THE POINT, and it is what makes a template change
+    reportable. `listings` alone cannot answer "was there nothing in this email,
+    or did I fail to read it?" — both are an empty list, and this source is the
+    one issue #1c depends on. `job_cards` counts the distinct `/jobs/view/{id}`
+    anchors the email contained, which is evidence about the EMAIL rather than
+    about this parser:
+
+      * cards == 0             → the email offered no job at all. LEGITIMATE:
+                                 LinkedIn's "your job alert has been created"
+                                 confirmations come from the same senders and
+                                 carry no job links (see the module docstring).
+      * cards > 0, listings 0  → the email IS a digest, and not one of its cards
+                                 survived the logo/title selectors. That is a
+                                 parse failure, and `fetch_linkedin_listings`
+                                 escalates it instead of returning a quiet [].
+
     Strategy:
       1. Find every <a href> that points to /jobs/view/{id}. Each unique id
          typically appears 2-3 times in a card (logo wrap, title wrap,
@@ -181,6 +207,7 @@ def _parse_alert_email(html: str) -> Iterator[JobListing]:
         if m:
             by_id.setdefault(m.group(1), []).append(a)
 
+    listings: list[JobListing] = []
     for jid, ans in by_id.items():
         logo_a = next((a for a in ans if a.find("img")), None)
         title_a = next((a for a in ans if not a.find("img") and a.get_text(strip=True)), None)
@@ -205,17 +232,21 @@ def _parse_alert_email(html: str) -> Iterator[JobListing]:
                 location = _BADGE_RE.split(after_dot, maxsplit=1)[0].strip()
                 break
 
-        yield JobListing(
-            source="linkedin",
-            external_id=jid,
-            employer=company,
-            title=title,
-            apply_url=_canonical_apply_url(jid),
-            posting_date=None,  # not in the digest; could parse "1 day ago" badge later
-            deadline=None,
-            location=location,
-            raw={"linkedin_job_id": jid},
+        listings.append(
+            JobListing(
+                source="linkedin",
+                external_id=jid,
+                employer=company,
+                title=title,
+                apply_url=_canonical_apply_url(jid),
+                posting_date=None,  # not in the digest; could parse "1 day ago" badge later
+                deadline=None,
+                location=location,
+                raw={"linkedin_job_id": jid},
+            )
         )
+
+    return listings, len(by_id)
 
 
 # ---------- Public entry point ----------
@@ -231,6 +262,24 @@ def fetch_linkedin_listings() -> list[JobListing]:
     Raises `SourceAuthError` when the OAuth token is dead and `SourceFetchError`
     when gws could not be asked at all — an empty return means the mailbox was
     genuinely empty.
+
+    TWO TOTAL-FAILURE GUARDS, NOT ONE, because there are two halves that can
+    die independently. The transport half — gws, auth, the message bodies — has
+    been hardened since day one. The PARSER half had not been, and it is just as
+    load-bearing: LinkedIn owns this email template and can change it whenever
+    it likes. Before this, a template change meant every selector missed,
+    `unreadable` stayed at 0 so the guard below never fired, and the adapter
+    returned `[]` → `succeeded` → failure streak reset, `last_success` stamped
+    today. A dead parser scored as a healthy quiet day, in the one source issue
+    #1c depends on, which is the identical shape as the fifty-day CEDARS outage.
+
+    So: reading the emails and finding no jobs is only believed when the emails
+    genuinely contained no job cards. See `_parse_alert_email_detailed` for the
+    card count that separates the two, and for the residual — an email whose
+    job-link URLs changed shape entirely reads as a confirmation email and is
+    still a quiet zero. Closing that would need a positive test for "this is a
+    digest" that does not depend on the link format; the card count closes the
+    realistic case (selector drift) without guessing.
     """
     messages = _gws_list_messages()
     if not messages:
@@ -240,6 +289,9 @@ def fetch_linkedin_listings() -> list[JobListing]:
     log.info("linkedin: %d alert emails to parse", len(messages))
     by_jid: dict[str, JobListing] = {}
     unreadable = 0
+    readable = 0
+    carded = 0        # readable emails that offered at least one job card
+    yielded = 0       # ...of those, the ones at least one card parsed out of
     for msg in messages:
         mid = msg.get("id")
         if not mid:
@@ -249,18 +301,49 @@ def fetch_linkedin_listings() -> list[JobListing]:
             log.warning("linkedin: failed to fetch body for %s", mid)
             unreadable += 1
             continue
+        readable += 1
+        parsed, cards = _parse_alert_email_detailed(html)
+        if cards:
+            carded += 1
+            if parsed:
+                yielded += 1
+            else:
+                log.error(
+                    "linkedin: msg %s offered %d job card(s) and NONE parsed — "
+                    "the alert-email template has probably changed",
+                    mid, cards,
+                )
+        else:
+            log.info(
+                "linkedin: msg %s has no job cards — confirmation email, or a "
+                "changed link format",
+                mid,
+            )
         count = 0
-        for listing in _parse_alert_email(html):
-            # Within-run dedup: same job can appear in multiple alert emails
+        # Within-run dedup: same job can appear in multiple alert emails. Note
+        # this counts NEW ids, so it is not a parse-health signal — `parsed` is.
+        for listing in parsed:
             if listing.external_id not in by_jid:
                 by_jid[listing.external_id] = listing
                 count += 1
-        log.info("linkedin: msg %s — extracted %d new listings", mid, count)
+        log.info(
+            "linkedin: msg %s — %d job card(s), %d parsed, %d new",
+            mid, cards, len(parsed), count,
+        )
 
     if unreadable and unreadable == len(messages):
         raise SourceFetchError(
             "linkedin",
             f"listed {len(messages)} alert email(s) but could not read the body of any of them",
+        )
+
+    if carded and yielded == 0:
+        raise SourceFetchError(
+            "linkedin",
+            f"read {readable} alert email(s), {carded} of them carrying job "
+            f"cards, and parsed ZERO listings out of any of them — the digest "
+            f"template has changed; re-check _parse_alert_email_detailed's "
+            f"logo/title selectors against a fresh sample",
         )
 
     listings = list(by_jid.values())
