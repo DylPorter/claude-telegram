@@ -1,24 +1,38 @@
 # job-sift
 
-Daily job-sift digest for the operator. Scrapes HKU CEDARS NETJobs, LLM-classifies each new listing for prestige + scope (internships / short-term contracts only), surfaces matches to Telegram via the same `/push` endpoint the signal-brief module uses. Per-day archive lands in the vault under `Inbox/Job Sift/`.
-
-LinkedIn email-alert parsing is planned for v1.1 — not in v0.
+Daily job-sift digest for the operator. Pulls listings from HKU CEDARS NETJobs, LinkedIn job-alert emails and three standardised ATS boards (Greenhouse, Lever, Ashby); LLM-classifies each new listing for prestige + scope (internships / short-term contracts only); surfaces matches to Telegram via the same `/push` endpoint the signal-brief module uses. A rolling register keeps roles visible after the day they were found. Per-day archive lands in the vault under `Inbox/Job Sift/`.
 
 ## Architecture
 
 ```
-CEDARS portal (httpx + cookies)
-       │
-       ▼
-parse listings → diff vs seen-set → LLM classifier (Claude CLI)
-       │                                   │
-       │                                   ▼
-       ▼                              JSONL classifier log
-new + prestige + in-scope ─────────────────┐
-                                           ▼
-                                  /push to claude-telegram bot
-                                           +
-                                  daily Markdown archive to vault
+ CEDARS portal        LinkedIn alert emails      Greenhouse / Lever / Ashby
+ (httpx + cookies)    (gws CLI → Gmail)          (public JSON APIs)
+        └──────────────────┬─────────────────────────────┘
+                           ▼
+        fetched in parallel under a wall-clock budget
+        (a source that cannot look RAISES; it never returns [])
+                           ▼
+         collapse same-posting duplicates (within a run)
+                           ▼
+              diff vs per-source seen-set
+                           ▼
+        classifier — cheap heuristics first, then batched
+        Claude CLI calls for what is left. A listing the
+        classifier could not judge gets NO verdict: it is
+        held back out of the seen-set and retried next run.
+                    │                    │
+                    │                    ▼
+                    │            JSONL classifier log
+                    ▼
+     surfaced (prestige lane OR floor lane)
+                    ▼
+        rolling open-roles register
+        · collapse duplicates across runs
+        · LinkedIn liveness re-check (throttled)
+        · age → expire/stale → prune
+                    ▼
+   /push to claude-telegram bot   +   daily Markdown archive to vault
+   + ⚠️ health lines for any source or stage that did NOT run
 ```
 
 ## Two admission lanes
@@ -78,8 +92,15 @@ directions are deliberately **not** symmetric:
 
 That asymmetry is the fix for a real defect. The keyword match used to be an
 admission, so any title containing "Summer" at a boosted employer was surfaced
-with nothing ever asking whether the role was technical — 20 of 35 entries in the
-live register were finance, BD and sales roles admitted exactly that way.
+with nothing ever asking whether the role was technical — 20 of 35 entries in a
+register snapshot were finance, BD and sales roles admitted exactly that way.
+
+A note on that "35", because a "45" appears a few paragraphs down and the two are
+not reconcilable from anything in this repo. Both are counts of the operator's
+own register, taken while diagnosing this issue, and neither is checked in — it
+is personal application data. They are reported as the separate, unreproducible
+snapshots they are; do not read either as a stable denominator, and do not try
+to derive one from the other.
 
 No `classifier_log.jsonl` exists in a fresh checkout to replay against, so
 this was measured two ways instead — a small mixed corpus and a real
@@ -115,6 +136,37 @@ because either one is definitive; the honest answer is "measure against
 The term lists behind both features live in `config/profile.yaml` (gitignored),
 not in `classifier.py`. The matcher is the mechanism; the terms are who the
 digest is for.
+
+## "I could not look" is never "there was nothing"
+
+One rule, applied at every stage that can fail, because one signal meaning both
+things is what let a dead CEDARS session cookie print *"Surfaced: none today"*
+for fifty consecutive days in 2026.
+
+| Stage | Cannot look | Result |
+|---|---|---|
+| A source fetch | `SourceAuthError` / `SourceFetchError` / budget abandonment | ⚠️ health line in the digest and the archive; failure streak advances; 3 runs → a standing alarm above the digest |
+| A source with no config | `SourceNotConfiguredError` | scored as neither success nor failure — nobody asked it anything |
+| LinkedIn email parsing | emails carried job cards, none parsed | `SourceFetchError` — a template change is a failure, not a quiet day |
+| The classifier | CLI timed out, exited non-zero, or returned no array | **no verdict**: those listings are held OUT of the seen-set, retried next run, and counted in a ⚠️ line |
+| A LinkedIn liveness probe | any unreadable response | `UNKNOWN`, which changes nothing at all — not the status, not `last_checked` |
+| The open-roles register | `open_roles.json` unparseable | raises; the run dies with the file **intact** rather than overwriting it |
+
+The classifier row is the newest and was the widest hole. `_batch_llm` used to
+return a real `skip / out_of_scope` verdict for every listing in a chunk whose
+CLI call never completed — a judgement recorded for a call that never happened.
+Because `assign_lane` short-circuits on scope, that fabricated verdict also
+vetoed the *floor* lane, which is pure string matching and needs no LLM; and
+because the ids were already in the seen-set, the listings never came back. A
+classifier outage was indistinguishable from a genuinely quiet day, and it
+silently consumed the backlog.
+
+Unclassified listings are **not** run through the floor lane, even though it
+would work without an LLM. Surfacing one would mean either pushing it again next
+run when a real verdict arrives, or consuming it now on a lane that never asked
+the scope question it was routed to the LLM for. The invariant is worth more
+than the recall: **a listing is either judged or retried — never both, never
+neither.**
 
 ## Rolling "Open Roles" register
 
@@ -223,8 +275,18 @@ JOB_SIFT_MODEL=haiku
 # JOB_SIFT_LIVENESS_BUDGET_S=60
 ```
 
-Sources are fetched in parallel, so the fetch phase costs `max(t)` rather than
-`sum(t)`. The budget is the ceiling: an httpx timeout does **not** bound a
+Two phases run in parallel, on the same `run_with_budget` machinery, with
+deliberately different concurrency:
+
+- **Fetch** — every source at once, unbounded. The phase costs `max(t)` rather
+  than `sum(t)`, and the tasks are one-per-host so there is nothing to throttle.
+- **LinkedIn liveness** — at most **2 probes in flight**. Every probe targets the
+  same host, and ten concurrent GETs at linkedin.com from one IP invites a 429 or
+  an interstitial. That degrades fail-safe (nothing gets retired), but a
+  rate-limited run and a run where every role is still open would then look
+  identical — so the cap is what keeps the pass answerable, not politeness.
+
+The budget is the ceiling for both: an httpx timeout does **not** bound a
 `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s fetches against a
 configured 25s timeout), so it has to be enforced from outside the fetch call.
 
@@ -271,6 +333,7 @@ systemctl --user start job-sift.timer
 
 ## Phasing
 
-- **v0** (this version): CEDARS only, classifier-driven prestige+scope, Telegram + vault archive
-- **v1.1**: LinkedIn job-alert email parsing via gws CLI
-- **v2**: derive a hardcoded prestige whitelist from ~30 days of classifier_log.jsonl; classifier becomes fallback for ambiguous cases
+- **v0**: CEDARS only, classifier-driven prestige+scope, Telegram + vault archive — *shipped*
+- **v1.1**: LinkedIn job-alert email parsing via gws CLI (`job_sift/sources/linkedin.py`) — *shipped*
+- **v1.2**: Greenhouse / Lever / Ashby adapters, cross-run duplicate collapse, the rolling open-roles register, the brand-agnostic floor lane, and LinkedIn liveness re-checks — *shipped*
+- **v2**: derive a hardcoded prestige whitelist from ~30 days of classifier_log.jsonl; classifier becomes fallback for ambiguous cases — *not started*

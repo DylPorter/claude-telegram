@@ -4,8 +4,13 @@
 # fallback when no profile.yaml exists, so a fresh clone runs immediately.
 #
 # Keep this example GENERIC. Your real criteria belong in profile.yaml, which is
-# never committed — the whole point of the split is that the framework is public
-# and your candidacy isn't.
+# never committed — the point of the split is that this file's framing of you
+# (identity, what you are seeking, what you accept) stays private.
+#
+# It is NOT a claim that nothing about the operator is committed: `companies.yaml`
+# IS tracked, and it carries the curated employer boost/skip lists and the
+# `location_allowlist` the floor lane matches on. Nothing sensitive lives there,
+# but it is a real preference file, so edit it knowing it is public.
 
 # One clause describing the candidate, dropped into the classifier prompt.
 # Keep it short; it exists to give the model enough context to judge fit.
@@ -129,5 +134,16 @@ floor_lane:
   # in practice that is a contract-posting convention, and it is the strongest
   # positive signal this lane has.
   #
-  # technical_terms:  [engineer*, software, data scien*, ai, research assistant]
+  # DO NOT COPY THE LINE BELOW AS A STARTING POINT. It shows the SHAPE of the
+  # setting, not a usable value: run with exactly that list and "Legal Counsel,
+  # AI Policy (Contract)" and "AI Content Moderator, Contract" both admit —
+  # two of the six false positives the code default was rebuilt to exclude.
+  # Bare `ai` and bare `research assistant` are precisely the words that fail;
+  # see the long comment above `_DEFAULT_TECHNICAL_TERMS` in job_sift/profile.py
+  # for the six titles and what replaced them.
+  #
+  # The code default is a full, tuned list. Override it only to ADD a term the
+  # default misses, and prefer a compound ("ai research*") to a bare word.
+  #
+  # technical_terms:  [engineer*, software, data scien*, ai research*, ml]
   # engagement_terms: [part time, contract, rolling, temporary, intern]

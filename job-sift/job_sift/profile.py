@@ -117,8 +117,15 @@ def profile_block() -> dict[str, str]:
 #
 # The defaults are a generic engineering-vs-business role taxonomy — true of any
 # software candidate, personal to none — so an unconfigured clone still behaves
-# sensibly. The one genuinely personal axis, geography, has NO code default; see
-# `_default_floor_locations`.
+# sensibly. The one genuinely personal axis, geography, has NO code default in
+# THIS MODULE; see `_default_floor_locations`.
+#
+# Say "in this module" rather than "in the repo", because the repo is not silent
+# on it: `config/companies.yaml` is tracked and carries both the
+# `location_allowlist` the floor lane actually runs on and the curated employer
+# boost/skip lists. Nothing sensitive, but a reader who took the broader claim
+# at face value would go looking for the operator's geography in a gitignored
+# file and not find it there.
 # ---------------------------------------------------------------------------
 
 # Non-technical business functions. A title matching one of these is never
