@@ -52,12 +52,35 @@ from concurrent.futures import Future, wait
 log = logging.getLogger(__name__)
 
 
-def _settle(fut: "Future", fn: Callable[[], object]) -> None:
-    """Run `fn` and park its outcome on `fut`. Never raises into the thread."""
+def _settle(
+    fut: "Future",
+    fn: Callable[[], object],
+    sem: "threading.Semaphore | None" = None,
+) -> None:
+    """Run `fn` and park its outcome on `fut`. Never raises into the thread.
+
+    `sem`, when given, is acquired around the `fn()` call ONLY — not around the
+    future bookkeeping — so it throttles concurrent work without changing which
+    futures resolve. With `sem=None` the path is byte-for-byte the original:
+    mark running, call, set result.
+
+    A task still waiting on the semaphore when the budget expires is not `done()`,
+    so it lands in `abandoned`. That is the intended outcome, not a leak: the
+    caller already treats abandonment as "no answer", and a probe that never ran
+    has no answer to give. Its thread keeps the permit until `fn` returns, which
+    costs nothing because these are daemon threads.
+    """
     if not fut.set_running_or_notify_cancel():
         return
     try:
-        fut.set_result(fn())
+        if sem is not None:
+            sem.acquire()
+        try:
+            result = fn()
+        finally:
+            if sem is not None:
+                sem.release()
+        fut.set_result(result)
     except BaseException as exc:  # noqa: BLE001 — re-raised to the caller via fut.result()
         fut.set_exception(exc)
 
@@ -67,6 +90,7 @@ def run_with_budget(
     budget_s: float,
     *,
     thread_name_prefix: str = "fetch",
+    max_in_flight: int | None = None,
 ) -> tuple[list[tuple[str, "Future"]], list[str]]:
     """Run every `(name, fn)` concurrently, bounded by `budget_s` wall-clock seconds.
 
@@ -86,16 +110,36 @@ def run_with_budget(
     A task that finishes in the gap between the budget expiring and the
     bookkeeping below is counted as settled. That race only ever converts a
     would-be timeout into a real result, so it is left as-is.
+
+    `max_in_flight` caps how many tasks may be INSIDE their callable at once.
+    `None` (the default) means no cap, which is what the fetch phase wants: its
+    tasks are one-per-host, so running all of them at once is the entire point
+    and the budget is the only ceiling it needs.
+
+    A caller sets it when its tasks all hit the SAME host. job-sift's liveness
+    pass is that caller: it probes up to ten linkedin.com URLs, and firing ten
+    concurrent GETs at one host from one IP invites a 429 or an interstitial.
+    That degrades fail-safe — every probe returns UNKNOWN and nothing is
+    retired — but "rate-limited" and "everything is still open" then look
+    identical, which is the exact ambiguity this codebase keeps removing. So
+    the throttle is not politeness; it is what keeps the pass answerable.
+
+    Threads are still all STARTED up front. Only entry to `fn()` is gated, so
+    the budget keeps measuring wall-clock from the same instant either way.
     """
     if not tasks:
         return [], []
+    if max_in_flight is not None and max_in_flight < 1:
+        raise ValueError("max_in_flight must be >= 1 when set")
+
+    sem = threading.Semaphore(max_in_flight) if max_in_flight is not None else None
 
     pending: list[tuple[str, Future]] = []
     for name, fn in tasks:
         fut: Future = Future()
         threading.Thread(
             target=_settle,
-            args=(fut, fn),
+            args=(fut, fn, sem),
             name=f"{thread_name_prefix}-{name}",
             daemon=True,
         ).start()
@@ -113,7 +157,10 @@ def run_with_budget(
             settled.append((name, fut))
         else:
             log.error(
-                "%s: still running after the %.0fs fetch budget — abandoning it",
+                # Phase-neutral on purpose: this runs for the fetch phase AND
+                # the liveness pass, and naming one of them mislabels the other.
+                # The caller names its own phase (see orchestrator).
+                "%s: still running after the %.0fs budget — abandoning it",
                 name,
                 budget_s,
             )

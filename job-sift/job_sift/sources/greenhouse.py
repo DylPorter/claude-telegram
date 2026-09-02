@@ -20,7 +20,11 @@ from bs4 import BeautifulSoup
 
 from job_sift.errors import SourceFetchError, SourceNotConfiguredError
 from job_sift.schema import JobListing
-from job_sift.sources._ats_common import load_slugs, location_matches
+from job_sift.sources._ats_common import (
+    load_slugs,
+    location_matches,
+    require_location_allowlist,
+)
 
 log = logging.getLogger(__name__)
 
@@ -91,10 +95,12 @@ def fetch_greenhouse_listings() -> list[JobListing]:
     zeroing the failure streak and writing a fabricated `last_success`.
     Returning zero must mean we looked.
 
-    A THIRD outcome sits alongside those two: with no slugs configured there is
-    nothing to poll, so the run learnt nothing about this source either way.
-    That raises `SourceNotConfiguredError`, which the orchestrator scores as
-    neither a success nor a failure — see errors.py.
+    A THIRD outcome sits alongside those two: with no slugs — or no
+    `location_allowlist`, which silently discards every located listing — there
+    is nothing to poll or nothing that could ever match, so the run learnt
+    nothing about this source either way. That raises
+    `SourceNotConfiguredError`, which the orchestrator scores as neither a
+    success nor a failure — see errors.py.
     """
     slugs = load_slugs("greenhouse")
     if not slugs:
@@ -103,6 +109,10 @@ def fetch_greenhouse_listings() -> list[JobListing]:
         # no slugs we polled nothing and learnt nothing. "No config" is neither
         # success nor failure, so escalate and let the orchestrator prune it.
         raise SourceNotConfiguredError("greenhouse", "companies.yaml has no `greenhouse:` slugs — nothing to poll")
+    # The slug list is only half the config. An empty `location_allowlist`
+    # discards every located listing and reports a fabricated zero, so it is
+    # the same "nobody asked me anything" outcome — see require_location_allowlist.
+    require_location_allowlist("greenhouse")
 
     log.info("greenhouse: polling %d companies", len(slugs))
 

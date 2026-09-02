@@ -9,7 +9,10 @@ Key behaviours under test:
 
 from __future__ import annotations
 
+import pathlib
 from datetime import date, timedelta
+
+import pytest
 
 from job_sift.open_roles import (
     OpenRole,
@@ -263,3 +266,118 @@ def test_render_open_roles_places_closing_roles_in_their_own_section():
     assert "CLSA" not in closing_block
     assert "3 days left" in closing_block
     assert "Jane Street" in md.split("## ✅ Applied")[1]
+
+
+# ---------------------------------------------------------------------------
+# The register's own silent-zero: a truncated file used to erase it.
+#
+# `load_open_roles` caught everything and returned `[]` "starting fresh", the
+# caller upserted onto that nothing, and `save_open_roles` (a plain
+# `write_text`) committed it. One SIGTERM mid-write — which this deployment has
+# a documented history of — and every hand-set `applied`, every `lane`, every
+# `last_checked` and every liveness `expired` verdict was gone, with nothing
+# raised and a note rewritten to match. Reproduced below at full scale.
+# ---------------------------------------------------------------------------
+
+
+class TestATruncatedRegisterCannotEraseItself:
+    def _seed(self, monkeypatch, tmp_path, n=40):
+        import json
+
+        from job_sift import config, open_roles as om
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        rows = []
+        for i in range(n):
+            r = _role(key=f"cedars:{i}", employer=f"Employer {i}")
+            if i == 7:
+                r.status = "applied"
+            rows.append(r)
+        om.save_open_roles(rows)
+        path = tmp_path / "open_roles.json"
+        assert len(json.loads(path.read_text())) == n
+        return om, path, rows
+
+    def test_the_wipe_is_no_longer_possible(self, monkeypatch, tmp_path):
+        om, path, rows = self._seed(monkeypatch, tmp_path)
+        blob = path.read_text()
+        path.write_text(blob[: len(blob) // 2])  # SIGTERM mid-write
+
+        with pytest.raises(om.RegisterUnreadableError):
+            om.load_open_roles()
+
+        # The critical half: the file is still there, unmodified, with the
+        # operator's `applied` mark in it. Previously this run would have
+        # replaced it with a 1-row file and lost that mark silently.
+        assert path.exists()
+        assert path.read_text() == blob[: len(blob) // 2]
+
+    def test_a_missing_file_is_still_just_an_empty_register(self, monkeypatch, tmp_path):
+        """The distinction that matters: absent is not the same as unreadable."""
+        from job_sift import config, open_roles as om
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        assert om.load_open_roles() == []
+
+    def test_the_run_dies_rather_than_overwriting(self, monkeypatch, tmp_path):
+        """End to end: `run()` must not reach `save_open_roles` on a bad load."""
+        from job_sift import config, orchestrator
+
+        om, path, _ = self._seed(monkeypatch, tmp_path)
+        blob = path.read_text()
+        path.write_text(blob[: len(blob) // 2])
+
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+        monkeypatch.setattr(orchestrator, "_fetch_all_sources", lambda: ([], {}, ["cedars"]))
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+        monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
+
+        with pytest.raises(om.RegisterUnreadableError):
+            orchestrator.run()
+        assert path.read_text() == blob[: len(blob) // 2]
+
+    def test_the_write_is_atomic(self, monkeypatch, tmp_path):
+        """A reader sees the whole old file or the whole new one, never a half.
+
+        Driven through `os.replace` rather than by racing a thread: the property
+        is that the payload is fully written and fsync'd BEFORE anything at the
+        real path changes, which is exactly what `os.replace` being the last
+        call proves.
+        """
+        import json
+        import os as _os
+
+        om, path, rows = self._seed(monkeypatch, tmp_path, n=3)
+        seen: list[str] = []
+        real_replace = _os.replace
+
+        def spy(src, dst, *a, **k):
+            # At this instant the destination still holds the OLD register and
+            # the source already holds the complete new one.
+            seen.append(path.read_text())
+            assert json.loads(pathlib.Path(src).read_text())
+            return real_replace(src, dst, *a, **k)
+
+        monkeypatch.setattr(om.os, "replace", spy)
+        om.save_open_roles(rows[:1])
+        assert len(json.loads(seen[0])) == 3       # old file, intact, at swap time
+        assert len(json.loads(path.read_text())) == 1
+        # No tmp files left lying around.
+        assert [p.name for p in tmp_path.iterdir()] == ["open_roles.json"]
+
+    def test_a_failed_write_leaves_the_old_register_and_no_tmp_file(
+        self, monkeypatch, tmp_path
+    ):
+        import json
+
+        om, path, rows = self._seed(monkeypatch, tmp_path, n=3)
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(om.os, "replace", boom)
+        with pytest.raises(OSError):
+            om.save_open_roles(rows[:1])
+        assert len(json.loads(path.read_text())) == 3
+        assert [p.name for p in tmp_path.iterdir()] == ["open_roles.json"]

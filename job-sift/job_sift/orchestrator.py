@@ -9,20 +9,32 @@ import sys
 from collections.abc import Callable
 from datetime import date
 
-from job_sift import config, source_health
+from job_sift import config, liveness, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
-from job_sift.dedupe import filter_new, load_seen, log_classification, save_seen
+from job_sift.dedupe import (
+    collapse_duplicates,
+    filter_new,
+    load_seen,
+    log_classification,
+    mirror_collapsed,
+    save_seen,
+    withhold_unclassified,
+)
 from job_sift.errors import SourceAuthError, SourceNotConfiguredError
 from job_sift.open_roles import (
     OpenRole,
     active_roles,
     age_roles,
+    apply_liveness,
     apply_status_overrides,
     closing_within,
+    collapse_register,
+    in_lane,
     load_open_roles,
     parse_status_overrides,
     prune,
+    roles_due_liveness_check,
     save_open_roles,
     upsert_roles,
 )
@@ -38,6 +50,10 @@ log = logging.getLogger("job_sift")
 # Sources whose curation already implies prestige — we skip the prestige
 # classifier and just check scope (intern/contract vs FT-perm).
 _AUTO_PRESTIGE_SOURCES: set[str] = {"greenhouse", "lever", "ashby"}
+
+# Concurrent liveness probes allowed at once. Every probe targets linkedin.com,
+# so this is a per-HOST cap, not a throughput knob — see `_liveness_pass`.
+_LIVENESS_MAX_IN_FLIGHT = 2
 
 
 def _setup_logging() -> None:
@@ -157,6 +173,84 @@ def _classify_one(listing: JobListing) -> ClassifierResult:
     return classify(listing)
 
 
+def _probe_for(dedup_key: str):
+    """A zero-arg probe for one register row, for `run_with_budget`.
+
+    A named factory rather than an inline lambda: a lambda in the comprehension
+    would close over the loop variable and every task would probe the last row.
+    """
+    job_id = dedup_key.split(":", 1)[-1]
+    return lambda: liveness.probe_linkedin(job_id)
+
+
+def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
+    """Re-check a bounded slice of the undated LinkedIn rows. Issue #1c.
+
+    Wrapped whole in a try/except for the same reason every source adapter is:
+    an ageing convenience must never be able to take down a run that has already
+    fetched, classified and is about to push. A failure here leaves the register
+    exactly as it was.
+
+    Per-row failures are handled a level down — `liveness.probe_linkedin` never
+    raises and returns UNKNOWN for anything it could not read, and
+    `apply_liveness` treats UNKNOWN as "no change at all". So a total LinkedIn
+    outage costs a few timeouts and changes nothing, which is the correct
+    outcome: not being able to ask is not an answer.
+    """
+    limit = config.liveness_max_per_run()
+    if limit <= 0:
+        return roles
+    try:
+        due = roles_due_liveness_check(
+            roles, today, interval_days=config.liveness_interval_days(), limit=limit
+        )
+        if not due:
+            return roles
+
+        # Bounded by a wall-clock budget, via the same machinery the fetch phase
+        # uses and for the same reason: an httpx timeout is per socket
+        # OPERATION, so it bounds neither a redirect chain nor a slow-drip body,
+        # and a serial loop with no ceiling is exactly the shape that got a run
+        # SIGTERM'd before it could push (see concurrency.py's header). An
+        # abandoned probe simply never lands in `verdicts`, which `apply_liveness`
+        # reads as "not checked" — the same no-op as UNKNOWN.
+        budget_s = config.liveness_budget_s()
+        tasks = [
+            (role.dedup_key, _probe_for(role.dedup_key)) for role in due
+        ]
+        # THROTTLED, unlike the fetch phase. Every task here hits the SAME
+        # host, so starting all ten at once is ten concurrent GETs at
+        # linkedin.com from one IP. That fails safe (429 → UNKNOWN → nothing
+        # retired), but a rate-limited run and a run where every role is still
+        # open then produce the identical register, which is the ambiguity this
+        # codebase exists to delete. Two in flight keeps the answers real, and
+        # the wall-clock budget still bounds the whole pass either way.
+        settled, abandoned = run_with_budget(
+            tasks,
+            budget_s,
+            thread_name_prefix="job-sift-liveness",
+            max_in_flight=_LIVENESS_MAX_IN_FLIGHT,
+        )
+        verdicts: dict[str, str] = {}
+        for key, future in settled:
+            try:
+                verdicts[key] = future.result()
+            except Exception as exc:  # noqa: BLE001 — one bad probe is not a failed pass
+                log.info("liveness: %s could not be checked (%s)", key, exc)
+        checked = apply_liveness(roles, verdicts, today)
+        closed = sum(1 for v in verdicts.values() if v == liveness.CLOSED)
+        unknown = len(due) - sum(1 for v in verdicts.values() if v != liveness.UNKNOWN)
+        log.info(
+            "liveness: checked %d role(s) — %d closed, %d could not be checked "
+            "(%d abandoned at the %.0fs budget)",
+            len(due), closed, unknown, len(abandoned), budget_s,
+        )
+        return checked
+    except Exception as exc:  # noqa: BLE001 — never let this kill a run
+        log.warning("liveness pass failed, register left untouched: %s", exc)
+        return roles
+
+
 def _update_open_roles(
     surfaced: list[tuple[JobListing, ClassifierResult]],
     today: date,
@@ -179,18 +273,41 @@ def _update_open_roles(
     existing = apply_status_overrides(stored, overrides)
     known_keys = {r.dedup_key for r in existing}
 
-    merged = upsert_roles(existing, [(l, r.reason) for l, r in surfaced], today)
+    # The lane travels with the role so the register can keep the two headings
+    # apart on days a listing's source does not re-list it.
+    merged = upsert_roles(existing, [(l, r.reason, r.lane) for l, r in surfaced], today)
+    # Fold rows that are the same posting under two ids. Runs BEFORE ageing so
+    # the ager judges the merged `last_seen` and deadline, not one half of a
+    # split record. See open_roles.collapse_register — this is the half of #1b
+    # that catches duplicates which arrived on different days, and no fetch-time
+    # collapse could ever have seen them together.
+    collapsed_count = len(merged)
+    merged = collapse_register(merged)
+    collapsed_count -= len(merged)
+    # Then retire anything LinkedIn has already closed (#1c). Also before
+    # ageing, so a row confirmed closed today is `expired` in this run's note
+    # rather than next run's. Skipped on a dry run and under --stub: it is the
+    # one part of the register update that reaches the network, and neither mode
+    # is allowed to.
+    if not dry_run and os.environ.get("JOB_SIFT_STUB") != "1":
+        merged = _liveness_pass(merged, today)
     aged = age_roles(merged, today)
     kept = prune(aged, today)
 
+    if collapsed_count:
+        log.info("open-roles register: collapsed %d duplicate row(s)", collapsed_count)
     added = sum(1 for r in merged if r.dedup_key not in known_keys)
     updated = len(surfaced) - added
     expired = sum(1 for r in kept if r.status in ("expired", "stale"))
+    active = active_roles(kept)
     log.info(
-        "open-roles register: %d new, %d updated, %d open, %d expired/stale, %d closing this week",
+        "open-roles register: %d new, %d updated, %d open (%d prestige / %d floor), "
+        "%d expired/stale, %d closing this week",
         added,
         updated,
-        len(active_roles(kept)),
+        len(active),
+        len(in_lane(active, "prestige")),
+        len(in_lane(active, "floor")),
         expired,
         len(closing_within(kept, today)),
     )
@@ -284,9 +401,27 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     log.info("fetched %d listings across all sources", len(listings))
 
-    # 2. Diff against seen-sets (per-source)
+    # 2a. Collapse listings that are the same posting under two ids, BEFORE the
+    #     seen-set diff — a repost carries a NEW id, so the seen-set cannot see
+    #     past it, and running this afterwards would only ever inspect the rows
+    #     that were new today. See dedupe.collapse_duplicates for why the key is
+    #     source-scoped and refuses to merge across sources.
+    # `seen_lookup=load_seen` is passed explicitly rather than left to the
+    # default so it resolves through THIS module's name — the same hook the
+    # cedars pagination already uses, and the one tests patch to keep off the
+    # real state files.
+    listings, collapsed = collapse_duplicates(listings, seen_lookup=load_seen)
+    if collapsed:
+        log.info("collapsed %d duplicate listing(s) before the seen-set diff", len(collapsed))
+
+    # 2b. Diff against seen-sets (per-source)
     new_listings, seen_by_source = filter_new(listings)
     log.info("%d new listings (after dedupe)", len(new_listings))
+
+    # 2c. Record the dropped ids against the winner's sighting, so the next run
+    #     that hands over from one id to the other does not re-notify. Additive
+    #     only — it never re-keys existing state.
+    mirror_collapsed(seen_by_source, collapsed, seen_lookup=load_seen)
 
     # 3. Classify all new listings in one batched pass (≤1 LLM call per ~20
     #    listings per route) — see classifier.classify_batch. The old per-listing
@@ -294,8 +429,23 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #    once the backlog grew, killing the run before push/state-save.
     surfaced: list[tuple[JobListing, ClassifierResult]] = []
     skipped: list[tuple[JobListing, ClassifierResult]] = []
+    # Listings the classifier never actually judged — a `None` from
+    # classify_batch. They are NOT skipped: skipped means "looked at and
+    # rejected", and scoring an outage as a rejection is the fifty-day CEDARS
+    # bug wearing a different hat. They are surfaced nowhere, logged nowhere as
+    # a verdict, held out of the seen-set, and counted into the ⚠️ line below.
+    unclassified: list[JobListing] = []
     results = classify_batch(new_listings)
     for listing, result in zip(new_listings, results):
+        if result is None:
+            unclassified.append(listing)
+            log.error(
+                "[%s] %s — %s: NO VERDICT (classifier unavailable) — held for the next run",
+                listing.source,
+                listing.employer[:30],
+                listing.title[:40],
+            )
+            continue
         log_classification(listing, result)
         if result.surface:
             surfaced.append((listing, result))
@@ -310,7 +460,32 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             result.scope,
         )
 
-    log.info("%d surfaced, %d skipped", len(surfaced), len(skipped))
+    log.info(
+        "%d surfaced, %d skipped, %d unclassified", len(surfaced), len(skipped), len(unclassified)
+    )
+
+    # The classifier is a stage that can FAIL, and until now only the fetch
+    # stage could say so. Reuse the channel that already renders a ⚠️ bubble in
+    # both the digest and the archive rather than inventing a second one — the
+    # reader's question is identical ("what is missing from what I am reading?")
+    # and one banner mechanism is easier to trust than two.
+    #
+    # Injected HERE, after `source_health.update_health` has already run on the
+    # fetch-phase map above. That ordering is load-bearing: the health counters
+    # track SOURCES, and letting a pseudo-source called "classifier" into them
+    # would invent a staleness record for something that is not a source. If
+    # health computation is ever moved below this point, this has to move with
+    # it or be given its own map.
+    if unclassified:
+        source_errors = dict(source_errors)
+        source_errors["classifier"] = (
+            f"classification unavailable for {len(unclassified)} listing(s)"
+            " — held, and retried on the next run"
+        )
+        log.error(
+            "classifier produced no verdict for %d of %d new listing(s)",
+            len(unclassified), len(new_listings),
+        )
 
     # 4. Roll the persistent register forward BEFORE rendering — the digest
     #    reports standing state ("11 open, 2 closing"), not just today's delta.
@@ -347,6 +522,16 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         #    automatically today (the units carry no Restart= — see
         #    systemd/job-sift.service), but a manual re-run has the same shape,
         #    and this ordering is what makes any future retry safe.
+        # Withhold BEFORE the commit, never after: this is the only moment the
+        # in-memory set and the on-disk set can still be made to disagree in the
+        # safe direction. An id that was never judged must not be recorded as
+        # delivered — see dedupe.withhold_unclassified.
+        withheld = withhold_unclassified(seen_by_source, unclassified, collapsed)
+        if withheld:
+            log.warning(
+                "withheld %d id(s) from the seen-set — no classifier verdict this run",
+                withheld,
+            )
         for source, seen in seen_by_source.items():
             save_seen(source, seen)
 

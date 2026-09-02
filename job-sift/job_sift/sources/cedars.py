@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -94,6 +95,155 @@ def _fetch_listings_page(page: int = 1) -> str:
 
 
 _DETAIL_BASE = "https://web2.cedars.hku.hk/jobs/"
+
+# The NETjobs search endpoint. Every search/filter/sort control on the portal
+# posts or links here, so a form pointing at it is the portal's own search
+# surface — not a page that merely mentions CEDARS.
+_SEARCH_ENDPOINT = "search.php"
+
+# The portal's industry / job-type navigation.
+_MEGA_MENU_SELECTOR = "#mega-menu-1"
+
+
+def _is_portal_page(html: str) -> bool:
+    """Did this HTML come from the CEDARS NETjobs portal?
+
+    DIAGNOSIS ONLY. This chooses the wording of an error, never whether to
+    raise one. A missing `table.tablesorter` is a failure on every page number
+    whatever this returns — see `fetch_cedars_listings`. The distinction it
+    draws is still worth drawing, because the two causes need opposite
+    responses from the operator: "your session is bouncing you off NETjobs" vs
+    "you are on NETjobs and the results table is not where it used to be".
+
+    An earlier cut of this function decided the raise, on the theory that portal
+    chrome plus no table meant we had walked off the end of the pagination. That
+    was wrong, and wrong in the direction that matters: a CEDARS-served
+    maintenance page carries CEDARS chrome, so it satisfied every anchor below,
+    took the quiet arm, and returned `[]` — reopening the fifty-day silent zero
+    on page 1 for two of the three causes the error message itself named. The
+    refutation is in this module's own reasoning: the template emits the table
+    shell even at zero rows, so end-of-results is a table with NO ROWS, which
+    `if not page_listings: break` already handles. "Chrome but no table at all"
+    therefore has no legitimate producer.
+
+    THE ANCHORS, read off the captured live page (see
+    tests/fixtures/cedars_listings_page.html):
+
+      * a `<form>` whose action is `search.php` — the NETjobs search surface.
+        The live page emits two: the header keyword box, and the filter form
+        inside `#content` directly above the results table.
+      * `#mega-menu-1` — the portal's industry / job-type mega menu.
+
+    NOT INDEPENDENT, despite serving as alternatives. In the real document
+    `form#search_form` sits under `div#search < div#box < div#container` and
+    `div#mega-menu-1` under `div.nav < div#container` — adjacent siblings from
+    one shared header include, so a header redesign takes both at once. The only
+    structurally separate instance is the `#content` filter form, and it is
+    emitted by the same results template as the table, so it is the LEAST likely
+    of the three to outlive a page that has lost its table. Treat these as one
+    signal with redundant spellings, not as two witnesses; the claim of
+    independence was overstated and is retracted here. It costs little now that
+    the return value only picks a sentence.
+
+    EVENT-INDEPENDENT, which still matters: the anchors say nothing about
+    whether any listing is present, so the diagnosis reads the same on a busy
+    day and a dead-quiet one.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    for form in soup.find_all("form"):
+        if _SEARCH_ENDPOINT in (form.get("action") or ""):
+            return True
+    return soup.select_one(_MEGA_MENU_SELECTOR) is not None
+
+
+_PAGINATION_SELECTOR = "div.pagination"
+_TOTAL_PAGES_RE = re.compile(r"\((\d+)\s*pages?\)", re.IGNORECASE)
+
+
+def _usable_page_count(total: int | None) -> int | None:
+    """A page count the walk can be bounded by, or None to fall back to the cap.
+
+    ONE guard for BOTH readings in `_parse_total_pages`, and a function rather
+    than a repeated expression because the first cut of that parser guarded the
+    words-string reading against zero and forgot to carry it to the link
+    fallback. The consequence was small and exactly the family this branch
+    exists to eliminate: a widget whose only readable link is a disabled
+    `page=0` "first"/"previous" control (a common template pattern) yielded 0,
+    the caller computed `min(max_pages, 0) == 0`, and the walk silently
+    truncated to page 1 — even under FULL=1 with a large cap, and with no
+    warning, because the "unreadable, falling back" log only fires on None.
+    Not a raise, not an error, just quietly fewer listings than the run claimed
+    to have looked for.
+
+    So the two readings no longer each carry their own opinion about what counts
+    as usable. Anything below 1 is not a page count and reads as "the block did
+    not tell us", which routes to the logged max_pages fallback.
+
+    A NEGATIVE OR NON-NUMERIC `page=N` cannot reach here: `_TOTAL_PAGES_RE` and
+    the link pattern both match digits only, so `page=-1` and `page=abc` fail
+    to match rather than reaching `int()`. `page=0` and `page=00` do match, and
+    are what this rejects. An absurdly LARGE claim needs no guard — the caller
+    takes `min(max_pages, total_pages)`, so the cap still governs.
+    """
+    if total is None or total < 1:
+        return None
+    return total
+
+
+def _parse_total_pages(html: str) -> int | None:
+    """How many result pages the portal says exist. None if it does not say.
+
+    WHY THIS EXISTS. Deleting the tableless quiet arm made one previously-
+    tolerated event fatal: walking off the last page. Nobody can say what CEDARS
+    serves for `page=33` of 32 without an authenticated live fetch, and we are
+    not doing one. Both branches were executed against the corrected code — if
+    past-the-end serves the table shell with no rows we return cleanly, and if
+    it serves no table we now RAISE, discarding a whole full-scan's listings and
+    contradicting this module's own "PARTIAL degrade" promise.
+
+    The evidence leans safe (the capture prints `<b>631</b> job(s) found.` from
+    a COUNT query independent of LIMIT/OFFSET, so a conventional
+    `if ($total > 0)` wrapper would still emit the shell on page 33) — but that
+    is an inference about someone else's PHP, not a fact. So rather than pick a
+    branch, remove the question: read the real page count and never request page
+    33 at all. That also stops the pointless trailing request every full scan
+    used to make.
+
+    TWO READINGS, in order, both off the real `div.pagination` block:
+      * `<div class="results">Showing 1 to 20 of <b>631 job(s)</b> (32 Pages)`
+        — the portal stating the count in words.
+      * failing that, the largest `?page=N` in the block's own links (the live
+        `>|` last-page link carries it).
+
+    NEVER RAISES, and that is deliberate. A missing or reworded pagination
+    widget is NOT evidence that we are off the portal — the table-presence check
+    already owns that decision, and it owns it on real markup. Turning a
+    cosmetic change in a navigation widget into a hard source failure would be
+    the exact inversion of the bug this branch spent two rounds fixing: an
+    adapter that reports "I could not look" when it looked fine. So an
+    unreadable block returns None, the caller logs it and falls back to the
+    `max_pages` cap — the behaviour that shipped for months.
+    """
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        block = soup.select_one(_PAGINATION_SELECTOR)
+        if block is None:
+            return None
+
+        match = _TOTAL_PAGES_RE.search(block.get_text(" ", strip=True))
+        if match:
+            return _usable_page_count(int(match.group(1)))
+
+        # Fallback: the highest page number the block links to.
+        linked = [
+            int(m.group(1))
+            for m in (re.search(r"[?&]page=(\d+)", a.get("href") or "") for a in block.find_all("a"))
+            if m
+        ]
+        return _usable_page_count(max(linked)) if linked else None
+    except (ValueError, AttributeError) as exc:
+        log.warning("cedars: could not read the pagination block: %s", exc)
+        return None
 
 
 def _safe_date(s: str) -> date | None:
@@ -229,10 +379,17 @@ def fetch_cedars_listings(
     If `seen_ids` is None, fetches only the first page (no greedy logic) —
     used by stub mode and by initial-bootstrap runs.
 
+    The walk is bounded by `min(max_pages, total_pages)`, where `total_pages`
+    is read off the portal's own pagination block on the first fetch — so a
+    generously-set cap can no longer request a page past the end. If that block
+    cannot be read we fall back to `max_pages` alone rather than failing; see
+    `_parse_total_pages`.
+
     Env overrides (for a one-time deep catch-up after an outage, without
     changing the cheap daily defaults):
-      - JOB_SIFT_CEDARS_MAX_PAGES : raise the page cap (default 5; ~11 pages
-        cover all ~215 open listings).
+      - JOB_SIFT_CEDARS_MAX_PAGES : raise the page cap (default 5; the live
+        portal reported 32 pages / 631 listings in the captured sample). The
+        real page count still wins when it is lower.
       - JOB_SIFT_CEDARS_FULL=1    : disable the greedy 0-new stop, so it scans
         every page up to the cap even when the newest pages are all-seen. This
         is REQUIRED to reach the older backlog (pages 6+) once a normal run has
@@ -241,18 +398,25 @@ def fetch_cedars_listings(
     PARTIAL degrade, TOTAL escalation — the same rule `_ical_common
     .fetch_feed_group` follows in the sibling bot:
 
-      * A tableless PAGE 1 raises `SourceFetchError`. Page 1 is the only page a
-        healthy portal must always render with a table (even with zero open
-        listings the header row is there), so no table on page 1 means we never
-        reached the listings at all. Escalating it is what stops a
-        maintenance/interstitial page from being scored a success and reported
-        as "Surfaced: none today".
-      * A tableless PAGE 2+ stops pagination and keeps what pages 1..N-1
-        returned. By then we hold POSITIVE evidence the source is alive and the
-        run reports real listings, so this is a partial degrade, not a silent
-        zero — and paginating past the last page is a legitimate way to get a
-        page the parser does not recognise. Escalating it would turn a normal
-        end-of-results into a failed source.
+      * NO `table.tablesorter` AT ALL raises `SourceFetchError`, on ANY page
+        number, with no exceptions. A maintenance notice, a WAF interstitial, a
+        bounce the redirect whitelist missed, or a renamed table class all mean
+        we did not read the listings — on page 4 exactly as much as on page 1,
+        and on page 4 it also means pages 5..N went unread. Escalating is what
+        stops that being scored a success and reported as "Surfaced: none
+        today". `_is_portal_page` picks the wording; it does not get a vote on
+        whether to raise.
+      * A TABLE WITH ZERO DATA ROWS returns `[]` and stops the walk. This is
+        the ONLY legitimate end-of-results, and it is why the page-number rule
+        was unnecessary rather than merely crude: the portal template emits the
+        table shell even at zero rows, so walking off the end yields an empty
+        table, which `if not page_listings: break` below already handles. There
+        is no page shape left for which "no table at all" is a normal outcome.
+
+    THE PAGE NUMBER IS NOT EVIDENCE and is no longer consulted. Neither is
+    portal chrome: an earlier cut let chrome-plus-no-table stop quietly, which
+    reopened the fifty-day silent zero on page 1 for a CEDARS-served maintenance
+    page (which carries CEDARS chrome). See `_is_portal_page`.
     """
     if os.environ.get("JOB_SIFT_STUB") == "1":
         log.info("cedars: STUB mode — returning sample listings")
@@ -263,30 +427,63 @@ def fetch_cedars_listings(
     full_scan = os.environ.get("JOB_SIFT_CEDARS_FULL") == "1"
 
     all_listings: list[JobListing] = []
-    for page in range(1, max_pages + 1):
-        log.info("cedars: fetching page %d", page)
+    # Bounded by `max_pages` until page 1 tells us the real number, then by
+    # whichever is smaller. See `_parse_total_pages` for why we never walk off
+    # the end any more, and why an unreadable pagination block is not an error.
+    page_cap = max_pages
+    page = 0
+    while page < page_cap:
+        page += 1
+        log.info("cedars: fetching page %d of at most %d", page, page_cap)
         html = _fetch_listings_page(page)
+
+        if page == 1:
+            total_pages = _parse_total_pages(html)
+            if total_pages is None:
+                log.warning(
+                    "cedars: no readable pagination block — falling back to the "
+                    "max_pages cap of %d. NOT an error: the results table is what "
+                    "says whether we read the portal, and it is there.",
+                    max_pages,
+                )
+            else:
+                page_cap = min(max_pages, total_pages)
+                log.info(
+                    "cedars: portal reports %d page(s); walking %d (cap %d)",
+                    total_pages,
+                    page_cap,
+                    max_pages,
+                )
+
         page_listings = _parse_listings_html(html)
 
         if page_listings is None:
-            # No results table — we did not read a listings page.
-            if page == 1:
-                raise SourceFetchError(
-                    "cedars",
-                    "the CEDARS listings page carried no results table "
-                    f"(no `table.tablesorter` at {CEDARS_PORTAL_URL}). Either the "
-                    "portal served a maintenance/interstitial page, the session "
-                    "bounced somewhere other than login.php/main.php, or the "
-                    "results-table markup changed. Open the URL in a browser to "
-                    "tell those apart — this is NOT 'no jobs today'.",
+            # NO RESULTS TABLE. Always a failure, on every page — the only
+            # legitimate end-of-results is an EMPTY table, handled below.
+            # `_is_portal_page` chooses which of the two causes to name; the
+            # operator's next move differs, the raise does not.
+            if _is_portal_page(html):
+                detail = (
+                    "we reached the NETjobs portal — its search form and menu are "
+                    "on the page — but the results table was not there. Either the "
+                    "portal served a maintenance/interstitial notice inside its own "
+                    "chrome, or the results-table markup changed and "
+                    "`table.tablesorter` no longer selects it."
                 )
-            log.warning(
-                "cedars: page %d carried no results table — stopping after %d listing(s) "
-                "from the earlier page(s)",
-                page,
-                len(all_listings),
+            else:
+                detail = (
+                    "the response carries none of the NETjobs chrome either, so we "
+                    "were not on the portal at all. Either the session bounced "
+                    "somewhere other than login.php/main.php, or something upstream "
+                    "(WAF, captive portal, proxy error page) answered instead."
+                )
+            raise SourceFetchError(
+                "cedars",
+                f"page {page}: no results table (no `table.tablesorter` at "
+                f"{CEDARS_PORTAL_URL}). {detail} Open the URL in a browser to "
+                f"confirm — this is NOT 'no jobs today', and pages {page + 1}+ "
+                "went unread.",
             )
-            break
 
         if not page_listings:
             log.info("cedars: page %d returned 0 listings — stopping", page)

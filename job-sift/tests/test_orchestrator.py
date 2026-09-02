@@ -23,6 +23,8 @@ from datetime import date
 
 import pytest
 
+from job_sift.concurrency import run_with_budget
+
 from job_sift import config, orchestrator
 from job_sift.errors import SourceAuthError
 from job_sift.schema import ClassifierResult as _ClassifierResult, JobListing
@@ -421,3 +423,123 @@ class TestSucceededComesFromTheFetchPhase:
 
         assert orchestrator.run(dry_run=True) == 0
         assert json.loads(state.read_text()) == _SEEDED_HEALTH
+
+
+# ---------------------------------------------------------------------------
+# `max_in_flight`: the same budget machinery, throttled.
+#
+# The fetch phase wants every source at once — one task per host, nothing to
+# throttle. A phase whose tasks all hit the SAME host does not: job-sift's LinkedIn liveness pass issues up
+# to ten GETs at one origin, and firing them together invites a 429 or an
+# interstitial. That degrades fail-safe, but "rate-limited" and "nothing
+# changed" then produce identical output, which is the ambiguity this codebase
+# keeps deleting. These pin the cap, and pin that `None` leaves the fetch phase
+# exactly as it was.
+# ---------------------------------------------------------------------------
+
+
+class TestMaxInFlight:
+    @staticmethod
+    def _probe(peak, live, lock, gate):
+        def fn():
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            gate.wait(1.0)
+            with lock:
+                live[0] -= 1
+            return "ok"
+
+        return fn
+
+    def _measure(self, n, max_in_flight):
+        import threading as _t
+
+        peak, live, lock = [0], [0], _t.Lock()
+        gate = _t.Event()
+        tasks = [(f"t{i}", self._probe(peak, live, lock, gate)) for i in range(n)]
+
+        # Let the first wave enter, sample the peak, then release everyone.
+        def release():
+            _t.Timer(0.2, gate.set).start()
+
+        release()
+        settled, abandoned = run_with_budget(
+            tasks, 5.0, thread_name_prefix="test", max_in_flight=max_in_flight
+        )
+        return peak[0], settled, abandoned
+
+    def test_ten_same_host_tasks_run_at_most_two_at_a_time(self):
+        peak, settled, abandoned = self._measure(10, 2)
+        assert peak <= 2, f"peak concurrency was {peak}"
+        assert abandoned == []
+        assert [f.result() for _, f in settled] == ["ok"] * 10
+
+    def test_none_leaves_the_fetch_phase_unthrottled(self):
+        """The regression guard for the other caller. All ten must overlap."""
+        peak, settled, _ = self._measure(10, None)
+        assert peak == 10
+        assert len(settled) == 10
+
+    def test_results_and_order_are_identical_either_way(self):
+        def ok(v):
+            return lambda: v
+
+        tasks = [(f"t{i}", ok(i)) for i in range(6)]
+        a, _ = run_with_budget(tasks, 5.0, max_in_flight=None)
+        b, _ = run_with_budget(tasks, 5.0, max_in_flight=2)
+        assert [(n, f.result()) for n, f in a] == [(n, f.result()) for n, f in b]
+
+    def test_a_task_still_waiting_on_a_permit_is_abandoned_not_settled(self):
+        """The semaphore must not be able to smuggle work past the budget.
+
+        A blocked task is not `done()`, so it lands in `abandoned` — which every
+        caller already treats as "no answer", the outcome a task that never ran
+        should produce.
+        """
+        import threading as _t
+
+        gate = _t.Event()
+        tasks = [(f"t{i}", lambda: gate.wait(5.0)) for i in range(4)]
+        try:
+            settled, abandoned = run_with_budget(
+                tasks, 0.2, thread_name_prefix="test", max_in_flight=1
+            )
+            assert len(abandoned) == 4
+            assert settled == []
+        finally:
+            gate.set()
+
+    def test_a_nonsense_cap_is_rejected_rather_than_deadlocking(self):
+        with pytest.raises(ValueError):
+            run_with_budget([("t", lambda: 1)], 1.0, max_in_flight=0)
+
+    def test_an_exception_still_releases_the_permit(self):
+        def boom():
+            raise RuntimeError("nope")
+
+        tasks = [("bad", boom)] + [(f"t{i}", lambda: "ok") for i in range(4)]
+        settled, abandoned = run_with_budget(tasks, 5.0, max_in_flight=1)
+        assert abandoned == []
+        assert len(settled) == 5
+        with pytest.raises(RuntimeError):
+            settled[0][1].result()
+
+
+def test_the_abandonment_log_does_not_name_a_phase(caplog):
+    """It runs for the fetch phase AND job-sift's LinkedIn liveness pass; naming one mislabels the other.
+
+    The orchestrator names its own phase at the call site, so this line must not.
+    """
+    import threading as _t
+
+    gate = _t.Event()
+    try:
+        with caplog.at_level("ERROR"):
+            run_with_budget([("slow", lambda: gate.wait(5.0))], 0.1)
+    finally:
+        gate.set()
+    msg = caplog.text
+    assert "still running after the" in msg
+    assert "budget" in msg
+    assert "fetch budget" not in msg

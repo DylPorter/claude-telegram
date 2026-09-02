@@ -77,6 +77,77 @@ def fetch_budget_s() -> float:
     return budget
 
 
+# ---------------------------------------------------------------------------
+# LinkedIn liveness re-check (see job_sift/liveness.py and issue #1c).
+#
+# Bounded on purpose. The pass costs one HTTP request per row it checks, so the
+# cap is what keeps a 200-row register from turning the daily run into a crawl,
+# and the cooldown is what keeps the same row from being asked every morning.
+# At 10 rows a run with a 7-day cooldown the whole open register is swept in
+# well under a fortnight, which is far quicker than the 30-day stale rule this
+# supplements.
+LIVENESS_MAX_ENV = "JOB_SIFT_LIVENESS_MAX"
+LIVENESS_MAX_DEFAULT = 10
+LIVENESS_INTERVAL_ENV = "JOB_SIFT_LIVENESS_INTERVAL_DAYS"
+LIVENESS_INTERVAL_DEFAULT = 7
+
+
+def _positive_int_env(key: str, default: int) -> int:
+    """Read at CALL time so a one-off run can override without re-importing."""
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an integer — using %d", key, raw, default)
+        return default
+    if value < 0:
+        log.warning("%s=%s must not be negative — using %d", key, raw, default)
+        return default
+    return value
+
+
+def liveness_max_per_run() -> int:
+    """0 disables the pass entirely — the documented kill switch."""
+    return _positive_int_env(LIVENESS_MAX_ENV, LIVENESS_MAX_DEFAULT)
+
+
+def liveness_interval_days() -> int:
+    return _positive_int_env(LIVENESS_INTERVAL_ENV, LIVENESS_INTERVAL_DEFAULT)
+
+
+# Hard wall-clock budget for the WHOLE liveness pass, in seconds.
+#
+# Needed for the same reason FETCH_BUDGET_S is, and it is the same class of bug:
+# httpx's `timeout` is per socket OPERATION, not per request, so it bounds
+# neither a redirect chain nor a slow-drip body. Measured against a local
+# server: a 6-hop chain at 2s/hop took 14.0s and a drip-fed body 24.0s, both
+# under a configured 10s timeout. `liveness._MAX_REDIRECTS` caps the first of
+# those; only a wall-clock ceiling outside the request caps the second.
+#
+# 60s against the unit's TimeoutStartSec=900, on top of a fetch phase already
+# allowed 240s. Real probes measure ~1.4s each, so the happy path never comes
+# near this.
+LIVENESS_BUDGET_ENV = "JOB_SIFT_LIVENESS_BUDGET_S"
+LIVENESS_BUDGET_DEFAULT_S = 60.0
+
+
+def liveness_budget_s() -> float:
+    raw = os.environ.get(LIVENESS_BUDGET_ENV, "").strip()
+    if not raw:
+        return LIVENESS_BUDGET_DEFAULT_S
+    try:
+        budget = float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number — using %.0fs", LIVENESS_BUDGET_ENV, raw, LIVENESS_BUDGET_DEFAULT_S)
+        return LIVENESS_BUDGET_DEFAULT_S
+    if budget <= 0:
+        log.warning("%s=%s must be positive — using %.0fs", LIVENESS_BUDGET_ENV, raw, LIVENESS_BUDGET_DEFAULT_S)
+        return LIVENESS_BUDGET_DEFAULT_S
+    return budget
+
+
 # CEDARS portal — set in .env once you know the exact URL.
 CEDARS_PORTAL_URL = os.environ.get("CEDARS_PORTAL_URL", "")
 # Path to a JSON file containing the CEDARS session cookie(s). Written
