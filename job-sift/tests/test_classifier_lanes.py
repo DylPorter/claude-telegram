@@ -29,6 +29,7 @@ from job_sift import profile as profile_mod
 from job_sift.classifier import (
     _hard_marginal_check,
     _hard_skip_check,
+    _negative_title_no_subject_rescue,
     _route,
     _scope_quick_classify,
     assign_lane,
@@ -224,19 +225,17 @@ class TestQuickPathStillEarnsItsPlace:
 
         Anthropic alone lists ~389 roles, so "just classify everything" is not
         a free option. No real classifier_log.jsonl exists in a fresh
-        checkout to replay, so this corpus only pins the floor on how bad the
-        boosted-employer case gets — it does NOT stand in for the production
-        mix. This corpus runs every title through `_scope_quick_classify` as
-        if it came from a boosted employer, which is the one case where the
-        demoted keyword-admit actually costs something; on it, free-resolution
-        goes DOWN, 59% -> 45%. But most of a real day's titles are NOT from a
-        boosted employer, and for those the only thing this change adds is a
-        new free rejection in `_route`'s non-boosted branch. Measured against
-        Dylan's real 45-entry register (not reproduced here — personal
-        application data), free-resolution goes UP, 40.0% -> 46.7%. See
-        README "Two admission lanes" for both numbers side by side and why
-        they disagree — employer attribution, not this corpus, is what
-        decides the sign.
+        checkout to replay, so this small, MIXED corpus (5 non-boosted, 3
+        boosted employers — real `_route`, not `_scope_quick_classify` called
+        in isolation) is what's measurable here. Its own free-resolution rate
+        goes UP, not down: 3/8 -> 6/8. That agrees with the operator's real
+        45-entry register (not reproduced here — personal application data),
+        which also goes up, 40.0% -> 46.7% — see README "Two admission
+        lanes". Both numbers point the same way once they're both measured
+        through `_route` on a realistic (not boosted-employer-only) mix;
+        an earlier draft of this comment compared an artificially
+        boosted-only run against the real register and reported a
+        disagreement that was a measurement artifact, not a real one.
         """
         corpus = [
             # newly free — non-technical functions, previously an LLM call each
@@ -339,6 +338,52 @@ class TestFloorLaneAdmission:
                 "non-technical RA — bare 'research assistant' used to admit",
             ),
             ("Office Automation Assistant (Part time)", "Hong Kong", "office admin — bare 'automation' used to admit"),
+            # IMPORTANT bug found in review round 2: technical_qualifiers and
+            # technical_terms deliberately share vocabulary (engineer*,
+            # software, data scien*, technolog*, …), so the SAME word was
+            # rescuing a negative title from `negative_title` AND separately
+            # satisfying criterion (a)'s own technical_terms check — one word
+            # doing double duty as "not really a sales role" and "is
+            # technical". None of these is an engineering role; each mentions
+            # a technical PRODUCT or DEPARTMENT after naming a non-technical
+            # one. Fixed via `_negative_title_no_subject_rescue`: a qualifier
+            # only rescues when it is at or before the negative term, not
+            # trailing after it as a subject-matter descriptor.
+            (
+                "Sales Executive, Software Solutions (Contract)",
+                "Hong Kong",
+                "sells software, doesn't build it — 'software' trails 'sales'",
+            ),
+            (
+                "Business Development Manager, Software (Contract)",
+                "Hong Kong",
+                "BD role for a software product — 'software' trails 'business develop*'",
+            ),
+            (
+                "Recruitment Consultant, Software Engineering (Contract)",
+                "Hong Kong",
+                "recruits for eng roles, isn't one — 'engineer*' trails 'recruit*'",
+            ),
+            (
+                "Sales Manager, Technology Products (Part time)",
+                "Hong Kong",
+                "sells technology, doesn't build it — 'technolog*' trails 'sales'",
+            ),
+            (
+                "Marketing Manager, Data Science Products (Contract)",
+                "Hong Kong",
+                "markets a data-science product — 'data scien*' trails 'marketing'",
+            ),
+            (
+                "Talent Acquisition Partner, Engineering (Contract)",
+                "Hong Kong",
+                "recruits engineers, isn't one — 'engineer*' trails 'talent acquisition'",
+            ),
+            (
+                "Risk Technology Analyst (Contract)",
+                "Hong Kong",
+                "'risk' leads, 'technolog*' sits between it and 'analyst' — not a rescue position",
+            ),
         ],
     )
     def test_the_lane_is_looser_but_not_open(self, title, location, why):
@@ -674,9 +719,24 @@ class TestFloorLaneConfigAgainstTheShippedExample:
         _REAL_LOAD_PROFILE.cache_clear()
 
     def test_the_shipped_example_is_not_inert(self, real_profile):
+        """`cfg.active` alone is too weak: the BROKEN config (an earlier
+        draft of profile.yaml.example with a non-empty, remote-only
+        `locations`) also had `cfg.active is True` — non-empty locations,
+        just the wrong ones, resolved from the shadowed example instead of
+        the companies.yaml fallback. Assert the fallback specifically fired
+        instead: "hong kong" is in the real committed config/companies.yaml
+        `location_allowlist` and was NOT in the broken example's locations,
+        so this fails under the broken config and passes under the fixed
+        one — verified by execution (restoring the broken `locations:`
+        value makes this assertion fail, not just the parametrized five)."""
         cfg = profile_mod.floor_lane_config()
         assert cfg.active, "floor lane is inert under the shipped default config"
         assert cfg.locations, "no locations resolved — the companies.yaml fallback did not fire"
+        assert "hong kong" in cfg.locations, (
+            "locations did not come from config/companies.yaml's location_allowlist — "
+            f"got {cfg.locations!r}, which looks like a shadowing floor_lane.locations "
+            "value in profile.yaml.example rather than the fallback"
+        )
 
     @pytest.mark.parametrize(
         "employer, title",
@@ -755,3 +815,133 @@ class TestFloorLaneIsBrandAgnostic:
         surfaced = assign_lane(listing, result)
         assert surfaced.lane != "floor"
         assert surfaced.surface is False
+
+
+class TestFloorLaneQualifierRescueDoesNotEscapeToTechnical:
+    """IMPORTANT bug found in review round 2: `technical_qualifiers` and
+    `technical_terms` deliberately share vocabulary (`engineer*`, `software`,
+    `data scien*`, `technolog*`, …). Plain `negative_title` let ANY of those
+    words rescue a negative title from anywhere in it, and the same word then
+    satisfied `floor_reason`'s own technical_terms check two lines later —
+    one word doing double duty as "not really a sales role" and "is
+    technical". "Sales Executive, Software Solutions" sells software, it
+    doesn't build it; "Recruitment Consultant, Software Engineering" recruits
+    for eng roles, it isn't one.
+
+    `_negative_title_no_subject_rescue` fixes this for `floor_reason`
+    specifically (not `negative_title`, which stays exactly as it was —
+    its rescue is safe because an LLM call always follows it). The rule:
+    a qualifier only rescues when it is AT OR BEFORE the negative term, not
+    trailing after it as a subject-matter descriptor.
+    """
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Sales Executive, Software Solutions (Contract)",
+            "Business Development Manager, Software (Contract)",
+            "Recruitment Consultant, Software Engineering (Contract)",
+            "Sales Manager, Technology Products (Part time)",
+            "Marketing Manager, Data Science Products (Contract)",
+            "Talent Acquisition Partner, Engineering (Contract)",
+            "Risk Technology Analyst (Contract)",
+        ],
+    )
+    def test_a_trailing_qualifier_does_not_rescue_for_the_floor_lane(self, title):
+        assert _negative_title_no_subject_rescue(title) is not None, (
+            f"{title!r} should stay negative for the floor lane — its qualifier trails the "
+            "negative term (subject matter), it doesn't lead it (the role itself)"
+        )
+        assert floor_reason(_listing(title)) is None, title
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Technology Summer Analyst",
+            "Engineering Analyst, Summer 2027",
+            "Software Analyst Intern",
+            "Data Science Analyst",
+            "Software Engineer, Trading Systems",
+            "Machine Learning Engineer, Finance Platform",
+        ],
+    )
+    def test_a_leading_qualifier_still_rescues_for_the_floor_lane(self, title):
+        """Most of the corpus `negative_title` rescues (see
+        TestKeywordAdmitIsNowACandidate.test_a_technical_qualifier_rescues_a_negative_title)
+        still rescues under the STRICTER floor-lane check — the qualifier is
+        the role's own head noun in every one of these, at or before the
+        negative term, not a trailing subject-matter mention.
+
+        NOT included here: "Risk Engineering Intern". It is structurally
+        identical to "Risk Technology Analyst" — the title review round 2
+        explicitly wants REJECTED — negative term leading, qualifier
+        trailing, no way for a position-only rule to tell them apart. Left
+        as a known, accepted limitation: `negative_title` (unaffected by
+        this change) still rescues it for the scope guard, so it still gets
+        a fair LLM look via `_route`'s full path; it just doesn't clear the
+        floor lane's free, no-LLM bar. A false negative here costs a job the
+        operator could have taken via the floor lane specifically — the same
+        cost this lane's own docstring already accepts as cheaper than a
+        false admit.
+        """
+        assert _negative_title_no_subject_rescue(title) is None, title
+
+    def test_a_same_structure_title_correctly_stays_rejected(self):
+        """The other side of that limitation, stated as its own test: "Risk
+        Technology Analyst" — structurally identical to "Risk Engineering
+        Intern" — correctly stays rejected, which is what review round 2
+        actually required. The rule trades a recoverable floor-lane miss
+        (Risk Engineering Intern can still reach the LLM via the full lane)
+        for a guaranteed reject on the title that must never free-admit."""
+        assert _negative_title_no_subject_rescue("Risk Technology Analyst (Contract)") is not None
+
+    def test_negative_title_itself_is_unaffected(self):
+        """The scope guard's rescue (used by `_scope_quick_classify` and
+        `_route`'s full-lane check, where escaping it only trades a free
+        reject for a paid LLM call) is UNCHANGED — only `floor_reason`'s
+        criterion (a) got stricter."""
+        title = "Sales Executive, Software Solutions (Contract)"
+        assert negative_title(title) is None  # still rescued for the scope guard
+        assert _negative_title_no_subject_rescue(title) is not None  # NOT rescued for the floor lane
+
+
+class TestFloorLaneRecoveredRecall:
+    """IMPORTANT bug found in review round 2: removing bare "ai", "technical",
+    "automation" and "research assistant" from `_DEFAULT_TECHNICAL_TERMS"
+    (the I6 fix) was a real recall cut, not merely a precision fix as an
+    earlier version of the comment on that list claimed — it also dropped
+    genuine floor-lane targets. Recovered as narrow compounds ("ai
+    research*", "ai specialist", "ai consultant", "automation specialist",
+    "technical support") plus a domain-gated "research assistant" (see
+    `_RESEARCH_ASSISTANT_DOMAIN_HINTS`), none of which reopen the six
+    original false positives.
+    """
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "AI Researcher (Contract)",
+            "AI Specialist (Part time)",
+            "AI Consultant (Contract)",
+            "Automation Specialist (Contract)",
+            "Technical Support Officer (Contract)",
+            "Research Assistant (AI), Temporary",
+            "Research Assistant, Computer Science Dept (Temporary)",
+        ],
+    )
+    def test_genuine_technical_roles_admit_again(self, title):
+        assert floor_reason(_listing(title)) is not None, title
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Legal Counsel, AI Policy (Contract)",
+            "AI Content Moderator, Contract",
+            "AI Data Annotator - Freelance",
+            "Technical Writer (6-month contract)",
+            "Research Assistant (History Department), Temporary",
+            "Office Automation Assistant (Part time)",
+        ],
+    )
+    def test_the_recovered_terms_do_not_reopen_the_original_false_positives(self, title):
+        assert floor_reason(_listing(title)) is None, title

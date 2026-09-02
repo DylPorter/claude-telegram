@@ -311,6 +311,25 @@ def _first_term(text: str, terms) -> str | None:
     return None
 
 
+def _leftmost_match(text: str, terms) -> tuple[str, int] | None:
+    """The term whose match starts EARLIEST in `text`, and that position.
+
+    Unlike `_first_term` (first in LIST order), this is first in STRING
+    order — needed anywhere a term's *position relative to another match*
+    is what decides the verdict, not just whether it matches at all. See
+    `_negative_title_no_subject_rescue`.
+    """
+    if not text:
+        return None
+    low = text.lower()
+    best: tuple[str, int] | None = None
+    for term in terms:
+        m = _term_pattern(term).search(low)
+        if m is not None and (best is None or m.start() < best[1]):
+            best = (term, m.start())
+    return best
+
+
 # A named monthly rate in the title — "30-50K P/M", "HK$25,000/month". In the
 # observed CEDARS corpus this is a recruiter/contract posting convention, and it
 # is the single strongest positive signal the floor lane has: an employer who
@@ -364,6 +383,47 @@ def negative_title(title: str, cfg: ScopeGuardConfig | None = None) -> str | Non
     return hit
 
 
+def _negative_title_no_subject_rescue(title: str, cfg: ScopeGuardConfig | None = None) -> str | None:
+    """The floor lane's own, STRICTER negative-title check. Not the same
+    guarantee as `negative_title` — read both docstrings before touching
+    either.
+
+    `negative_title`'s qualifier rescue is safe everywhere else it runs
+    (`_scope_quick_classify`, `_route`'s full-lane guard): escaping it only
+    trades a free reject for a paid LLM call, never a false admit, because
+    an LLM verdict still sits downstream. `floor_reason` has no LLM
+    downstream — its criterion (a) IS the final word — and
+    `technical_qualifiers` / `technical_terms` deliberately share most of
+    their vocabulary (`engineer*`, `software`, `data scien*`, …), so the
+    same word that rescues a negative title here also satisfies the
+    technical criterion two lines later. One word doing double duty as both
+    "not really a sales role" and "is technical" is how "Sales Executive,
+    Software Solutions", "Business Development Manager, Software" and
+    "Recruitment Consultant, Software Engineering" were admitting to the
+    floor lane: none of them are technical roles, they just mention a
+    technical PRODUCT or department after naming a non-technical one.
+
+    The distinguishing fact in every genuine case ("Software Engineer,
+    Trading Systems", "Risk Engineering Intern") is that the qualifier IS
+    (or leads) the role's own head noun — it appears AT OR BEFORE the
+    negative term, not trailing after it as a subject-matter descriptor. So:
+    a qualifier rescues here only if its leftmost match starts at or before
+    the negative term's leftmost match. "Software Engineer, Trading
+    Systems" — qualifier at position 0, negative ("trading") later — still
+    rescues. "Sales Executive, Software Solutions" — negative ("sales") at
+    position 0, qualifier later — does not.
+    """
+    cfg = cfg or scope_guard_config()
+    neg = _leftmost_match(title, cfg.negative_titles)
+    if neg is None:
+        return None
+    _, neg_pos = neg
+    qual = _leftmost_match(title, cfg.technical_qualifiers)
+    if qual is not None and qual[1] <= neg_pos:
+        return None
+    return neg[0]
+
+
 def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
     """Cheap keyword heuristic for obvious scope cases. Returns None if ambiguous.
 
@@ -385,21 +445,21 @@ def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
       rolling register, and the whole point of the bot is to remove hand-
       scanning. So the admit direction returns None and pays for the LLM.
 
-    Whether the net cost goes up or down is NOT settled here — say so
-    plainly rather than assume it away. This function is only reached at all
-    for a boosted/auto-prestige employer, and measured that way in isolation
-    (every title forced through this branch) the free-resolution rate goes
-    DOWN, 59% -> 45%. But measured against a real, mixed employer register —
-    most of which was never boosted and never ran through this function
-    either way — the free-resolution rate goes UP, 40.0% -> 46.7%, because
-    the OTHER half of this change (the negative-title guard `_route` applies
-    to non-boosted employers too) does most of the saving. See README "Two
-    admission lanes" for both numbers and why they disagree. The quick path
-    still earns its place for a cheaper reason than "cost neutral": rejecting
-    for free is safe regardless of the net, because a missed listing costs
-    nothing the operator would have acted on anyway, while every dollar spent
-    asking the LLM about a title this function could answer for free is
-    dollars unavailable for the listings that actually need judgment.
+    This function is only reached at all for a boosted/auto-prestige
+    employer — most of a real day's titles never touch it. Measured
+    correctly (through `_route`, not this function called in isolation as
+    if every title were boosted — an earlier draft made that mistake and
+    reported a cost increase that wasn't real), the free-resolution rate
+    goes UP on both a small mixed corpus and a real 45-entry register; see
+    README "Two admission lanes" for the numbers. Most of that saving
+    actually comes from the OTHER half of this change — the negative-title
+    guard `_route` applies to non-boosted employers too, where most of a
+    real day's volume lives. The quick path still earns its place for a
+    cheaper reason than "net win, measured": rejecting for free is safe
+    regardless of the net, because a missed listing costs nothing the
+    operator would have acted on anyway, while every dollar spent asking the
+    LLM about a title this function could answer for free is dollars
+    unavailable for the listings that actually need judgment.
     """
     title_l = listing.title.lower()
 
@@ -504,6 +564,23 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
 # operator could actually have taken.
 # ---------------------------------------------------------------------------
 
+# "Research assistant" is the one entry in `technical_terms` that names an
+# EMPLOYMENT ARRANGEMENT, not a field — a Research Assistant in a History
+# department is exactly as valid a title as one in Computer Science, unlike
+# every other entry ("engineer*", "data scien*", …), which is unambiguous on
+# its own. So it only counts as technical when the title ALSO names one of
+# these domains — kept separate from `technical_terms` itself (rather than
+# just re-adding bare "ai" etc. there) because these words are only a safe
+# signal in combination with "research assistant"; standalone, several of
+# them over-admitted through the floor lane's own door (see the technical_terms
+# comment for the corpus that caught it).
+_RESEARCH_ASSISTANT_DOMAIN_HINTS = (
+    "ai", "a.i.", "artificial intelligence",
+    "machine learning", "deep learning", "ml", "llm", "nlp", "computer vision",
+    "computer scien*", "data scien*", "data engineer*", "bioinformatic*",
+    "software", "engineer*",
+)
+
 
 def floor_reason(listing: JobListing, cfg: FloorLaneConfig | None = None) -> str | None:
     """Why this listing qualifies for the floor lane, or None if it does not.
@@ -513,8 +590,13 @@ def floor_reason(listing: JobListing, cfg: FloorLaneConfig | None = None) -> str
     (a) TECHNICAL — judged on the title alone. A sales listing whose body
         mentions "you'll work with our engineering team" is still a sales
         listing, so the description does not get a vote here. A title naming a
-        non-technical business function (see `negative_title`) is disqualified
-        outright, whatever else it says.
+        non-technical business function is disqualified outright, whatever
+        else it says — but note this uses `_negative_title_no_subject_rescue`,
+        NOT `negative_title`: this criterion is the final word (no LLM sits
+        downstream of it), so it cannot afford `negative_title`'s qualifier
+        rescue, which only being safe when an LLM call follows. See that
+        function's docstring for why "Sales Executive, Software Solutions"
+        and "Software Engineer, Trading Systems" need different answers here.
     (b) REACHABLE — the location matches the operator's configured geography,
         or the listing carries no location at all. Empty-location passes
         because that is already the convention upstream in the ATS adapters:
@@ -538,10 +620,18 @@ def floor_reason(listing: JobListing, cfg: FloorLaneConfig | None = None) -> str
     title = listing.title or ""
 
     # (a) technical
-    if negative_title(title) is not None:
+    if _negative_title_no_subject_rescue(title) is not None:
         return None
     tech = _first_term(title, cfg.technical_terms)
     if tech is None:
+        return None
+    if tech == "research assistant" and _first_term(title, _RESEARCH_ASSISTANT_DOMAIN_HINTS) is None:
+        # Unlike every other entry in `technical_terms`, "research assistant"
+        # alone doesn't imply a technical field — a Research Assistant in a
+        # History department is exactly as valid a title as one in Computer
+        # Science. It only counts here when the title ALSO names a technical
+        # domain — "Research Assistant (AI)", "…, Computer Science Dept" —
+        # the same signal issue #2's own fifth acceptance example carries.
         return None
 
     # (b) reachable
@@ -662,10 +752,11 @@ def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
     # branch — not `_scope_quick_classify` — is where MOST of the real cost
     # saving actually lives: the full lane is the busy one (CEDARS +
     # LinkedIn, mostly non-boosted employers that never touched
-    # `_scope_quick_classify` either way), and measured against a real
-    # employer mix the net effect of this change is fewer LLM calls, not
-    # more. See the cost note on `_scope_quick_classify` and README "Two
-    # admission lanes" for both measurements and why they disagree.
+    # `_scope_quick_classify` either way), and measured against both a small
+    # mixed corpus and a real employer register the net effect of this
+    # change is fewer LLM calls, not more. See the cost note on
+    # `_scope_quick_classify` and README "Two admission lanes" for the
+    # numbers.
     negative = negative_title(listing.title)
     if negative is not None:
         return (

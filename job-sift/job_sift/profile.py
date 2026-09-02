@@ -37,6 +37,7 @@ def load_profile() -> dict:
 
     Never raises on a missing profile: an unconfigured clone should still run.
     """
+    own_profile_broken = False
     for path, label in ((PROFILE_PATH, "profile"), (PROFILE_EXAMPLE_PATH, "example profile")):
         if not path.exists():
             continue
@@ -57,12 +58,25 @@ def load_profile() -> dict:
                 path,
                 exc,
             )
+            if path is PROFILE_PATH:
+                own_profile_broken = True
             continue
         if path is PROFILE_EXAMPLE_PATH:
-            log.warning(
-                "no config/profile.yaml found — running with the generic example profile. "
-                "Copy it and edit to tune the classifier to you."
-            )
+            if own_profile_broken:
+                # Different message on purpose: config/profile.yaml EXISTS
+                # here, it just failed to parse (already logged as an ERROR
+                # above). "no config/profile.yaml found" would be false, and
+                # a false "it's just unconfigured" reads as far less urgent
+                # than "your real profile broke and got silently ignored".
+                log.warning(
+                    "config/profile.yaml exists but failed to parse (see the error above) — "
+                    "running with the generic example profile instead of your own criteria."
+                )
+            else:
+                log.warning(
+                    "no config/profile.yaml found — running with the generic example profile. "
+                    "Copy it and edit to tune the classifier to you."
+                )
         return data
     log.warning("no profile config found at all — classifier will use built-in defaults")
     return {}
@@ -174,13 +188,33 @@ _DEFAULT_TECHNICAL_QUALIFIERS = (
 # Automation Assistant (Part time)" (bare "automation"), and "Research
 # Assistant (History Department), Temporary" (bare "research assistant") all
 # satisfied criterion (a) on the word alone despite none of them being an
-# engineering-shaped role. Every issue-#2 acceptance example still admits
-# without these — each one also carries a more specific term below
-# ("engineer*", "data scien*", "bioinformatic*") — so this is a precision
-# fix, not a recall cut against anything the lane was built to catch. Kept
-# bare "ml": word-boundary matching means it only fires on a standalone "ML"
-# token ("ML Engineer", "ML Ops"), and no realistic false positive for that
-# was found the way there was for the other four.
+# engineering-shaped role.
+#
+# This DOES cost real recall, and an earlier version of this comment claimed
+# otherwise — worth correcting rather than repeating. "AI Researcher",
+# "AI Specialist (Part time)", "AI Consultant (Contract)", "Automation
+# Specialist (Contract)" and "Technical Support Officer (Contract)" are all
+# genuine floor-lane targets that a blanket removal of the four bare words
+# would have dropped along with the six false positives. Recovered below as
+# narrow COMPOUNDS instead of re-adding the bare words: "ai research*" /
+# "ai specialist" / "ai consultant" / "automation specialist" /
+# "technical support" each require the word to be doing actual occupational
+# work (paired with Researcher/Specialist/Consultant/Support), not just
+# appearing anywhere in the title the way "AI Policy" or "Office Automation
+# Assistant" did. None of the six original false positives contain any of
+# these five compounds — verified by execution, see
+# tests/test_classifier_lanes.py.
+#
+# "research assistant" is back too, but conditionally: see
+# `_RESEARCH_ASSISTANT_DOMAIN_HINTS` in classifier.py — it only counts as
+# technical when the title also names a technical domain, which is what
+# separates "Research Assistant (AI)" from "Research Assistant (History
+# Department)" without a bare bare-word admitting either one outright.
+#
+# Kept bare "ml" from the original tightening: word-boundary matching means
+# it only fires on a standalone "ML" token ("ML Engineer", "ML Ops"), and no
+# realistic false positive for that was found the way there was for the
+# other four.
 _DEFAULT_TECHNICAL_TERMS = (
     "engineer*",
     "software",
@@ -209,8 +243,14 @@ _DEFAULT_TECHNICAL_TERMS = (
     "technolog*",
     "it support",
     "platform support",
+    "technical support",
     "qa engineer",
     "test engineer",
+    "ai research*",
+    "ai specialist",
+    "ai consultant",
+    "automation specialist",
+    "research assistant",  # gated — see _RESEARCH_ASSISTANT_DOMAIN_HINTS
 )
 
 # What makes an engagement flexible enough for the floor lane: the part-time /

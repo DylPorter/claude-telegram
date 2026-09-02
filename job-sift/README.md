@@ -82,44 +82,35 @@ with nothing ever asking whether the role was technical — 20 of 35 entries in 
 live register were finance, BD and sales roles admitted exactly that way.
 
 No `classifier_log.jsonl` exists in a fresh checkout to replay against, so
-this was measured two ways, and the two ways disagree — which is the whole
-point of showing both rather than picking the flattering one.
+this was measured two ways instead — a small mixed corpus and a real
+register — and this time they agree, which they did not the first time this
+number was reported (an earlier draft measured the small corpus through
+`_scope_quick_classify` in isolation, as if every title came from a boosted
+employer; run correctly through `_route` instead, the disagreement was a
+measurement artifact, not a real one).
 
-**Employer attribution is the decisive variable**, and it wasn't stated the
-first time this number was measured — that omission is worth naming rather
-than repeating. `_scope_quick_classify` only runs at all for a boosted or
-already-prestige employer (`_route` decides that first); a listing from a
-non-boosted employer takes a completely different path (`full`, an LLM call
-either way, before or after this change) where the fix's only effect is the
-NEW free rejection at the end of `_route` (the non-technical-title guard,
-which this change adds unconditionally). So the answer to "did this cost more
-or less" depends entirely on what fraction of the corpus is boosted-employer
-intern titles versus everything else:
+`_scope_quick_classify` only runs at all for a boosted or already-prestige
+employer (`_route` decides that first); a listing from a non-boosted employer
+takes a completely different path (`full`, an LLM call either way, before or
+after this change) where the fix's only effect is the NEW free rejection at
+the end of `_route` (the non-technical-title guard, which this change adds
+unconditionally). That branch is where most of the saving actually comes
+from, because most of a real day's titles are NOT from a boosted employer.
 
-- **A small, boosted-employer-only sample overstates the cost increase.** 22
-  representative titles from `tests/test_classifier_lanes.py`, run as if every
-  one came from a boosted employer (`_scope_quick_classify` in isolation,
-  which is what `_route` calls ONLY in that case): free-resolution goes
-  **59% → 45%, down**. This isolates exactly the tradeoff `_scope_quick_classify`'s
-  own docstring discusses — demoted admits vs. new rejections — but it is not
-  a claim about the real employer mix, because every title in it was forced
-  through the boosted branch.
-- **The real employer mix says the opposite.** Measured against the 45
-  entries in Dylan's live `Areas/Work/Open Roles.md` register (real employers,
-  real titles, real source split across CEDARS and LinkedIn — not
-  reproduced here, personal application data): free-resolution goes
-  **40.0% → 46.7%, up**. Most of that register is non-boosted employers
-  (Morgan Stanley, HSBC, UBS, Societe Generale, JPMorgan, …) that were paying
-  for a full LLM call before this change regardless; the new negative-title
-  guard at the end of `_route` now catches several of them
-  (`TRAINEE: Financing & Advisory`, `Finance Summer Analyst Program`, …) for
-  free, for a net DECREASE in LLM calls on this sample.
+- **8-title mixed corpus** (5 non-boosted, 3 boosted — `tests/test_classifier_lanes.py`,
+  run through the real `_route`): free-resolution goes **3/8 → 6/8, up**.
+- **The operator's real 45-entry register** (real employers, real titles,
+  real source split across CEDARS and LinkedIn — not reproduced here,
+  personal application data): free-resolution goes **40.0% → 46.7%, up**.
+  Most of that register is non-boosted employers that were paying for a full
+  LLM call before this change regardless; the new negative-title guard at the
+  end of `_route` now catches several of them for free.
 
 Anthropic alone lists ~389 roles, so neither number should be read as "the"
 production figure — the real mix shifts over time as sources and boost-list
-membership change. Both measurements are committed here so the direction
-isn't asserted from one favorable sample; the honest answer is "measure
-against `classifier_log.jsonl` once one exists," not either number above.
+membership change. Both measurements are committed here as evidence, not
+because either one is definitive; the honest answer is "measure against
+`classifier_log.jsonl` once one exists."
 
 The term lists behind both features live in `config/profile.yaml` (gitignored),
 not in `classifier.py`. The matcher is the mechanism; the terms are who the
