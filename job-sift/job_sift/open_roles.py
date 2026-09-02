@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date
 
-from job_sift import liveness
-from job_sift.config import STATE_DIR
+from job_sift import config, liveness
 from job_sift.schema import JobListing, normalise
 
 log = logging.getLogger(__name__)
@@ -121,7 +122,8 @@ class OpenRole:
 
 
 def _state_path():
-    return STATE_DIR / "open_roles.json"
+    # Through the module, not a bound name — see the note on dedupe._seen_path.
+    return config.STATE_DIR / "open_roles.json"
 
 
 def _parse_date(value: str) -> date | None:
@@ -284,11 +286,16 @@ def collapse_register(roles: list[OpenRole]) -> list[OpenRole]:
 
     THE RESIDUAL, WHICH IS PERMANENT AND NOT SELF-HEALING. If one source really
     does list two DIFFERENT reqs under an identical employer, title and
-    location, this merges them and one is gone for good — `mirror_collapsed`
-    writes the dropped id into the seen-set, so no later run re-surfaces it as
-    new. That is the accepted cost of collapsing at all, and it is why the key
-    is exact and source-scoped rather than merely plausible: every widening of
-    the key widens this. Do not loosen it without re-reading
+    location, this merges them and one is gone for good. Not via
+    `mirror_collapsed` — that only ever sees `dedupe.collapse_duplicates`'
+    fetch-time pairs and never learns about a register-side merge. The dropped
+    row simply stops existing here, while its id remains in the seen-set from
+    the run that first surfaced it, so `filter_new` never calls it new again and
+    nothing re-creates the row. Same outcome, different mechanism, and worth
+    stating correctly because the two collapses have different repair paths.
+    That is the accepted cost of collapsing at all, and it is why the key is
+    exact and source-scoped rather than merely plausible: every widening of the
+    key widens this. Do not loosen it without re-reading
     `JobListing.identity_key`.
     """
     groups: dict[str, list[OpenRole]] = {}
@@ -344,6 +351,15 @@ def roles_due_liveness_check(
     `limit` is a hard cap and `interval_days` a per-row cooldown, so the whole
     pass costs a bounded, small number of requests per run rather than one per
     open role. Never-checked rows sort first, then least-recently-checked.
+
+    A ROW FIRST SEEN TODAY IS NOT DUE, and that exclusion is about the digest,
+    not about the network. The pass runs after the upsert, and never-checked
+    rows sort first — so without this, a role surfaced in this morning's digest
+    is a prime candidate to be probed and marked `expired` in the SAME run,
+    giving the reader "1 new" alongside "0 open" and a register that retired a
+    role it had not yet shown him. The probe also has nothing to add: the source
+    listed the posting minutes ago, which is fresher evidence than a GET. It
+    becomes eligible on the next run like everything else.
     """
     due: list[OpenRole] = []
     for role in roles:
@@ -352,6 +368,8 @@ def roles_due_liveness_check(
         if role.source not in LIVENESS_SOURCES:
             continue
         if role.deadline_date is not None:
+            continue
+        if role.first_seen == today.isoformat():
             continue
         last = _parse_date(role.last_checked or "")
         if last is not None and (today - last).days < interval_days:
@@ -522,8 +540,40 @@ def apply_status_overrides(
 # --------------------------------------------------------------------------
 
 
+class RegisterUnreadableError(RuntimeError):
+    """`open_roles.json` exists but could not be read.
+
+    A THIRD OUTCOME, and the one this module used to collapse. "No file yet" is
+    an empty register; "a file I cannot parse" is not — it is the register still
+    being there and this process being unable to see it. Returning `[]` for both
+    made the difference invisible, and one run later the difference was gone:
+    the caller upserted onto nothing, `save_open_roles` truncated the file to
+    that nothing, and every `applied` mark the operator had made by hand went
+    with it. Reproduced: 40 rows including one `applied`, truncated mid-file →
+    1 row on disk, zero `applied` surviving, the note rewritten to match, and
+    not one exception anywhere.
+
+    Raising instead is loud and, crucially, NON-DESTRUCTIVE: the run dies with
+    the file intact, and the operator still has a register to repair.
+    """
+
+
 def load_open_roles() -> list[OpenRole]:
-    """Load the register, tolerating a missing or corrupt file (mirrors dedupe.load_seen)."""
+    """Load the register. Missing file → empty; UNREADABLE file → raise.
+
+    Deliberately NOT the same contract as `dedupe.load_seen`, which this used to
+    mirror. The two files fail in opposite directions and so must not share a
+    policy — the same asymmetry `source_health.save_health` already documents.
+    A lost seen-set re-notifies listings the reader has already read: noisy,
+    self-correcting, obvious. A lost register destroys hand-set `applied` and
+    `dismissed` statuses, every `lane`, every `last_checked`, and every liveness
+    `expired` verdict, none of which exist anywhere else and none of which any
+    later run can reconstruct.
+
+    So a parse failure raises `RegisterUnreadableError` rather than starting
+    fresh. The caller has no sensible recovery — that is the point: the only
+    safe thing to do with an unreadable register is to not write over it.
+    """
     p = _state_path()
     if not p.exists():
         return []
@@ -531,11 +581,43 @@ def load_open_roles() -> list[OpenRole]:
         raw = json.loads(p.read_text())
         return [OpenRole.from_dict(d) for d in raw]
     except Exception as exc:
-        log.warning("failed to load open-roles register: %s — starting fresh", exc)
-        return []
+        log.error(
+            "open-roles register at %s could not be read (%s) — REFUSING to "
+            "continue, because the next write would replace it with an empty "
+            "one and destroy every hand-set status in it",
+            p, exc,
+        )
+        raise RegisterUnreadableError(
+            f"{p} could not be read ({exc}); the register was NOT overwritten"
+        ) from exc
 
 
 def save_open_roles(roles: list[OpenRole]) -> None:
-    _state_path().write_text(
-        json.dumps([r.to_dict() for r in roles], indent=2, sort_keys=True)
-    )
+    """Write the register ATOMICALLY (tmp file + os.replace).
+
+    Same reasoning as `source_health.save_health`, and for a file with even more
+    to lose. The deployment has a documented history of being SIGTERM'd
+    mid-run (TimeoutStartSec), and a plain `write_text` truncates first and
+    fills after — so the window where this file is half-written is a window
+    where `load_open_roles` sees a parse error. That is survivable now only
+    because it raises; before, it was the entry point to the wipe described on
+    `RegisterUnreadableError`. Belt and braces: a reader sees the whole old file
+    or the whole new one, never a half.
+    """
+    path = _state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps([r.to_dict() for r in roles], indent=2, sort_keys=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave a stray tmp file behind; the old register stays intact.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

@@ -302,6 +302,28 @@ class TestRolesDue:
         due = roles_due_liveness_check([checked, never], TODAY, limit=1)
         assert [r.dedup_key for r in due] == ["linkedin:never"]
 
+    def test_a_row_first_seen_today_is_not_checked_in_the_same_run(self):
+        """Otherwise today's digest and today's register contradict each other.
+
+        The pass runs AFTER the upsert and never-checked rows sort first, so a
+        role surfaced in this morning's push is a prime candidate to be probed
+        and retired in the very same run — "1 new" next to "0 open", for a role
+        the operator was told about minutes earlier. The source listed it today,
+        which is fresher evidence than a GET anyway.
+        """
+        fresh = _role("linkedin:fresh", first_seen=TODAY.isoformat())
+        older = _role("linkedin:older", first_seen="2026-08-01")
+        due = roles_due_liveness_check([fresh, older], TODAY)
+        assert [r.dedup_key for r in due] == ["linkedin:older"]
+
+    def test_it_becomes_eligible_on_the_next_run(self):
+        """A one-run deferral, not an exemption."""
+        fresh = _role("linkedin:fresh", first_seen=TODAY.isoformat())
+        tomorrow = date(2026, 9, 2)
+        assert [r.dedup_key for r in roles_due_liveness_check([fresh], tomorrow)] == [
+            "linkedin:fresh"
+        ]
+
 
 # --------------------------------------------------------------------------
 # Applying the verdict
