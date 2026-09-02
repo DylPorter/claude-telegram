@@ -168,6 +168,16 @@ def _classify_one(listing: JobListing) -> ClassifierResult:
     return classify(listing)
 
 
+def _probe_for(dedup_key: str):
+    """A zero-arg probe for one register row, for `run_with_budget`.
+
+    A named factory rather than an inline lambda: a lambda in the comprehension
+    would close over the loop variable and every task would probe the last row.
+    """
+    job_id = dedup_key.split(":", 1)[-1]
+    return lambda: liveness.probe_linkedin(job_id)
+
+
 def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
     """Re-check a bounded slice of the undated LinkedIn rows. Issue #1c.
 
@@ -191,16 +201,34 @@ def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
         )
         if not due:
             return roles
+
+        # Bounded by a wall-clock budget, via the same machinery the fetch phase
+        # uses and for the same reason: an httpx timeout is per socket
+        # OPERATION, so it bounds neither a redirect chain nor a slow-drip body,
+        # and a serial loop with no ceiling is exactly the shape that got a run
+        # SIGTERM'd before it could push (see concurrency.py's header). An
+        # abandoned probe simply never lands in `verdicts`, which `apply_liveness`
+        # reads as "not checked" — the same no-op as UNKNOWN.
+        budget_s = config.liveness_budget_s()
+        tasks = [
+            (role.dedup_key, _probe_for(role.dedup_key)) for role in due
+        ]
+        settled, abandoned = run_with_budget(
+            tasks, budget_s, thread_name_prefix="job-sift-liveness"
+        )
         verdicts: dict[str, str] = {}
-        for role in due:
-            job_id = role.dedup_key.split(":", 1)[-1]
-            verdicts[role.dedup_key] = liveness.probe_linkedin(job_id)
+        for key, future in settled:
+            try:
+                verdicts[key] = future.result()
+            except Exception as exc:  # noqa: BLE001 — one bad probe is not a failed pass
+                log.info("liveness: %s could not be checked (%s)", key, exc)
         checked = apply_liveness(roles, verdicts, today)
         closed = sum(1 for v in verdicts.values() if v == liveness.CLOSED)
-        unknown = sum(1 for v in verdicts.values() if v == liveness.UNKNOWN)
+        unknown = len(due) - sum(1 for v in verdicts.values() if v != liveness.UNKNOWN)
         log.info(
-            "liveness: checked %d role(s) — %d closed, %d could not be checked",
-            len(due), closed, unknown,
+            "liveness: checked %d role(s) — %d closed, %d could not be checked "
+            "(%d abandoned at the %.0fs budget)",
+            len(due), closed, unknown, len(abandoned), budget_s,
         )
         return checked
     except Exception as exc:  # noqa: BLE001 — never let this kill a run

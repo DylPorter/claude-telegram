@@ -77,8 +77,19 @@ class JobListing:
         a source does not list two genuinely different jobs under an identical
         employer, an identical title AND an identical location — and if it does,
         they are interchangeable enough that applying to one is applying to
-        both. Location is in the key precisely to keep "HSBC / Graduate
-        Programme / Hong Kong" from swallowing the Singapore one.
+        both.
+
+        BE HONEST ABOUT LOCATION: on today's two real sources it discriminates
+        nothing. CEDARS hardcodes `location="Hong Kong"` on every row it parses,
+        including roles that are plainly elsewhere, and LinkedIn's is parsed off
+        the digest card but only reaches a register row when a source re-lists
+        it — which, by the premise of the LinkedIn ageing problem, LinkedIn never
+        does. So it is currently a constant on one source and usually absent on
+        the other. It stays in the key anyway: it costs nothing, it only ever
+        makes the key STRICTER (a mismatch means a missed collapse, never a
+        wrong merge), and it is the field that starts discriminating the moment
+        a source with real per-row locations is added or the CEDARS parser
+        learns to read one.
 
         Employer or title missing → fall back to `dedup_key`, which is
         source-prefixed and therefore collides with nothing. That is the safe

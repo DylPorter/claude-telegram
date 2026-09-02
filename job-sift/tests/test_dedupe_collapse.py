@@ -273,3 +273,20 @@ class TestOrchestratorWiring:
         b = _listing("linkedin", "1000000003", "HSBC", "CIB Programme")
         handed, _saved = self._run(monkeypatch, tmp_path, [a, b])
         assert len(handed) == 2
+
+
+class TestMergeOrdering:
+    def test_a_row_with_no_last_seen_never_wins_the_merge(self):
+        """`_invert_iso("")` used to sort FIRST, so the row we know least about
+        decided which record survived."""
+        blank = _role("linkedin:1", last_seen="")
+        real = _role("linkedin:2", last_seen="2026-08-20")
+        out = collapse_register([blank, real])
+        assert out[0].dedup_key == "linkedin:2"
+
+    def test_a_sticky_row_still_wins_even_with_no_last_seen(self):
+        """Rule 1 outranks recency; a hand-set status is not a date question."""
+        marked = _role("linkedin:1", status="applied", last_seen="")
+        fresh = _role("linkedin:2", last_seen="2026-08-20")
+        out = collapse_register([marked, fresh])
+        assert out[0].status == "applied"

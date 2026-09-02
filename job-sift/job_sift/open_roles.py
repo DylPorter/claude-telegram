@@ -240,11 +240,19 @@ def _merge_key(role: OpenRole) -> tuple:
     return (_sticky_rank(role), _invert_iso(role.last_seen))
 
 
-def _invert_iso(value: str) -> str:
-    """Sort ISO dates DESCENDING inside an otherwise-ascending tuple."""
+def _invert_iso(value: str) -> tuple[int, str]:
+    """Sort ISO dates DESCENDING inside an otherwise-ascending tuple.
+
+    The leading flag is what keeps a MISSING date last. Complementing digits
+    alone made `""` the smallest possible string, so a row with no `last_seen`
+    beat every real date and won the merge — the one row we know least about
+    deciding which record survives.
+    """
+    if not value:
+        return (1, "")
     # Complementing each digit turns "2026-08-20" into a string that sorts
     # before "2026-08-01" — cheaper and clearer than splitting the sort.
-    return "".join(chr(0x7E - ord(c)) if c.isdigit() else c for c in value or "")
+    return (0, "".join(chr(0x7E - ord(c)) if c.isdigit() else c for c in value))
 
 
 def collapse_register(roles: list[OpenRole]) -> list[OpenRole]:
@@ -273,6 +281,15 @@ def collapse_register(roles: list[OpenRole]) -> list[OpenRole]:
     The dropped row's `<!-- status:... -->` marker in the note becomes an
     orphan; `apply_status_overrides` simply stops matching it, and rule 1 has
     already moved anything it was carrying onto the survivor.
+
+    THE RESIDUAL, WHICH IS PERMANENT AND NOT SELF-HEALING. If one source really
+    does list two DIFFERENT reqs under an identical employer, title and
+    location, this merges them and one is gone for good — `mirror_collapsed`
+    writes the dropped id into the seen-set, so no later run re-surfaces it as
+    new. That is the accepted cost of collapsing at all, and it is why the key
+    is exact and source-scoped rather than merely plausible: every widening of
+    the key widens this. Do not loosen it without re-reading
+    `JobListing.identity_key`.
     """
     groups: dict[str, list[OpenRole]] = {}
     order: list[str] = []

@@ -139,8 +139,10 @@ merges history (earliest `first_seen`, latest `last_seen`) and a hand-set
 `applied`/`dismissed` always survives onto the surviving row.
 
 The collision key is `JobListing.identity_key` — source, employer, title,
-location, exact after case/punctuation normalisation. It is **source-scoped on
-purpose**: CEDARS and LinkedIn share no id and appear in no payload of each
+location, exact after case/punctuation normalisation. (Location discriminates
+nothing on today's two sources — CEDARS hardcodes `"Hong Kong"` on every row and
+LinkedIn's rarely reaches a register row — but it only ever makes the key
+stricter, so it stays.) It is **source-scoped on purpose**: CEDARS and LinkedIn share no id and appear in no payload of each
 other's, so merging them would mean matching on prose, and a wrong merge
 silently deletes a real job while a missed one merely shows it twice. The same
 posting listed by two sources is therefore knowingly left as two rows.
@@ -154,13 +156,31 @@ for a month. Each run re-checks a bounded slice of the undated LinkedIn rows
 against the posting page and retires the ones that say *No longer accepting
 applications*.
 
-It fails safe by construction: only an HTTP 200 carrying that banner closes a
-row. Every other outcome — transport error, timeout, redirect, 403, 404, 429,
-5xx, an unreadably short body — is `unknown`, which changes nothing, not even
-the `last_checked` date. A failed request is not evidence about a job. The pass
-is skipped under `--dry-run` and `--stub`, and a crash inside it is caught and
-logged rather than allowed to kill a run that has already fetched and
-classified.
+It fails safe by construction: a row is retired only when an HTTP 200 **served
+from a `linkedin.com/jobs/view/` URL** carries that banner. Every other
+outcome — transport error, timeout, 403, 404, 429, 5xx, an unreadably short
+body, or a redirect that ends up anywhere other than a posting page — is
+`unknown`, which changes nothing, not even the `last_checked` date. A failed
+request is not evidence about a job.
+
+Two of those guards are not theoretical. LinkedIn 301s an unknown job id onto a
+company jobs-index page on a different host (`/jobs/view/3500000000/` →
+`br.linkedin.com/jobs/escale-vagas?trk=expired_jd_redirect`) whose body carries
+expiry-flavoured prose, so the terminal URL is checked before the body is read.
+And the marker list is deliberately a list of one: broader strings like "no
+longer available" match ordinary LinkedIn error pages ("This page is no longer
+available") while adding no true positives, and a wrong `expired` is
+unrecoverable — the row drops out of the register, is pruned after 60 days, and
+LinkedIn never re-lists it. 404, incidentally, is **not** the expiry signal: a
+closed posting answers 200 with the banner, while 404 is what a nonexistent job
+id returns.
+
+The pass is skipped under `--dry-run` and `--stub`, bounded by its own
+wall-clock budget (`JOB_SIFT_LIVENESS_BUDGET_S`, default 60s — httpx's
+per-socket-operation timeout bounds neither a redirect chain nor a slow-drip
+body, so the ceiling has to come from outside the request, exactly as with the
+fetch budget), and a crash inside it is caught and logged rather than allowed to
+kill a run that has already fetched and classified.
 
 Mark a role applied/dismissed by editing its hidden marker in the note —
 `<!-- status:open cedars:123 -->` → `<!-- status:applied cedars:123 -->`. Those
@@ -199,6 +219,8 @@ JOB_SIFT_MODEL=haiku
 # JOB_SIFT_LIVENESS_MAX=10
 # Per-row cooldown in days before the same row is re-checked.
 # JOB_SIFT_LIVENESS_INTERVAL_DAYS=7
+# Hard wall-clock budget for the whole liveness pass, in seconds. Default 60.
+# JOB_SIFT_LIVENESS_BUDGET_S=60
 ```
 
 Sources are fetched in parallel, so the fetch phase costs `max(t)` rather than

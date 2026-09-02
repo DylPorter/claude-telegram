@@ -144,6 +144,13 @@ def mirror_collapsed(
     Mirroring is purely additive — it only ever writes ids that were missing —
     so it needs no migration and cannot invalidate state that already exists.
 
+    IT ALSO MAKES A COLLAPSE PERMANENT, which is the price. A dropped id is
+    recorded as delivered, so if the collapse was wrong — two genuinely
+    different reqs sharing an employer, a title and a location within one
+    source — that posting is gone and no later run re-surfaces it. That is the
+    accepted cost of collapsing, and the reason the key is exact and
+    source-scoped rather than merely plausible.
+
     Call this AFTER `filter_new`, which is what puts the winner's sighting into
     `seen_by_source` in the first place — either because it was new today, or
     because `load_seen` brought it back off disk. If it is somehow not there,
