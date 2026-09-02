@@ -23,7 +23,7 @@ import pytest
 
 from job_sift.dedupe import collapse_duplicates, mirror_collapsed, withhold_unclassified
 from job_sift.open_roles import OpenRole, collapse_register
-from job_sift.schema import JobListing
+from job_sift.schema import ClassifierResult, JobListing
 
 TODAY = date(2026, 9, 1)
 
@@ -352,3 +352,65 @@ class TestWithholdUnclassified:
         assert withhold_unclassified(seen, [a]) == 1
         assert withhold_unclassified(seen, [a]) == 0
         assert seen == {"cedars": set()}
+
+
+# ---------------------------------------------------------------------------
+# The suite's sandbox has to actually hold.
+#
+# `dedupe` and `open_roles` used to do `from job_sift.config import STATE_DIR`,
+# binding the path at IMPORT time. A test that points `config.STATE_DIR` at a
+# tmp_path therefore did not redirect them at all — it only looked like it did.
+# `source_health` had already been written the other way and says why.
+#
+# Nothing fired in practice: every pre-existing test that patches
+# `config.STATE_DIR` also stubs `save_seen` / `save_open_roles` at the
+# orchestrator level, so the suite wrote zero state files. But the guard was
+# load-bearing-by-luck, and the first test to drive a real `run()` through to
+# the commit (the classifier-outage ones on this branch) reached straight past
+# it into the repo's own `.data/state/`. On a developer machine that is the LIVE
+# deployment's seen-sets and register: re-notified listings at best, a
+# clobbered `applied` history at worst.
+#
+# These fail the moment either module re-binds the name.
+# ---------------------------------------------------------------------------
+
+
+class TestStateDirIsRedirectable:
+    def test_dedupe_resolves_the_state_dir_at_call_time(self, monkeypatch, tmp_path):
+        from job_sift import config, dedupe
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        assert dedupe._seen_path("cedars") == tmp_path / "seen_cedars.json"
+        assert dedupe._log_path() == tmp_path / "classifier_log.jsonl"
+
+    def test_open_roles_resolves_the_state_dir_at_call_time(self, monkeypatch, tmp_path):
+        from job_sift import config, open_roles
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        assert open_roles._state_path() == tmp_path / "open_roles.json"
+
+    def test_no_writer_escapes_the_patch(self, monkeypatch, tmp_path):
+        """The property that matters, asserted on the filesystem rather than on
+        a path string: with the patch in place, every state writer lands inside
+        tmp_path and the real state directory gains nothing."""
+        from job_sift import config, dedupe, open_roles, source_health
+
+        real = config.STATE_DIR
+        before = set(real.iterdir()) if real.exists() else set()
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+
+        dedupe.save_seen("cedars", {"1", "2"})
+        dedupe.log_classification(
+            _listing("cedars", "1", "A", "Engineer"),
+            ClassifierResult("skip", "out_of_scope", "nope"),
+        )
+        open_roles.save_open_roles([])
+        source_health.save_health({})
+
+        assert {p.name for p in tmp_path.iterdir()} == {
+            "seen_cedars.json",
+            "classifier_log.jsonl",
+            "open_roles.json",
+            "source_health.json",
+        }
+        assert (set(real.iterdir()) if real.exists() else set()) == before

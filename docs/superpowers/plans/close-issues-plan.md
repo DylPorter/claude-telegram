@@ -85,6 +85,14 @@ non-engineering finance/BD/sales roles, most carrying
 `reason: "title contains intern/contract keyword"`. Roughly 3 actionable roles
 out of 35 — the same hand-scanning problem the bot was built to remove.
 
+> **Unreproducible from this repo.** `Areas/Work/Open Roles.md` is personal
+> application data in a private vault and is not checked in, so nothing here
+> lets a reader re-derive "20 of 35". A *different* snapshot of the same
+> register, counted 45 entries, is cited further down. The two are not
+> reconcilable from anything committed. Read both as dated observations, not as
+> stable denominators, and do not derive one from the other — see the same
+> caveat in `job-sift/README.md` under "The scope guard".
+
 Fix: make the keyword match a **candidate** signal, not an admit. A title
 matching only on the keyword must still pass the scope classifier. Add an
 explicit negative-title list — Strategy, Business Develop*, Sales, Talent
@@ -97,8 +105,12 @@ and must stay `done`. Only the *admit* direction becomes a candidate.
 
 **#2 — add a second brand-agnostic "floor" lane.**
 The prestige lane was built for a strict-prestige heuristic. Measured over 87
-digests, **269 listings were `in_scope` but discarded on prestige grounds**,
-including `Argyll Scott — 3x AI Platform Support Engineer / 12-month contract /
+digests, **269 listings were `in_scope` but discarded on prestige grounds**
+— same caveat as above. Where the count came from is not recorded here, and a
+fresh checkout has no `classifier_log.jsonl` and no digest archive to replay
+against, so nothing in this repo lets a reader reproduce or check it. Treat it
+as a dated observation. Examples cited below are from the same unavailable
+source: `Argyll Scott — 3x AI Platform Support Engineer / 12-month contract /
 30-50K P/M` (the monthly rate is in the title), `GUTolution — Part time – AI &
 Bioinformatics`, `ConnectedSolutions — Junior Automation Engineer (Rolling
 Contract)`, `Aster Recruiting — Data Scientist 6-12 month contract`, and

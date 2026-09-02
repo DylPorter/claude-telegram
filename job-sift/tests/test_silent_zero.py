@@ -707,3 +707,96 @@ class TestALinkedInTemplateChangeIsNotAQuietDay:
         self._patch(monkeypatch, [_CONFIRMATION, _email(_REDESIGNED_CARD, "111")])
         with pytest.raises(SourceFetchError):
             linkedin.fetch_linkedin_listings()
+
+
+class TestAnUnclassifiedWinnerTakesItsMirroredLoserWithIt:
+    """The collapse-mirror unwind, driven through `run()` rather than by unit.
+
+    `withhold_unclassified` has its own unit tests, but they pass `collapsed`
+    explicitly — so dropping the argument at the CALL SITE
+    (`withhold_unclassified(seen_by_source, unclassified)`) left the whole suite
+    green while changing the outcome. That call site is the piece that prevents
+    a double-push after an outage, so it is pinned here end to end.
+
+    The sequence being defended, in order:
+      1. `collapse_duplicates` folds two ids for one posting; the winner goes on.
+      2. `filter_new` banks the winner's id.
+      3. `mirror_collapsed` banks the LOSER's id against the winner's sighting —
+         all of this BEFORE the classifier has said anything.
+      4. The classifier produces no verdict for the winner.
+
+    Pull only the winner and the loser's id survives, marking a posting
+    delivered that was never judged or pushed. The next run re-collapses (it is
+    computed from fetched rows, not from state), the loser is now "seen", and
+    the posting is silently dropped for good.
+    """
+
+    def _harness(self, monkeypatch, tmp_path, *, verdicts):
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+
+        # Same source, employer, title and location => one `identity_key`, so
+        # this is a REAL collapse, not a stubbed one.
+        pair = [
+            JobListing(
+                source="cedars",
+                external_id=ext,
+                employer="IMC",
+                title="Software Engineer Intern",
+                apply_url=f"https://example.com/{ext}",
+                location="Hong Kong",
+            )
+            for ext in ("10", "11")
+        ]
+        assert pair[0].identity_key == pair[1].identity_key
+
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: (list(pair), {}, ["cedars"])
+        )
+        monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+        monkeypatch.setattr(orchestrator, "classify_batch", lambda ls: list(verdicts))
+        return pair
+
+    def test_the_premise_the_loser_really_is_banked_before_classification(
+        self, monkeypatch, tmp_path
+    ):
+        """Without this, the test below would pass for the wrong reason."""
+        judged = ClassifierResult("skip", "out_of_scope", "not for you")
+        self._harness(monkeypatch, tmp_path, verdicts=[judged])
+        assert orchestrator.run() == 0
+
+        from job_sift.dedupe import load_seen
+
+        # One listing survived the collapse, yet BOTH ids are recorded — that
+        # mirroring is what has to be unwound when the verdict never arrives.
+        assert load_seen("cedars") == {"10", "11"}
+
+    def test_neither_id_is_committed_when_the_winner_was_never_judged(
+        self, monkeypatch, tmp_path
+    ):
+        self._harness(monkeypatch, tmp_path, verdicts=[None])
+        assert orchestrator.run() == 0
+
+        from job_sift.dedupe import load_seen
+
+        # Passing `None` for `collapsed` at the call site leaves {"11"} here.
+        assert load_seen("cedars") == set()
+
+    def test_and_the_posting_is_still_reachable_on_the_retry(
+        self, monkeypatch, tmp_path
+    ):
+        """The whole point: it comes back, and is delivered exactly once."""
+        self._harness(monkeypatch, tmp_path, verdicts=[None])
+        assert orchestrator.run() == 0
+
+        judged = ClassifierResult("prestige", "in_scope", "yes")
+        self._harness(monkeypatch, tmp_path, verdicts=[judged])
+        assert orchestrator.run() == 0
+
+        from job_sift.dedupe import load_seen
+
+        assert load_seen("cedars") == {"10", "11"}
