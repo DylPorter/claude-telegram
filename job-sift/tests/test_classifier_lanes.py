@@ -21,6 +21,7 @@ fixes is how much they settle without asking it.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -945,3 +946,268 @@ class TestFloorLaneRecoveredRecall:
     )
     def test_the_recovered_terms_do_not_reopen_the_original_false_positives(self, title):
         assert floor_reason(_listing(title)) is None, title
+
+
+# ---------------------------------------------------------------------------
+# A classifier outage is not a verdict.
+#
+# `_batch_llm` used to return a real ClassifierResult — skip / out_of_scope /
+# "batch fallback" — for every listing in a chunk whose CLI call timed out,
+# exited non-zero, or returned something that was not a JSON array. That is a
+# judgement recorded for a call that never happened, and it is the same shape as
+# the CEDARS cookie death: one value meaning both "nothing there" and "I could
+# not look". These pin the replacement: no verdict is `None`, and `None` is not
+# a value any lane, digest or seen-set may treat as an answer.
+# ---------------------------------------------------------------------------
+
+
+class TestClassifierOutageProducesNoVerdict:
+    def _listings(self):
+        from job_sift.schema import JobListing
+
+        return [
+            JobListing(
+                source="linkedin",
+                external_id=str(i),
+                employer=emp,
+                title=title,
+                apply_url=f"https://example.com/{i}",
+                location="Hong Kong",
+            )
+            for i, (emp, title) in enumerate(
+                [
+                    ("Anthropic", "Machine Learning Intern"),
+                    ("Some Startup Ltd", "Software Engineer (6-month contract)"),
+                    ("HKU", "Research Assistant (Computer Science), Part Time"),
+                ]
+            )
+        ]
+
+    def _run_with_cli(self, monkeypatch, fake_run):
+        from job_sift import classifier
+
+        monkeypatch.setattr(classifier.subprocess, "run", fake_run)
+        return classifier.classify_batch(self._listings())
+
+    @staticmethod
+    def _timeout(*a, **k):
+        import subprocess
+
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=1.0)
+
+    @staticmethod
+    def _nonzero(*a, **k):
+        import subprocess
+
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+
+    @staticmethod
+    def _garbage(*a, **k):
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="I'm sorry, I can't help with that.", stderr=""
+        )
+
+    @pytest.mark.parametrize("mode", ["_timeout", "_nonzero", "_garbage"])
+    def test_every_outage_shape_yields_no_verdict_not_a_rejection(self, monkeypatch, mode):
+        results = self._run_with_cli(monkeypatch, getattr(self, mode))
+        # Not one of them may be a ClassifierResult: a rejection here is a
+        # fabrication, and a "skip/out_of_scope" one is indistinguishable from a
+        # real one downstream.
+        assert results == [None, None, None]
+
+    def test_a_partial_answer_leaves_the_unanswered_ones_unclassified(self, monkeypatch):
+        import subprocess
+
+        from job_sift import classifier
+        from job_sift.schema import JobListing
+
+        # All three take the `full` route (non-boosted employers), so they share
+        # ONE chunk and one set of indices — otherwise "answered index 0" would
+        # mean a different listing in each route's call.
+        listings = [
+            JobListing(
+                source="linkedin",
+                external_id=str(i),
+                employer="Some Startup Ltd",
+                title=t,
+                apply_url=f"https://example.com/{i}",
+                location="Hong Kong",
+            )
+            for i, t in enumerate(
+                [
+                    "Software Engineer (6-month contract)",
+                    "Backend Engineer (Contract)",
+                    "Data Scientist, Part Time",
+                ]
+            )
+        ]
+        assert {classifier._route(l)[1] for l in listings} == {"full"}
+
+        def half(*a, **k):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    [{"i": 0, "prestige": "prestige", "scope": "in_scope", "reason": "yes"}]
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(classifier.subprocess, "run", half)
+        results = classifier.classify_batch(listings)
+        assert results[0] is not None and results[0].surface
+        # The model was asked about 1 and 2 and did not answer. That is not a no.
+        assert results[1] is None and results[2] is None
+
+    def test_the_floor_lane_does_not_rescue_an_unclassified_listing(self, monkeypatch):
+        """Explicitly pinned because the floor lane COULD run without an LLM.
+
+        Deliberately not done: an unclassified listing is held out of the
+        seen-set for retry, so admitting it here would either double-push it or
+        consume it on a lane that never asked the scope question. See
+        `classify_batch`'s docstring.
+        """
+        results = self._run_with_cli(monkeypatch, self._timeout)
+        # Listings 1 and 2 are textbook floor-lane matches — technical title,
+        # Hong Kong, an explicit contract/part-time shape — and would admit if
+        # `floor_reason` were consulted.
+        from job_sift.classifier import floor_reason
+
+        assert floor_reason(self._listings()[1]) is not None
+        assert floor_reason(self._listings()[2]) is not None
+        assert results[1] is None and results[2] is None
+
+    def test_a_heuristic_verdict_still_resolves_during_an_outage(self, monkeypatch):
+        """The outage must not swallow the listings that never needed the LLM."""
+        from job_sift.schema import JobListing
+
+        from job_sift import classifier
+
+        monkeypatch.setattr(classifier.subprocess, "run", self._timeout)
+        free = JobListing(
+            source="cedars",
+            external_id="99",
+            employer="Nobody Ltd",
+            title="Sales Executive",
+            apply_url="https://example.com/99",
+        )
+        results = classifier.classify_batch([free] + self._listings())
+        assert results[0] is not None
+        assert results[0].scope == "out_of_scope"
+        assert results[1:] == [None, None, None]
+
+
+# ---------------------------------------------------------------------------
+# The example config is copy-pasted. Whatever it shows, an operator will run.
+# ---------------------------------------------------------------------------
+
+
+class TestTheExampleProfileDoesNotSuggestABrokenTermList:
+    """`profile.yaml.example` used to show a `technical_terms:` list containing
+    bare `ai` and bare `research assistant`. An operator's first move is to
+    uncomment that line — and running with exactly it re-admits two of the six
+    false positives `_DEFAULT_TECHNICAL_TERMS` spends nine lines explaining were
+    removed. The comment is now a warning; this pins the fact behind it.
+    """
+
+    _LOC = ("hong kong", "remote, worldwide")
+    _WAS_SUGGESTED = ("engineer*", "software", "data scien*", "ai", "research assistant")
+    _NOW_SUGGESTED = ("engineer*", "software", "data scien*", "ai research*", "ml")
+
+    def _cfg(self, terms):
+        from job_sift.profile import _DEFAULT_ENGAGEMENT_TERMS
+
+        return FloorLaneConfig(
+            locations=self._LOC,
+            technical_terms=terms,
+            engagement_terms=_DEFAULT_ENGAGEMENT_TERMS,
+        )
+
+    def _listing(self, title):
+        return JobListing(
+            source="cedars",
+            external_id="1",
+            employer="Anon Ltd",
+            title=title,
+            apply_url="https://example.com/1",
+            location="Hong Kong",
+        )
+
+    @pytest.mark.parametrize(
+        "title",
+        ["Legal Counsel, AI Policy (Contract)", "AI Content Moderator, Contract"],
+    )
+    def test_the_old_suggestion_really_did_admit_them(self, title):
+        assert floor_reason(self._listing(title), self._cfg(self._WAS_SUGGESTED)) is not None
+
+    @pytest.mark.parametrize(
+        "title",
+        ["Legal Counsel, AI Policy (Contract)", "AI Content Moderator, Contract"],
+    )
+    def test_the_new_suggestion_does_not(self, title):
+        assert floor_reason(self._listing(title), self._cfg(self._NOW_SUGGESTED)) is None
+
+    @pytest.mark.parametrize(
+        "title", ["AI Researcher (Part time)", "ML Engineer (6-month contract)"]
+    )
+    def test_and_still_admits_the_genuine_targets(self, title):
+        assert floor_reason(self._listing(title), self._cfg(self._NOW_SUGGESTED)) is not None
+
+    def test_the_example_file_no_longer_offers_the_broken_list(self):
+        from pathlib import Path
+
+        import job_sift
+
+        text = (Path(job_sift.__file__).resolve().parent.parent
+                / "config" / "profile.yaml.example").read_text()
+        assert "[engineer*, software, data scien*, ai, research assistant]" not in text
+        assert "DO NOT COPY THE LINE BELOW" in text
+
+
+class TestTheRescueRuleIsOneDirectional:
+    """Pins the documented false POSITIVE, not just the false negative.
+
+    `_negative_title_no_subject_rescue` decides on position alone, so reversing
+    the word order flips the verdict on the same role. Deliberately not fixed —
+    the pre-positional rule admitted both orderings, so this is never a
+    regression — but it must be written down and it must not drift silently.
+    """
+
+    def _floor(self, title):
+        return floor_reason(
+            JobListing(
+                source="cedars",
+                external_id="1",
+                employer="Anon Ltd",
+                title=title,
+                apply_url="https://example.com/1",
+                location="Hong Kong",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Software Sales Executive (Contract)",
+            "Technology Sales Manager, Part Time",
+            "Engineering Recruitment Consultant (Contract)",
+        ],
+    )
+    def test_a_leading_qualifier_still_admits_a_non_technical_role(self, title):
+        assert self._floor(title) is not None, "documented residual — see the docstring"
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Sales Executive, Software Solutions (Contract)",
+            "Business Development Manager, Software (Contract)",
+        ],
+    )
+    def test_a_trailing_qualifier_is_correctly_blocked(self, title):
+        assert self._floor(title) is None
+
+    def test_the_symmetric_false_negative_is_pinned_too(self):
+        """A genuine software title lost to the same offset rule."""
+        assert self._floor("Analyst Programmer (Contract)") is None

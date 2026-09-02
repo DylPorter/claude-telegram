@@ -53,6 +53,12 @@ def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
     digest reads as a clean "no matches" — indistinguishable from a genuinely
     quiet day. Surfacing the failure turns a silent multi-week blind spot into
     a same-day re-auth.
+
+    NOT ONLY SOURCES ANY MORE. The orchestrator also puts a `"classifier"` entry
+    in this map when the LLM produced no verdict for some listings, because the
+    reader's question is the same one ("what is missing from what I am
+    reading?") and one banner mechanism is easier to trust than two. The key
+    names whatever did not run; it is not required to be a fetch source.
     """
     if not source_errors:
         return None

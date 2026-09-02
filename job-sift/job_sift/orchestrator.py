@@ -19,6 +19,7 @@ from job_sift.dedupe import (
     log_classification,
     mirror_collapsed,
     save_seen,
+    withhold_unclassified,
 )
 from job_sift.errors import SourceAuthError, SourceNotConfiguredError
 from job_sift.open_roles import (
@@ -49,6 +50,10 @@ log = logging.getLogger("job_sift")
 # Sources whose curation already implies prestige — we skip the prestige
 # classifier and just check scope (intern/contract vs FT-perm).
 _AUTO_PRESTIGE_SOURCES: set[str] = {"greenhouse", "lever", "ashby"}
+
+# Concurrent liveness probes allowed at once. Every probe targets linkedin.com,
+# so this is a per-HOST cap, not a throughput knob — see `_liveness_pass`.
+_LIVENESS_MAX_IN_FLIGHT = 2
 
 
 def _setup_logging() -> None:
@@ -213,8 +218,18 @@ def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
         tasks = [
             (role.dedup_key, _probe_for(role.dedup_key)) for role in due
         ]
+        # THROTTLED, unlike the fetch phase. Every task here hits the SAME
+        # host, so starting all ten at once is ten concurrent GETs at
+        # linkedin.com from one IP. That fails safe (429 → UNKNOWN → nothing
+        # retired), but a rate-limited run and a run where every role is still
+        # open then produce the identical register, which is the ambiguity this
+        # codebase exists to delete. Two in flight keeps the answers real, and
+        # the wall-clock budget still bounds the whole pass either way.
         settled, abandoned = run_with_budget(
-            tasks, budget_s, thread_name_prefix="job-sift-liveness"
+            tasks,
+            budget_s,
+            thread_name_prefix="job-sift-liveness",
+            max_in_flight=_LIVENESS_MAX_IN_FLIGHT,
         )
         verdicts: dict[str, str] = {}
         for key, future in settled:
@@ -414,8 +429,23 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     #    once the backlog grew, killing the run before push/state-save.
     surfaced: list[tuple[JobListing, ClassifierResult]] = []
     skipped: list[tuple[JobListing, ClassifierResult]] = []
+    # Listings the classifier never actually judged — a `None` from
+    # classify_batch. They are NOT skipped: skipped means "looked at and
+    # rejected", and scoring an outage as a rejection is the fifty-day CEDARS
+    # bug wearing a different hat. They are surfaced nowhere, logged nowhere as
+    # a verdict, held out of the seen-set, and counted into the ⚠️ line below.
+    unclassified: list[JobListing] = []
     results = classify_batch(new_listings)
     for listing, result in zip(new_listings, results):
+        if result is None:
+            unclassified.append(listing)
+            log.error(
+                "[%s] %s — %s: NO VERDICT (classifier unavailable) — held for the next run",
+                listing.source,
+                listing.employer[:30],
+                listing.title[:40],
+            )
+            continue
         log_classification(listing, result)
         if result.surface:
             surfaced.append((listing, result))
@@ -430,7 +460,32 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             result.scope,
         )
 
-    log.info("%d surfaced, %d skipped", len(surfaced), len(skipped))
+    log.info(
+        "%d surfaced, %d skipped, %d unclassified", len(surfaced), len(skipped), len(unclassified)
+    )
+
+    # The classifier is a stage that can FAIL, and until now only the fetch
+    # stage could say so. Reuse the channel that already renders a ⚠️ bubble in
+    # both the digest and the archive rather than inventing a second one — the
+    # reader's question is identical ("what is missing from what I am reading?")
+    # and one banner mechanism is easier to trust than two.
+    #
+    # Injected HERE, after `source_health.update_health` has already run on the
+    # fetch-phase map above. That ordering is load-bearing: the health counters
+    # track SOURCES, and letting a pseudo-source called "classifier" into them
+    # would invent a staleness record for something that is not a source. If
+    # health computation is ever moved below this point, this has to move with
+    # it or be given its own map.
+    if unclassified:
+        source_errors = dict(source_errors)
+        source_errors["classifier"] = (
+            f"classification unavailable for {len(unclassified)} listing(s)"
+            " — held, and retried on the next run"
+        )
+        log.error(
+            "classifier produced no verdict for %d of %d new listing(s)",
+            len(unclassified), len(new_listings),
+        )
 
     # 4. Roll the persistent register forward BEFORE rendering — the digest
     #    reports standing state ("11 open, 2 closing"), not just today's delta.
@@ -467,6 +522,16 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         #    automatically today (the units carry no Restart= — see
         #    systemd/job-sift.service), but a manual re-run has the same shape,
         #    and this ordering is what makes any future retry safe.
+        # Withhold BEFORE the commit, never after: this is the only moment the
+        # in-memory set and the on-disk set can still be made to disagree in the
+        # safe direction. An id that was never judged must not be recorded as
+        # delivered — see dedupe.withhold_unclassified.
+        withheld = withhold_unclassified(seen_by_source, unclassified, collapsed)
+        if withheld:
+            log.warning(
+                "withheld %d id(s) from the seen-set — no classifier verdict this run",
+                withheld,
+            )
         for source, seen in seen_by_source.items():
             save_seen(source, seen)
 

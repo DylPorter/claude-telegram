@@ -21,7 +21,7 @@ from datetime import date
 
 import pytest
 
-from job_sift.dedupe import collapse_duplicates, mirror_collapsed
+from job_sift.dedupe import collapse_duplicates, mirror_collapsed, withhold_unclassified
 from job_sift.open_roles import OpenRole, collapse_register
 from job_sift.schema import JobListing
 
@@ -290,3 +290,65 @@ class TestMergeOrdering:
         fresh = _role("linkedin:2", last_seen="2026-08-20")
         out = collapse_register([marked, fresh])
         assert out[0].status == "applied"
+
+
+# ---------------------------------------------------------------------------
+# Unwinding a sighting that was banked before anything looked at it.
+#
+# `filter_new` records an id the MOMENT it decides a listing is new — before the
+# classifier has seen it — and the orchestrator commits that set after the push.
+# So a listing the classifier could not judge was still marked delivered and
+# never came back: an outage did not just produce one wrong digest, it ate the
+# backlog. `withhold_unclassified` is the counterpart to holding the verdict as
+# `None`.
+# ---------------------------------------------------------------------------
+
+
+class TestWithholdUnclassified:
+    def test_an_unjudged_id_is_taken_back_out(self):
+        a = _listing("cedars", "1", "A", "Engineer")
+        b = _listing("cedars", "2", "B", "Engineer")
+        seen = {"cedars": {"1", "2"}}
+        assert withhold_unclassified(seen, [b]) == 1
+        assert seen == {"cedars": {"1"}}
+
+    def test_a_judged_id_is_left_alone(self):
+        seen = {"cedars": {"1", "2"}}
+        assert withhold_unclassified(seen, []) == 0
+        assert seen == {"cedars": {"1", "2"}}
+
+    def test_it_only_ever_shrinks_a_set_it_was_given(self):
+        """`save_seen` truncates, so writing a bucket this function invented
+        would delete a source's entire history. A source with no bucket is
+        skipped rather than created."""
+        a = _listing("linkedin", "9", "A", "Engineer")
+        seen: dict = {}
+        assert withhold_unclassified(seen, [a]) == 0
+        assert seen == {}
+
+    def test_a_mirrored_loser_is_unwound_with_its_winner(self):
+        """The subtle half. `mirror_collapsed` runs BEFORE classification and
+        banks each dropped duplicate's id against its winner's sighting. If the
+        winner is then unclassified, pulling only the winner would leave the
+        loser marked delivered for a posting that was never judged OR pushed.
+        The same collapse recurs next run, so dropping both is idempotent."""
+        winner = _listing("linkedin", "100", "IMC", "Software Engineer Intern")
+        loser = _listing("linkedin", "200", "IMC", "Software Engineer Intern")
+        seen = {"linkedin": {"100", "200"}}
+        assert withhold_unclassified(seen, [winner], [(winner, loser)]) == 2
+        assert seen == {"linkedin": set()}
+
+    def test_a_mirrored_loser_survives_a_JUDGED_winner(self):
+        winner = _listing("linkedin", "100", "IMC", "Software Engineer Intern")
+        loser = _listing("linkedin", "200", "IMC", "Software Engineer Intern")
+        other = _listing("linkedin", "300", "X", "Engineer")
+        seen = {"linkedin": {"100", "200", "300"}}
+        assert withhold_unclassified(seen, [other], [(winner, loser)]) == 1
+        assert seen == {"linkedin": {"100", "200"}}
+
+    def test_it_is_idempotent(self):
+        a = _listing("cedars", "1", "A", "Engineer")
+        seen = {"cedars": {"1"}}
+        assert withhold_unclassified(seen, [a]) == 1
+        assert withhold_unclassified(seen, [a]) == 0
+        assert seen == {"cedars": set()}

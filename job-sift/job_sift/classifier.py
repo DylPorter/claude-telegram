@@ -412,6 +412,27 @@ def _negative_title_no_subject_rescue(title: str, cfg: ScopeGuardConfig | None =
     Systems" — qualifier at position 0, negative ("trading") later — still
     rescues. "Sales Executive, Software Solutions" — negative ("sales") at
     position 0, qualifier later — does not.
+
+    THE RULE IS ONE-DIRECTIONAL, AND THE COST IS A FALSE POSITIVE, NOT ONLY A
+    FALSE NEGATIVE. Reverse the word order on the very titles above and they
+    admit again, because position is all this looks at: "Software Sales
+    Executive (Contract)", "Technology Sales Manager, Part Time" and
+    "Engineering Recruitment Consultant (Contract)" all reach the floor lane —
+    verified by execution — while "Sales Executive, Software Solutions
+    (Contract)" and "Business Development Manager, Software (Contract)" do not.
+    Same roles, opposite verdicts, decided by which noun the recruiter put
+    first.
+
+    Left as-is on purpose. The pre-positional rule admitted BOTH orderings, so
+    this is strictly an improvement and never a regression, and the alternative
+    — demanding the qualifier be the head noun — needs real grammar, not offsets.
+    But do not read the paragraph above as a guarantee: it says a leading
+    qualifier is USUALLY the head noun, and "Software Sales Executive" is the
+    counter-example it does not catch.
+
+    The symmetric false NEGATIVE is real too and documented in the same spirit:
+    "Analyst Programmer (Contract)" is a genuine software title that this
+    rejects, negative ("analyst") at position 0 and the qualifier trailing.
     """
     cfg = cfg or scope_guard_config()
     neg = _leftmost_match(title, cfg.negative_titles)
@@ -814,16 +835,36 @@ def _batch_user(listings: list[JobListing]) -> str:
 
 def _batch_llm(
     listings: list[JobListing], base_prompt: str, *, scope_only: bool, timeout: float = 180.0
-) -> list[ClassifierResult]:
-    """One CLI call classifying all `listings`. Returns results aligned to input order."""
+) -> list[ClassifierResult | None]:
+    """One CLI call classifying all `listings`. Results aligned to input order.
+
+    `None` MEANS "NO VERDICT EXISTS FOR THIS LISTING", and that is the whole
+    point of this function's return type. It is not a verdict, not a default,
+    and not a value any caller may render.
+
+    This used to return a real `ClassifierResult` — `skip / out_of_scope /
+    "batch fallback"` — whenever the CLI timed out, exited non-zero or returned
+    something that was not a JSON array. That is a judgement recorded for a
+    call that never happened, and it is the same failure shape that let CEDARS
+    print "Surfaced: none today" for fifty days: one value meaning both
+    "nothing there" and "I could not look". It was worse here than upstream,
+    because the fabricated verdict then travelled: `assign_lane` short-circuits
+    on `scope != "in_scope"`, so a fake `out_of_scope` also vetoed the FLOOR
+    lane — which is pure string matching and needs no LLM at all — and the
+    orchestrator had already written every id into the seen-set, so the
+    listings were consumed forever on the strength of a call that never ran.
+
+    A missing index in an otherwise-valid array is `None` for the same reason:
+    the model was asked about that listing and did not answer, so there is no
+    verdict for it either.
+
+    Callers must handle `None` explicitly. `classify_batch` propagates it; the
+    orchestrator holds those listings back out of the seen-set and surfaces the
+    count as a ⚠️ health line.
+    """
     n = len(listings)
     if n == 0:
         return []
-    default = (
-        ClassifierResult("prestige", "out_of_scope", "scope batch fallback")
-        if scope_only
-        else ClassifierResult("skip", "out_of_scope", "batch fallback")
-    )
     cmd = [
         CLAUDE_BIN,
         "--model", JOB_SIFT_MODEL,
@@ -834,18 +875,24 @@ def _batch_llm(
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        log.warning("batch classifier timed out for %d listings", n)
-        return [default] * n
+        log.error("batch classifier timed out for %d listings — no verdicts", n)
+        return [None] * n
     if proc.returncode != 0:
-        log.warning("batch classifier exited %d: %s", proc.returncode, proc.stderr[:200])
-        return [default] * n
+        log.error(
+            "batch classifier exited %d for %d listings — no verdicts: %s",
+            proc.returncode, n, proc.stderr[:200],
+        )
+        return [None] * n
 
     arr = _extract_json_array(proc.stdout)
     if arr is None:
-        log.warning("batch classifier returned non-array: %s", proc.stdout[:200])
-        return [default] * n
+        log.error(
+            "batch classifier returned a non-array for %d listings — no verdicts: %s",
+            n, proc.stdout[:200],
+        )
+        return [None] * n
 
-    out: list[ClassifierResult] = [default] * n
+    out: list[ClassifierResult | None] = [None] * n
     for obj in arr:
         if not isinstance(obj, dict):
             continue
@@ -857,16 +904,47 @@ def _batch_llm(
             continue
         prestige = "prestige" if scope_only else str(obj.get("prestige", "skip"))
         out[i] = _coerce(prestige, str(obj.get("scope", "out_of_scope")), str(obj.get("reason", "")))
+    missing = sum(1 for r in out if r is None)
+    if missing:
+        log.error(
+            "batch classifier answered %d of %d listings — %d left unclassified",
+            n - missing, n, missing,
+        )
     return out
 
 
-def classify_batch(listings: list[JobListing]) -> list[ClassifierResult]:
+def classify_batch(listings: list[JobListing]) -> list[ClassifierResult | None]:
     """Classify many listings with ≤1 LLM call per chunk per route.
 
     Drop-in replacement for calling _classify_one in a loop. Heuristics resolve
     most listings for free; the rest are batched into the full / scope-only paths.
-    Returns one ClassifierResult per input listing, in order.
+    Returns one entry per input listing, in order — a `ClassifierResult`, or
+    `None` where the LLM call that was supposed to judge it never produced an
+    answer (see `_batch_llm`).
+
+    `None` IS NOT A VERDICT AND THE FLOOR LANE DOES NOT GET TO RUN ON IT. That
+    is a deliberate call, and it is the narrower of the two options.
+
+    The floor lane is pure string matching (`floor_reason`) and needs no LLM, so
+    it *could* be evaluated for an unclassified listing. The reason it is not:
+    the orchestrator holds unclassified listings OUT of the seen-set so the next
+    run retries them. Surfacing one anyway would mean either (a) pushing it now
+    and pushing it again next run when a real verdict arrives, or (b) consuming
+    it now on the strength of a lane that never asked the scope question the
+    `full` route was routed to the LLM to answer. (a) is a duplicate digest,
+    (b) reintroduces exactly what this change deletes — a listing that reads as
+    judged and was not.
+
+    So the invariant is one line long: **a listing is either judged or retried,
+    never both and never neither.** The cost is bounded and visible — a
+    floor-eligible role is delayed by one run, and the digest says how many were
+    held. That is a strictly better trade than a third state nobody can read off
+    the output.
     """
+    # `None` here starts out meaning "not routed yet" and ends up meaning
+    # "no verdict"; the two coincide because every index is written exactly once
+    # by the loops below, and an LLM route writes `None` only when it genuinely
+    # produced no answer.
     results: list[ClassifierResult | None] = [None] * len(listings)
     full_idx: list[int] = []
     scope_idx: list[int] = []
@@ -892,7 +970,8 @@ def classify_batch(listings: list[JobListing]) -> list[ClassifierResult]:
     # Lane assignment is the LAST step, and it runs over every verdict —
     # heuristic and LLM alike — so there is exactly one place that decides which
     # heading a listing renders under. See `assign_lane` for the overlap rule.
+    # A `None` passes straight through: there is no verdict to stamp a lane onto.
     return [
-        assign_lane(listing, r if r is not None else ClassifierResult("skip", "out_of_scope", "unclassified"))
+        None if r is None else assign_lane(listing, r)
         for listing, r in zip(listings, results)
     ]

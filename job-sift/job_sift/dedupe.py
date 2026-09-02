@@ -12,18 +12,24 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from job_sift.config import STATE_DIR
+from job_sift import config
 from job_sift.schema import JobListing
 
 log = logging.getLogger(__name__)
 
 
+# Resolved through the `config` MODULE on every call, never bound at import
+# time. `source_health` already did this and says why: a test that points
+# `config.STATE_DIR` at a tmp_path must actually redirect the writes. With a
+# `from ... import STATE_DIR` binding it silently does not, and the test writes
+# to the live deployment's state instead — which for these two files means
+# re-notifying or losing real listings.
 def _seen_path(source: str) -> Path:
-    return STATE_DIR / f"seen_{source}.json"
+    return config.STATE_DIR / f"seen_{source}.json"
 
 
 def _log_path() -> Path:
-    return STATE_DIR / "classifier_log.jsonl"
+    return config.STATE_DIR / "classifier_log.jsonl"
 
 
 def load_seen(source: str) -> set[str]:
@@ -191,6 +197,58 @@ def filter_new(listings: list[JobListing]) -> tuple[list[JobListing], dict[str, 
         new_listings.append(listing)
         seen.add(listing.external_id)
     return new_listings, seen_by_source
+
+
+def withhold_unclassified(
+    seen_by_source: dict[str, set[str]],
+    unclassified: list[JobListing],
+    collapsed: list[tuple[JobListing, JobListing]] | None = None,
+) -> int:
+    """Take listings that were never actually classified back OUT of the seen-set.
+
+    `filter_new` records an id the moment it decides the listing is new — before
+    anything has looked at it — and the orchestrator commits that set after the
+    push. So a listing the classifier could not judge was still marked delivered
+    and never came back. A classifier outage did not merely produce a wrong
+    digest for one day; it consumed the backlog permanently and silently.
+
+    Withholding is the counterpart to holding the verdict as `None`: the id
+    stays unwritten, the source re-lists it (CEDARS and LinkedIn both re-serve
+    a live posting), and the next run classifies it for real.
+
+    THE COLLAPSE MIRROR HAS TO BE UNWOUND TOO. `mirror_collapsed` runs before
+    classification and writes each dropped duplicate's id against its winner's
+    sighting. If the winner turns out to be unclassified, its own id is pulled
+    here — but the loser's mirrored id would survive, marking a posting
+    delivered that was never judged OR pushed. Since the same collapse recurs
+    next run (it is computed from the fetched rows, not from state), dropping
+    both is both correct and idempotent. `collapsed` is optional only so the
+    function is usable from a caller that never collapsed.
+
+    Mutates `seen_by_source` in place and returns how many ids it removed.
+    Removal is safe in a way ADDING would not be: `save_seen` truncates, so the
+    set written must be the full picture, and this only ever shrinks a set that
+    `filter_new`/`load_seen` already populated from disk.
+    """
+    withheld_keys = {l.dedup_key for l in unclassified}
+    doomed: list[JobListing] = list(unclassified)
+    for winner, loser in collapsed or []:
+        if winner.dedup_key in withheld_keys:
+            doomed.append(loser)
+
+    removed = 0
+    for listing in doomed:
+        bucket = seen_by_source.get(listing.source)
+        if bucket is None:
+            continue
+        if listing.external_id in bucket:
+            bucket.discard(listing.external_id)
+            removed += 1
+            log.info(
+                "withheld %s from the seen-set — no classifier verdict, retry next run",
+                listing.dedup_key,
+            )
+    return removed
 
 
 def log_classification(listing: JobListing, result) -> None:
