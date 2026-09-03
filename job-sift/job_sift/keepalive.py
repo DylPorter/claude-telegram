@@ -51,7 +51,7 @@ from datetime import datetime
 from pathlib import Path
 
 from job_sift import config
-from job_sift.session import ALIVE, DEAD, UNKNOWN, ensure_session
+from job_sift.session import ALIVE, DEAD, UNCONFIGURED, UNKNOWN, ensure_session
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +64,10 @@ _FIELDS = (
     "consecutive_dead",
     "last_unknown",
     "consecutive_unknown",
+    # WHY the last UNKNOWN happened. Persisted so a CHANGE of reason counts as a
+    # state change: a portal that was unreachable and is now unconfigured (or the
+    # reverse) is news, even though `consecutive_unknown` just keeps climbing.
+    "last_unknown_reason",
 )
 
 
@@ -81,6 +85,7 @@ def _blank() -> dict:
         "consecutive_dead": 0,
         "last_unknown": None,
         "consecutive_unknown": 0,
+        "last_unknown_reason": None,
     }
 
 
@@ -140,7 +145,7 @@ def save_state(state: Mapping) -> None:
         raise
 
 
-def next_state(prior: Mapping, verdict: str, *, now: datetime) -> dict:
+def next_state(prior: Mapping, verdict: str, *, now: datetime, reason: str | None = None) -> dict:
     """Fold one probe's verdict into the state. PURE — persists nothing.
 
     Being pure is what makes `--dry-run` honest and what makes the UNKNOWN rule
@@ -170,6 +175,7 @@ def next_state(prior: Mapping, verdict: str, *, now: datetime) -> dict:
         # names that cannot be mistaken for a death.
         out["last_unknown"] = stamp
         out["consecutive_unknown"] += 1
+        out["last_unknown_reason"] = reason
     return out
 
 
@@ -212,15 +218,34 @@ def _log_verdict(prior: Mapping, verdict: str, report) -> None:
                 _as_int(prior.get("consecutive_dead")) + 1,
             )
     else:
-        if _as_int(prior.get("consecutive_unknown")) == 0:
+        # A CHANGE OF REASON is a state change too. Without this, a portal that
+        # was merely unreachable and has since become unconfigured (someone
+        # cleared .env) keeps climbing `consecutive_unknown` and never says the
+        # one thing that would explain it.
+        changed = (
+            _as_int(prior.get("consecutive_unknown")) == 0
+            or prior.get("last_unknown_reason") != report.reason
+        )
+        if not changed:
+            log.debug(
+                "CEDARS session still unverifiable — %s (%d consecutive)",
+                report.reason or "reason unrecorded",
+                _as_int(prior.get("consecutive_unknown")) + 1,
+            )
+        elif report.reason == UNCONFIGURED:
+            # NOT "could not reach the portal". Nothing was reached, because
+            # nothing was requested — and unlike an outage this will never fix
+            # itself, so the message has to name the file to edit.
             log.info(
-                "CEDARS session state unknown — could not reach the portal. "
-                "Stored cookie left alone; nothing recorded against the session."
+                "CEDARS session NOT CHECKED — CEDARS_PORTAL_URL is unset, so no request "
+                "was made. Set it in job-sift/.env. The stored cookie is untouched and "
+                "nothing has been recorded against the session."
             )
         else:
-            log.debug(
-                "CEDARS session still unreachable (%d consecutive)",
-                _as_int(prior.get("consecutive_unknown")) + 1,
+            log.info(
+                "CEDARS session state unknown — could not reach the portal, or it "
+                "answered with something unreadable. Stored cookie left alone; "
+                "nothing recorded against the session."
             )
 
 
@@ -236,7 +261,7 @@ def run_once(*, dry_run: bool = False, first_browser: str | None = None, now: da
     report = ensure_session(first_browser=first_browser, dry_run=dry_run)
     verdict = report.state
     _log_verdict(prior, verdict, report)
-    new_state = next_state(prior, verdict, now=now)
+    new_state = next_state(prior, verdict, now=now, reason=report.reason)
     if not dry_run:
         save_state(new_state)
     return verdict, report, new_state

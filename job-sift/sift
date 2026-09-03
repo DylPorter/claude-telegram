@@ -76,7 +76,7 @@ case "$session_rc" in
     # job_sift.session has already said which of the two it was on stderr.
     echo "→ could not verify the CEDARS session — proceeding with the stored cookie" >&2
     ;;
-  *)
+  1)
     # Loud, not a shrug. We're about to run with a session CEDARS has already
     # rejected — say so plainly rather than letting CEDARS fail downstream with
     # a misleading "expired" message.
@@ -102,6 +102,15 @@ case "$session_rc" in
       echo "════════════════════════════════════════════════════════════"
       echo
     } >&2
+    ;;
+  *)
+    # Anything else is the probe itself failing to run at all: 127 (bad venv,
+    # module gone), 130 (^C), a signal. The comment at the top of this block
+    # says exit 1 AND ONLY exit 1 earns the banner, and a bare `*)` quietly
+    # broke that promise — a missing venv printed "SESSION DEAD" and sent the
+    # operator to re-log-into a portal that was never contacted. Same
+    # overloading, one level further out.
+    echo "→ CEDARS session probe did not run (exit ${session_rc}) — proceeding with the stored cookie" >&2
     ;;
 esac
 

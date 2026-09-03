@@ -28,7 +28,7 @@ import httpx
 import pytest
 
 from job_sift import config, keepalive, session
-from job_sift.session import ALIVE, DEAD, UNKNOWN
+from job_sift.session import ALIVE, DEAD, UNCONFIGURED, UNKNOWN, UNREACHABLE
 
 PORTAL = "https://web2.cedars.hku.hk/jobs/search.php?sort=postdate&order=desc"
 
@@ -587,7 +587,12 @@ def test_a_sustained_outage_emits_nothing_after_the_first_run(
     unreachable" (worth nothing), and this pins the second half.
     """
     keepalive.save_state(
-        {**keepalive._blank(), "state": ALIVE, "consecutive_unknown": 3}
+        {
+            **keepalive._blank(),
+            "state": ALIVE,
+            "consecutive_unknown": 3,
+            "last_unknown_reason": session.UNREACHABLE,
+        }
     )
     with patched_client(exploding(httpx.ConnectError("dns"))):
         verdict, _report, state = keepalive.run_once(now=NOW)
@@ -607,6 +612,96 @@ def test_the_first_run_of_an_outage_says_so_exactly_once(
     records = [r for r in caplog.records if r.levelno >= logging.INFO]
     assert len(records) == 1
     assert records[0].name == keepalive.__name__
+
+
+def test_an_unset_portal_url_says_so_instead_of_blaming_the_network(
+    stored_cookie, no_browsers, production_logging, caplog, monkeypatch
+):
+    """NOTHING WAS REACHED, because nothing was requested.
+
+    Demoting the unset-URL warning to DEBUG (done to keep the journal quiet)
+    left the keep-alive's UNKNOWN line as the only surfacing, and it said "could
+    not reach the portal" — one message meaning both "the network is down" and
+    "you never configured this". Those want opposite things from the reader: one
+    is transient and self-healing, the other will never fix itself.
+    """
+    monkeypatch.setattr(config, "CEDARS_PORTAL_URL", "")
+    keepalive.save_state({**keepalive._blank(), "state": ALIVE})
+    with patched_client(serving(200, _TABLE_PAGE)):
+        verdict, report, state = keepalive.run_once(now=NOW)
+
+    assert verdict == UNKNOWN
+    assert report.reason == UNCONFIGURED
+    assert state["last_unknown_reason"] == UNCONFIGURED
+    # Nothing recorded against the session, exactly as for any other UNKNOWN.
+    assert state["state"] == ALIVE
+    assert state["consecutive_dead"] == 0
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert len(messages) == 1
+    assert "CEDARS_PORTAL_URL" in messages[0]
+    # The claim that would be false: nothing was reached, so do not say we tried.
+    assert "could not reach" not in messages[0]
+
+
+def test_the_unconfigured_and_unreachable_messages_differ(
+    stored_cookie, no_browsers, production_logging, caplog, monkeypatch
+):
+    """The point of the split, asserted directly rather than inferred from two
+    separate tests that could drift into saying the same thing."""
+    def _message_for(portal_url, transport):
+        caplog.clear()
+        monkeypatch.setattr(config, "CEDARS_PORTAL_URL", portal_url)
+        keepalive.save_state({**keepalive._blank(), "state": ALIVE})
+        with patched_client(transport):
+            keepalive.run_once(now=NOW)
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO][0]
+
+    unconfigured = _message_for("", serving(200, _TABLE_PAGE))
+    unreachable = _message_for(PORTAL, exploding(httpx.ConnectError("dns")))
+    assert unconfigured != unreachable
+    assert "could not reach" in unreachable
+    assert "could not reach" not in unconfigured
+
+
+def test_a_change_of_unknown_reason_is_itself_a_state_change(
+    stored_cookie, no_browsers, production_logging, caplog, monkeypatch
+):
+    """A portal that was unreachable and is now unconfigured (someone cleared
+    .env) would otherwise just keep climbing `consecutive_unknown` in silence,
+    never saying the one thing that explains it."""
+    monkeypatch.setattr(config, "CEDARS_PORTAL_URL", "")
+    keepalive.save_state(
+        {
+            **keepalive._blank(),
+            "state": ALIVE,
+            "consecutive_unknown": 9,
+            "last_unknown_reason": UNREACHABLE,
+        }
+    )
+    with patched_client(serving(200, _TABLE_PAGE)):
+        keepalive.run_once(now=NOW)
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert len(messages) == 1
+    assert "CEDARS_PORTAL_URL" in messages[0]
+
+
+def test_a_steady_unconfigured_state_still_goes_quiet(
+    stored_cookie, no_browsers, production_logging, caplog, monkeypatch
+):
+    """Said once, clearly — then silence, like every other steady state."""
+    monkeypatch.setattr(config, "CEDARS_PORTAL_URL", "")
+    keepalive.save_state(
+        {
+            **keepalive._blank(),
+            "state": ALIVE,
+            "consecutive_unknown": 4,
+            "last_unknown_reason": UNCONFIGURED,
+        }
+    )
+    with patched_client(serving(200, _TABLE_PAGE)):
+        keepalive.run_once(now=NOW)
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO] == []
 
 
 def test_httpx_is_silenced_at_production_level_but_not_under_verbose():
@@ -771,7 +866,6 @@ def test_a_failed_cookie_write_does_not_masquerade_as_a_dead_session(
         session, "ensure_session", lambda **kw: (_ for _ in ()).throw(OSError("disk full"))
     )
     assert session.main([]) == session.EXIT_UNKNOWN
-    assert session.EXIT_UNKNOWN != session.EXIT_DEAD
 
 
 def test_the_write_failure_really_does_escape_ensure_session(stored_cookie, monkeypatch):

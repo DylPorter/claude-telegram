@@ -318,3 +318,119 @@ a convention, not a mechanism. Nothing stops the next person adding a `log.info`
 there, and the three steady-state tests would catch it only for paths they
 happen to cover. A lint rule, or routing this module through a logger that
 caps at DEBUG, would make it structural.
+
+---
+
+# Addendum 2 — final review pass
+
+| | commit | tests |
+|---|---|---|
+| worktree `cedars-keepalive` | see below | **535 → 539** |
+| `hku-cedars-scraper` | `d394bda` | **202 → 212** |
+
+## 1. Standalone `ensure_session` — "Never raises" corrected
+
+The claim sat at `cedars/session.py:256` while a test added in the same commit
+asserted `pytest.raises(OSError)` from that exact function. Corrected the way
+job-sift's was: it now names the one escape (the cookie write) and why that case
+alone is not collapsible into a verdict — ALIVE would lie about what the next
+fetch does (the stored cookie is still the dead one), DEAD would lie about what
+we observed. The two remaining "Never raises" in that file, on `check_session`
+and `harden_cookie_file`, are both true and were left.
+
+**Exit codes, measured rather than asserted**, and the README table now says
+this:
+
+| situation | code |
+|---|---|
+| alive / recovered and verified | `0` |
+| CEDARS rejected it, no browser had one | `3` |
+| no cookie file at all | `3` |
+| portal unreachable (DNS, timeout, 5xx) | `4` |
+| portal answered something unparseable | `4` |
+| cookie write failed (disk full) | `1` |
+
+Your two measurements reproduce exactly. The behaviour was already right; only
+the documentation was silent.
+
+## 2. Unconfigured is no longer reported as unreachable
+
+You were right that this was self-inflicted: demoting the unset-URL warning to
+DEBUG left `keepalive`'s UNKNOWN line as the only surfacing, and it blamed the
+network for something the network never saw.
+
+`SessionReport` gains a `reason` — `UNREACHABLE` or `UNCONFIGURED`. Whether the
+portal is *configured* is a local fact knowable without asking anything, so
+`ensure_session` settles it directly rather than threading a reason back out of
+the probe; `check_session`'s return type stays a plain verdict.
+
+**Executed, three consecutive runs each, at production level:**
+
+```
+CEDARS_PORTAL_URL UNSET   exits=[2,2,2]   1 line over 3 runs
+  INFO CEDARS session NOT CHECKED — CEDARS_PORTAL_URL is unset, so no request
+       was made. Set it in job-sift/.env. The stored cookie is untouched and
+       nothing has been recorded against the session.
+
+PORTAL UNREACHABLE        exits=[2,2,2]   1 line over 3 runs
+  INFO CEDARS session state unknown — could not reach the portal, or it
+       answered with something unreadable. Stored cookie left alone; nothing
+       recorded against the session.
+```
+
+Different messages; the unconfigured one no longer claims anything was reached,
+and it names the file to edit, because unlike an outage it will never fix
+itself. Still said once, then silence.
+
+One thing fell out of this that was not asked for: a **change of reason** now
+counts as a state change. Otherwise a portal that was merely unreachable and has
+since become unconfigured (someone cleared `.env`) keeps climbing
+`consecutive_unknown` in silence, never saying the one thing that explains it.
+`last_unknown_reason` is persisted for that.
+
+Mutations: collapse the two messages → **3 failed**; drop reason-change
+detection → **1 failed**; stop classifying the reason → **4 failed**.
+
+## 3. Standalone quieted, same class as I1
+
+`cedars/session.py` now logs only at DEBUG, on the same rule as job-sift: the
+verdict is data, announcing it belongs to the caller, and a library that picks
+its own levels serves the once-a-day reader and drowns the 144-a-day one.
+
+The stdout line needed a different answer. job-sift's state-change rule needs a
+state file, which I deliberately kept out of this repo — and without one the CLI
+genuinely *cannot* tell "changed" from "unchanged", only "is". So rather than
+fake it: **`--quiet` prints nothing and lets the exit code carry the verdict**,
+which is what a scheduler reads anyway. Both README scheduler snippets use it,
+which also retires the `>/dev/null` that would have hidden more than the status
+line. Errors still reach stderr — pinned by
+`test_quiet_still_reports_an_unexpected_failure`, because a cron job that goes
+silent on a real failure is the thing this project exists to prevent.
+
+Steady state under `--quiet`: **0 lines, every state.** Mutations: library logs
+WARNING again → **1 failed**; `--quiet` stops suppressing → **3 failed**;
+`--quiet` swallows a real failure → **2 failed**.
+
+## Minors
+
+* **`sift`'s `*)` narrowed to `1)`.** You were right that the comment
+  overclaimed. Driven across `0/1/2/3/127/130`: only `1` prints the banner; a
+  `127` from a missing venv now says "the probe did not run" rather than sending
+  the operator to re-log-into a portal that was never contacted — the same
+  overloading, one level further out.
+* **Third UNKNOWN cause added** to `summary()`; it enumerated two and there are
+  three, and the unparseable-body one is what `sift`'s own comment block cites.
+* **Tautology removed** — the assert above it was doing the work.
+* **`log.error` → `log.exception`** in `session.main`, matching `keepalive.main`'s
+  own argument that the traceback is the whole value. The standalone's blanket
+  `except Exception` now prints the traceback under `-v`, which previously had no
+  escape at all.
+
+## Standing concerns
+
+Unchanged from the first addendum. The one worth repeating: `session.py`'s
+DEBUG-only rule is a **convention, not a mechanism**, in both repos now. Nothing
+stops the next person adding a `log.info`, and the steady-state tests catch it
+only on paths they happen to cover. A lint rule, or a module-scoped logger
+capped at DEBUG, would make it structural — worth doing if a third caller ever
+appears.

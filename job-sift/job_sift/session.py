@@ -83,6 +83,20 @@ ALIVE = "alive"
 DEAD = "dead"
 UNKNOWN = "unknown"
 
+# WHY a verdict came back UNKNOWN. The state is what decides the ACTION (and for
+# UNKNOWN the action is always "do nothing"), but it is not enough to decide the
+# DIAGNOSIS, and the diagnoses want opposite things from the reader:
+#
+#   UNREACHABLE  transient. The network, the VPN, or the portal. Wait.
+#   UNCONFIGURED permanent. CEDARS_PORTAL_URL is empty. Nothing will ever fix
+#                itself, and "could not reach the portal" is actively wrong —
+#                nothing was reached because nothing was attempted.
+#
+# Collapsing these into one sentence is the same overloading this module spends
+# its whole length avoiding, moved from the action into the diagnosis.
+UNREACHABLE = "unreachable"
+UNCONFIGURED = "unconfigured"
+
 #: An expired PHPSESSID makes the listings request redirect through login.php
 #: and land on one of these with a 200. This is the ONLY positive evidence of
 #: death we accept from the network; everything else routes to UNKNOWN.
@@ -279,6 +293,8 @@ class SessionReport:
     """What `ensure_session` did. Carries no cookie values."""
 
     state: str
+    #: For UNKNOWN: which of the causes above. None for ALIVE / DEAD.
+    reason: str | None = None
     #: The browser a working cookie was pulled from, when one was.
     refreshed_from: str | None = None
     #: Browsers actually consulted. Empty unless the stored cookie was DEAD.
@@ -298,13 +314,18 @@ class SessionReport:
             return f"CEDARS session recovered from {self.refreshed_from}"
         if self.state == ALIVE:
             return "CEDARS session alive (stored cookie still accepted)"
+        if self.reason == UNCONFIGURED:
+            return (
+                "CEDARS session NOT CHECKED — CEDARS_PORTAL_URL is unset, so nothing "
+                "was requested. Set it in job-sift/.env; the stored cookie is untouched."
+            )
         if self.state == UNKNOWN:
-            # Deliberately names both causes. The unreachable-portal case is the
-            # common one, but an unset CEDARS_PORTAL_URL lands here too and now
-            # logs at DEBUG, so this line is the only place it surfaces.
+            # All THREE causes, because the reader's next move differs and an
+            # earlier version named only two. The third — a body we could not
+            # parse — is the one `sift`'s own comment block calls out.
             return (
                 "CEDARS session state UNKNOWN — could not verify it (portal unreachable, "
-                "or CEDARS_PORTAL_URL unset); stored cookie left alone"
+                "or it answered with something unreadable); stored cookie left alone"
             )
         detail = f"; tried {', '.join(self.tried)}" if self.tried else ""
         if self.rejected:
@@ -343,10 +364,14 @@ def ensure_session(
 
     if state == UNKNOWN:
         # THE LOAD-BEARING BRANCH. No refresh, no write, no recorded death.
-        log.debug(
-            "cedars session: could not determine liveness — keeping the stored cookie"
-        )
-        return SessionReport(state=UNKNOWN)
+        #
+        # Whether the portal was CONFIGURED is a local fact, knowable without
+        # asking the network, so it is settled here rather than threaded back
+        # out of the probe. That keeps `check_session`'s return type a plain
+        # verdict while still letting the caller say something true.
+        reason = UNREACHABLE if (url or config.CEDARS_PORTAL_URL) else UNCONFIGURED
+        log.debug("cedars session: could not determine liveness (%s)", reason)
+        return SessionReport(state=UNKNOWN, reason=reason)
 
     # DEAD — and only now do we go looking.
     report = SessionReport(state=DEAD)
@@ -436,7 +461,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # boundary. Exit 2 already means "we cannot vouch for the session";
         # an internal failure belongs there, and `sift` proceeds rather than
         # shouting.
-        log.error("cedars session: unexpected failure (%s: %s)", type(exc).__name__, exc)
+        # `exception`, not `error`: unlike the disciplined happy path this is
+        # genuinely unexpected, and the traceback is the whole value. Same
+        # reasoning as `keepalive.main`.
+        log.exception("cedars session: unexpected failure")
         print(f"CEDARS session check failed unexpectedly: {type(exc).__name__}", file=sys.stderr)
         return EXIT_UNKNOWN
     print(report.summary())

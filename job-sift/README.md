@@ -345,7 +345,13 @@ Exit codes are the contract `./sift` branches on:
 |---|---|---|
 | `0` | alive | nothing |
 | `1` | CEDARS rejected the session **and** no browser had a working one | the loud log-back-in banner |
-| `2` | could not verify it — portal unreachable, `CEDARS_PORTAL_URL` unset, **or the check itself failed** | one quiet stderr line, then carries on |
+| `2` | could not verify it — portal unreachable, unreadable response, `CEDARS_PORTAL_URL` unset, **or the check itself failed** | one quiet stderr line, then carries on |
+| anything else | the probe did not run at all (bad venv → `127`, `^C` → `130`) | says so, then carries on |
+
+An unset `CEDARS_PORTAL_URL` is reported as its own thing — *"NOT CHECKED …
+CEDARS_PORTAL_URL is unset"* — never as "could not reach the portal". Nothing was
+reached because nothing was requested, and unlike an outage it will never fix
+itself, so the message names the file to edit.
 
 `1` means one thing only, and that is load-bearing. `write_cookies` can raise
 (disk full, read-only mount) *after* a session has been verified alive and
