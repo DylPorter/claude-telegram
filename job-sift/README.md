@@ -290,21 +290,108 @@ The budget is the ceiling for both: an httpx timeout does **not** bound a
 `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s fetches against a
 configured 25s timeout), so it has to be enforced from outside the fetch call.
 
-## Cookie refresh (automatic, runs before every scheduled sift)
+## The CEDARS session: keeping it alive, and not clobbering it
 
-The CEDARS portal needs HKU SSO. We avoid handling credentials by pulling the
-session cookie straight out of a browser you're already logged into, via
-`job_sift/refresh_cookie.py` (uses `browser_cookie3`):
+The CEDARS portal needs HKU SSO, and — confirmed 2026-09-03 — the portal
+**intermittently** demands a second factor. An intermittent challenge is worse
+than a constant one for automation: a scripted login would pass every time you
+tested it and fail silently on the runs where the portal decided to ask. So
+credentials stay off the table. We pull the session cookie out of a browser
+you're already logged into (`job_sift/refresh_cookie.py`, via
+`browser_cookie3`), and then work to keep that session from dying.
+
+### Three states, not two
+
+`job_sift/session.py` answers one question — *does CEDARS still accept this
+cookie?* — with **three** answers:
+
+| verdict | what we saw | what we do |
+|---|---|---|
+| `alive` | 200, no bounce, the results table is on the page | nothing |
+| `dead` | redirected to `login.php` / `main.php`, **or** no stored PHPSESSID | walk the browsers |
+| `unknown` | *everything else* — transport error, DNS failure, timeout, 5xx, 403, a WAF interstitial, a CEDARS maintenance page | **nothing at all** |
+
+`unknown` is the load-bearing one. A transport failure is evidence about the
+*network*, not about the *cookie*, and reading one as the other is the same
+silent-zero confusion this codebase spent four branches removing — except in the
+expensive direction: it triggers a browser refresh that overwrites a perfectly
+good stored cookie. On `unknown` nothing is refreshed, nothing is written, and
+no death is recorded.
+
+### Test first, refresh only if genuinely dead
+
+`ensure_session()` runs in that order:
+
+1. stored cookie `alive` → touch nothing
+2. stored cookie `unknown` → touch nothing, say so, carry on
+3. stored cookie `dead` → walk firefox → chrome → chromium → brave, and keep a
+   pulled cookie **only if it then probes `alive`**
+
+That second clause matters as much as the ordering. A successful browser pull
+proves a cookie *exists*, not that CEDARS still honours it. The old `./sift`
+wrapper pulled unconditionally on every run and wrote whatever it found: on
+2026-09-02 it printed *"cookie refreshed from firefox"* and handed the scraper
+an expired session, because Firefox's copy was **older** than the one already on
+disk.
+
+```bash
+.venv/bin/python -m job_sift.session              # probe; refresh only if dead
+.venv/bin/python -m job_sift.session --dry-run    # probe only, write nothing
+```
+
+Exit codes are the contract `./sift` branches on: `0` alive, `1` dead, `2`
+unknown.
+
+### The keep-alive timer (every 10 minutes)
+
+Evidence says the session dies of **inactivity**, not an absolute cap: the
+server is Apache 2.4.6 / PHP 5.4.16, whose `session.gc_maxlifetime` default is
+1440s (24 min) of *idle* time with probabilistic GC; no response ever carries a
+`Set-Cookie`, so the server never re-issues the value; and every observed death
+followed an idle period (one cookie died after ~36h untouched). One request
+every 10 minutes keeps that idle timer permanently reset.
+
+```bash
+.venv/bin/python -m job_sift.keepalive            # one poke
+.venv/bin/python -m job_sift.keepalive --dry-run  # probe only, no cookie, no state
+systemctl --user enable --now job-sift-keepalive.timer
+```
+
+It runs 144×/day, so it is **quiet by construction**: `INFO` only on a state
+change (alive→dead, dead→recovered, first time the portal goes unreachable),
+`DEBUG` otherwise — its journal must not drown the daily run's. The read surface
+is `.data/state/cedars_session.json`, not the journal:
+
+```json
+{"state": "alive", "last_alive": "2026-09-03T15:41:02+08:00",
+ "consecutive_dead": 0, "last_unknown": null, "consecutive_unknown": 0}
+```
+
+An `unknown` verdict moves only `last_unknown` / `consecutive_unknown`; `state`,
+`last_alive` and `consecutive_dead` come out byte-identical to what went in.
+
+If it turns out an absolute cap *does* exist, none of this is wrong — the
+keep-alive extends the session's useful life rather than making it eternal, and
+the daily run's banner still tells you when to log back in.
+
+### Two writers, one file
+
+`.data/cookies/cedars.json` now has two writers — the keep-alive timer and the
+daily run — so every write goes through `session.write_cookies`: tmp file +
+`os.replace` + `chmod 0600`, the same construction as `source_health.save_health`
+and for the same reason. A reader sees the old file or the new one, never a half
+one; a truncated read would look like "no PHPSESSID", which is a `dead` verdict,
+which is the one that reaches for a browser and overwrites things.
+
+### Manual refresh
 
 ```bash
 .venv/bin/python -m job_sift.refresh_cookie            # pull from Firefox (default)
 .venv/bin/python -m job_sift.refresh_cookie --browser chrome
 ```
 
-It writes `.data/cookies/cedars.json`, which the scraper reads each run. The
-`./sift` wrapper (and `job-sift.service`, which runs it daily) calls this
-automatically before scraping, trying Firefox first and falling through
-chrome/chromium/brave.
+Unconditional and unverified by design — this is the "I have just logged in,
+take what is in my browser" escape hatch. The scheduled paths do not use it.
 
 **Firefox is the default, not an arbitrary pick.** Chromium-family browsers
 decrypt their cookie DB via an OS keyring (SecretService/KWallet), which needs
@@ -329,6 +416,10 @@ of how recently the cookie file was refreshed.
 
 # Scheduled (see ../systemd/job-sift.timer)
 systemctl --user start job-sift.timer
+
+# Session keep-alive, every 10 min (see ../systemd/job-sift-keepalive.timer)
+systemctl --user enable --now job-sift-keepalive.timer
+systemctl --user list-timers 'job-sift*'
 ```
 
 ## Phasing

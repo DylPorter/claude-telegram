@@ -33,7 +33,6 @@ the (likely stale) stored cookie. Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from urllib.parse import urlparse
 
@@ -76,13 +75,30 @@ def _load_from_browser(browser: str) -> dict[str, str]:
     return picked
 
 
+def pull_cookies(browser: str) -> dict[str, str]:
+    """Read the wanted CEDARS cookies out of `browser`. WRITES NOTHING.
+
+    Split out of `refresh` so `job_sift.session.ensure_session` can PROBE a
+    pulled cookie before deciding whether it is worth keeping. A successful pull
+    proves a cookie exists; it does not prove CEDARS still honours it, and
+    writing an untested pull over a stored one is how a working session gets
+    replaced by a stale one (observed 2026-09-02).
+    """
+    cookies = _load_from_browser(browser)
+    return {k: cookies[k] for k in _WANTED if k in cookies}
+
+
 def refresh(browser: str = "firefox") -> int:
     """Pull CEDARS session cookies from `browser` and write cedars.json.
 
     Returns a process exit code: 0 on success, 1 if not logged in.
+
+    UNCONDITIONAL AND UNVERIFIED, by design — this is the manual escape hatch
+    ("I have just logged in, take what is in my browser"). The scheduled paths
+    do NOT use it: `sift` and the keep-alive both go through
+    `job_sift.session.ensure_session`, which tests before it overwrites.
     """
-    cookies = _load_from_browser(browser)
-    present = {k: cookies[k] for k in _WANTED if k in cookies}
+    present = pull_cookies(browser)
 
     if "PHPSESSID" not in present:
         print(
@@ -93,8 +109,10 @@ def refresh(browser: str = "firefox") -> int:
         )
         return 1
 
-    CEDARS_COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CEDARS_COOKIES_PATH.write_text(json.dumps(present, indent=2))
+    # Atomic, because the keep-alive timer may be writing this same file.
+    from job_sift.session import write_cookies
+
+    write_cookies(present)
     print(f"wrote {len(present)} cookie(s) {list(present)} → {CEDARS_COOKIES_PATH}")
     return 0
 

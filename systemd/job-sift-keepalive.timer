@@ -1,0 +1,27 @@
+[Unit]
+Description=Poke the CEDARS session every 10 minutes so it does not idle out
+
+[Timer]
+# Every 10 minutes, measured from the END of the last run rather than on a
+# wall-clock grid — what CEDARS is timing is IDLE time, so what matters is the
+# gap between requests, not their alignment to the hour.
+#
+# WHY TEN. The server is PHP 5.4.16, whose session.gc_maxlifetime default is
+# 1440 seconds (24 minutes) of inactivity, garbage-collected probabilistically.
+# Ten minutes sits comfortably inside that with room for one missed run, and
+# costs 144 requests a day — a rounding error against a portal that serves a
+# 631-row search page to every logged-in student.
+OnUnitActiveSec=10min
+# Start poking shortly after boot rather than waiting a full period; a laptop
+# that has just woken is exactly when the session has been idle longest.
+OnBootSec=2min
+# NO Persistent=true, unlike job-sift.timer. A missed keep-alive cannot be
+# caught up — the point of the request is WHEN it happens, and firing a burst of
+# them on resume would neither un-expire a session that already lapsed nor tell
+# us anything a single poke would not.
+AccuracySec=1min
+RandomizedDelaySec=30
+Unit=job-sift-keepalive.service
+
+[Install]
+WantedBy=timers.target

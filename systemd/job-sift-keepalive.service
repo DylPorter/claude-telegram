@@ -1,0 +1,44 @@
+[Unit]
+Description=job-sift CEDARS keep-alive — one cheap request so the PHPSESSID does not idle out
+Documentation=file:%h/Documents/Programming/claude-telegram/job-sift/job_sift/keepalive.py
+After=network-online.target
+Wants=network-online.target
+# Deliberately NOT Requires=claude-telegram.service. This unit pushes nothing
+# and writes nothing the bot reads; coupling it to the bot would only mean the
+# session dies whenever the bot is down.
+
+# DELIBERATELY no Restart / RestartSec / StartLimit* directives, for the same
+# reasons spelled out at length in job-sift.service — read that comment before
+# re-adding them here. Two of the three arguments apply verbatim, and this unit
+# adds a third of its own:
+#
+#  * The 10-minute timer IS the retry. A poke that fails has a replacement
+#    scheduled 10 minutes out; nothing is lost by waiting for it, and the
+#    session's idle window is 24 minutes.
+#  * A restart cannot fire for the failure it would be added for. An
+#    unreachable portal exits 2, and the whole design of this branch is that
+#    exit 2 is NOT an error worth acting on — retrying it faster just multiplies
+#    requests at a server that is already not answering.
+#  * A restart loop against an SSO-protected portal with a cookie it has already
+#    rejected is indistinguishable from credential stuffing. One request per ten
+#    minutes is a heartbeat; six retries in ninety seconds is a pattern someone
+#    blocks.
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/job-sift
+# Runs the module directly rather than through the `sift` wrapper: this must
+# NOT scrape, classify, push or write the vault — it is one GET and a state
+# file. The browser walk it may do on a dead session is Firefox-first, which is
+# the only family readable without an unlocked keyring (see refresh_cookie).
+ExecStart=%h/Documents/Programming/claude-telegram/job-sift/.venv/bin/python -m job_sift.keepalive
+StandardOutput=journal
+StandardError=journal
+# Well above the 20s probe timeout in job_sift.session.PROBE_TIMEOUT_S, with
+# room for a browser walk (4 cookie-store reads plus up to 4 more probes) on the
+# runs where the session has actually died. Still far short of the 10-minute
+# period, so a hung run can never overlap its successor.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
