@@ -189,11 +189,22 @@ def _log_verdict(prior: Mapping, verdict: str, report) -> None:
             log.debug("CEDARS session still alive")
     elif verdict == DEAD:
         if was != DEAD:
+            # `rejected` is called out separately because it is a different
+            # problem with a different fix: a browser that HAS a CEDARS cookie
+            # the portal refuses means the browser's own login has lapsed, not
+            # that no cookie could be found. `ensure_session` logs neither at
+            # INFO any more, so this line is where they surface.
+            stale = (
+                f" {', '.join(report.rejected)} had a cookie CEDARS refused."
+                if report.rejected
+                else ""
+            )
             log.info(
-                "CEDARS session is DEAD and no browser had a working one (tried: %s). "
+                "CEDARS session is DEAD and no browser had a working one (tried: %s).%s "
                 "Log into https://web2.cedars.hku.hk/jobs/ in Firefox — the daily "
                 "sift will keep running the other sources meanwhile.",
                 ", ".join(report.tried) or "none",
+                stale,
             )
         else:
             log.debug(
@@ -231,6 +242,46 @@ def run_once(*, dry_run: bool = False, first_browser: str | None = None, now: da
     return verdict, report, new_state
 
 
+#: Third-party loggers that are chatty at INFO. httpx emits one line PER
+#: REQUEST carrying the full URL; httpcore is worse at DEBUG.
+_NOISY_LIBRARIES = ("httpx", "httpcore")
+
+
+def configure_logging(*, verbose: bool) -> None:
+    """Set up logging for a keep-alive run. Extracted so a test can assert on it.
+
+    TWO THINGS HAPPEN HERE, and both were bugs before they were features.
+
+    1. THE ROOT LEVEL IS SET EXPLICITLY, not left to `basicConfig`.
+       `basicConfig` is a NO-OP when the root logger already has a handler —
+       which is true under pytest, under an embedding host, and under anything
+       that configured logging first. So `-v` silently did nothing in exactly
+       the situations where you would reach for it, and a test could not
+       observe the real thresholds at all.
+
+    2. THE NOISY LIBRARIES ARE PINNED TO WARNING unless `-v`.
+       Our own code is disciplined about staying quiet (see `session.py`'s
+       module docstring), but a third-party logger under the root logger is not,
+       and `level=INFO` hands it the same threshold. httpx alone is one line per
+       probe: 144 a day on the happy path, and a steady dead session multiplies
+       that by the browser walk — measured at 15 lines a run, ~2160 a day. That
+       drowns the daily sift's journal, which is the thing this unit shares.
+
+       Set on the LOGGER, not on a handler, so the record is never constructed —
+       which is also what lets a test see production's real output by just
+       reading `caplog.records`.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    logging.getLogger().setLevel(level)
+    for name in _NOISY_LIBRARIES:
+        logging.getLogger(name).setLevel(logging.NOTSET if verbose else logging.WARNING)
+
+
 EXIT_ALIVE = 0
 EXIT_DEAD = 1
 EXIT_UNKNOWN = 2
@@ -248,16 +299,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging to stderr")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        # WARNING would hide the state changes this exists to announce; DEBUG
-        # would emit 144 lines a day. INFO plus a strict state-change rule in
-        # `_log_verdict` is what keeps the journal readable.
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    configure_logging(verbose=args.verbose)
 
-    verdict, _report, _state = run_once(dry_run=args.dry_run, first_browser=args.browser)
+    try:
+        verdict, _report, _state = run_once(dry_run=args.dry_run, first_browser=args.browser)
+    except Exception:  # noqa: BLE001
+        # Same reasoning as `session.main`: exit 1 means "the session is dead",
+        # and an unexpected internal failure is not that. `exception` rather
+        # than `error` because unlike the 144-runs-a-day happy path, this is
+        # genuinely unexpected and the traceback is the whole value.
+        log.exception("keep-alive failed unexpectedly")
+        return EXIT_UNKNOWN
     return {ALIVE: EXIT_ALIVE, DEAD: EXIT_DEAD}.get(verdict, EXIT_UNKNOWN)
 
 

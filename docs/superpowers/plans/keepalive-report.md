@@ -186,3 +186,135 @@ file, mode `0600`, and a failed write leaves the old file intact.
    example a new reader copies. Fixed with a shared parent parser using an
    `argparse.SUPPRESS` default, so `-v` works on either side of the subcommand
    without the subparser clobbering a top-level one back to `False`.
+
+---
+
+# Addendum — review fixes
+
+All four Importants and all five Minors are fixed, and **each fix was confirmed
+by deleting it and watching a test fail**. Three of the four Importants were
+tests that did not test what they claimed; the report's earlier claim that
+quietness was "pinned by a test" was false, and is retracted here.
+
+| | commit | tests |
+|---|---|---|
+| worktree `cedars-keepalive` | see below | **524 → 535** |
+| `hku-cedars-scraper` | `b6d7c01` | **195 → 202** |
+
+## IMPORTANT 1 — the happy path is now actually quiet
+
+Two rules, because one was not enough:
+
+* **`session.py` logs only at DEBUG.** It has two callers with opposite noise
+  budgets — `sift` once a day, `keepalive` 144 times — and a library that picks
+  its own levels serves the first and drowns the second. The verdict is now
+  *data*; announcing it is the caller's job.
+* **`configure_logging` pins `httpx` and `httpcore` to WARNING** unless `-v`,
+  and sets the root level **explicitly**. `basicConfig` is a no-op once the root
+  logger has a handler, so `-v` had been silently doing nothing under pytest and
+  under any embedding host — a latent bug found while making this testable.
+
+Measured after, at production level, against the live portal: **0 lines.**
+
+Mutations, each run separately against the full suite:
+
+| mutation | result |
+|---|---|
+| drop the `httpx`/`httpcore` pinning | **4 failed** |
+| `UNKNOWN` branch logs INFO again | **2 failed** |
+| rejected-pull logs INFO again (the 15-line case) | **1 failed** |
+| exhausted-walk summary logs WARNING again | **1 failed** |
+
+The second one initially **survived** — the two rewritten tests covered steady
+*alive* and steady *dead* but not a steady *outage*, which is a third steady
+state and the one a weekend of downtime hits (432 identical lines). Added
+`test_a_sustained_outage_emits_nothing_after_the_first_run` plus its converse,
+`test_the_first_run_of_an_outage_says_so_exactly_once`, and it now fails.
+
+## IMPORTANT 2 — the quiet tests now exercise the code that logs
+
+Both previously patched `ensure_session` away. They now drive the real
+`ensure_session` → `check_session` → real `httpx.Client`, with only the socket
+layer mocked, and install production's real thresholds **on the loggers** — a
+record below its logger's level is never constructed, so `caplog.records` holds
+exactly what would reach the journal, httpx included. Each also asserts the
+expensive path really ran (`report.tried == all four browsers`,
+`report.rejected == all four`), so it cannot pass by doing nothing.
+
+## IMPORTANT 3 — `dry_run` is pinned in both repos
+
+The old test served the table page to *every* request, so the stored cookie
+probed alive and the function returned at step 1. The transport now
+distinguishes the two cookies (stored bounces, browser's is accepted), and the
+test asserts `refreshed_from == "firefox"` and `tried == ["firefox"]` to prove
+the branch was entered before asserting nothing was written.
+
+Deleting `if not dry_run:` → **job-sift 1 failed**, **standalone 1 failed**.
+Previously: 524/524 and 195/195 green.
+
+## IMPORTANT 4 — exit 1 means one thing again
+
+`session.main` catches any unexpected exception and returns **2**, never 1, with
+the reasoning written at the catch site: exit 1 is what `sift` answers with the
+log-back-in banner, and a failed cookie write happens *after* a session has been
+verified alive. `sift`'s comment block and its exit-code table were updated to
+match. `classify_response`'s BeautifulSoup parse is also wrapped — a parser that
+chokes has said only that it could not read the page, which is UNKNOWN by
+definition. `ensure_session`'s "Never raises" docstring is corrected to state
+exactly what can still escape (the cookie write) and why that specific case is
+*not* collapsible into a verdict: ALIVE would lie about what the next fetch does,
+DEAD would lie about what we observed.
+
+| mutation | result |
+|---|---|
+| map internal failure to `EXIT_DEAD` | **1 failed** |
+| remove the `try/except` entirely | **1 failed** |
+| standalone: route to `EXIT_AUTH` (3) instead of 1 | **1 failed** |
+
+The standalone had no `except Exception` at all, so its documented exit 1
+("unexpected internal error") was unreachable and a traceback escaped instead.
+It is now real — and deliberately not 3, which would send the reader to log in
+again to fix a full disk.
+
+## Minors
+
+* **Cookie mode re-asserted on every read** (`harden_cookie_file`, both repos).
+  The write path only runs when a cookie is *replaced*, and the alive path
+  replaces nothing, so a file that arrived at 0644 would stay world-readable for
+  the life of the session. Logs INFO when it actually changes something — a
+  one-shot state change — and is silent thereafter. *Note:* the live file read
+  0644 at review time but 0600 by the time I re-checked, so something rewrote it
+  in between; the on-read assertion is what makes the mode hold regardless of
+  who wrote it last. Mutation: drop it → **2 failed**.
+* **`./sift --dry-run` now forwards to the probe.** `"$@"` reached only the
+  orchestrator, so a dry run could rewrite the cookie file. Verified by
+  execution across three argument shapes.
+* **`--no-refresh` no longer prints an empty list.** `describe()` returns "no
+  browser was consulted (recovery disabled)" instead of a bare "session DEAD",
+  and the `in any of: ` warning is suppressed when nothing was consulted — with
+  a companion test proving a *genuine* exhausted walk still names all four
+  browsers. Mutation: revert → **1 failed**.
+* **Fragile log-substring assertions replaced** with structural ones: exactly
+  one INFO record, from `keepalive`'s own logger, naming the browser and the
+  streak it ended. A rephrase no longer breaks them; a lost state-change rule
+  still does.
+* **Timer comment added** noting the two timers free-run independently and
+  collide roughly one day in ten, why that is harmless (atomic write, both
+  processes write only a cookie they verified), and that it is deliberately not
+  coordinated.
+
+## Not changed, as directed
+
+The race (correctly assessed harmless), `refresh_cookie.refresh()` writing
+unverified (deliberate, documented, and no scheduled path calls it), and the
+fixtures.
+
+## Standing concerns
+
+Concerns 1–3 and 5 from the original report are unchanged. **Concern 4 (the
+race) is downgraded** — it is noted in the timer file now, so a future reader
+will not have to rediscover it. One new item: `session.py`'s DEBUG-only rule is
+a convention, not a mechanism. Nothing stops the next person adding a `log.info`
+there, and the three steady-state tests would catch it only for paths they
+happen to cover. A lint rule, or routing this module through a logger that
+caps at DEBUG, would make it structural.

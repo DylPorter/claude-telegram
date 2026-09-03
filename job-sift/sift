@@ -37,13 +37,31 @@ BROWSER="${BROWSER:-firefox}"
 #
 #   0  alive    — stored cookie accepted (or a browser's was, and it was tested
 #                 before being written)
-#   1  dead     — CEDARS bounced us AND no browser had a working session
-#   2  unknown  — we could not reach the portal at all. NOT evidence the
-#                 session is dead. Nothing was refreshed, nothing overwritten;
-#                 we proceed with what we have and let CEDARS speak for itself.
+#   1  dead     — CEDARS bounced us AND no browser had a working session.
+#                 THIS AND ONLY THIS earns the banner.
+#   2  unclear  — we could not reach the portal, OR the check itself broke
+#                 (a failed cookie write, an unparseable body). NOT evidence
+#                 the session is dead. Nothing was refreshed, nothing
+#                 overwritten; we proceed and let CEDARS speak for itself.
 #
+# The 1-vs-2 split is load-bearing and was nearly lost. `write_cookies` can
+# raise (disk full, read-only mount) AFTER a session has been verified alive and
+# recovered. Left uncaught, Python exits 1, and this script would print "SESSION
+# DEAD — CEDARS WILL FAIL THIS RUN" about a session that was alive — one exit
+# code carrying two incompatible meanings, which is the exact overloading four
+# branches were spent removing, reappearing at the process boundary. So
+# job_sift.session maps any unexpected failure to 2, not 1.
+#
+# --dry-run is forwarded, because "$@" below reaches only the orchestrator: a
+# dry run that silently rewrote the cookie file would contradict the one thing
+# --dry-run promises.
+probe_args=(--browser "$BROWSER")
+for a in "$@"; do
+  [ "$a" = "--dry-run" ] && probe_args+=(--dry-run)
+done
+
 set +e
-"$PY" -m job_sift.session --browser "$BROWSER"
+"$PY" -m job_sift.session "${probe_args[@]}"
 session_rc=$?
 set -e
 
@@ -52,10 +70,11 @@ case "$session_rc" in
     : # already printed its own one-line summary
     ;;
   2)
-    # Deliberately NOT the loud banner. A network blip is not a call to action,
-    # and dressing one up as "your session is dead" is exactly the confusion
-    # this whole branch exists to remove.
-    echo "→ could not verify the CEDARS session (portal unreachable) — proceeding with the stored cookie" >&2
+    # Deliberately NOT the loud banner. Neither an unreachable portal nor a
+    # broken check is a call to action, and dressing either up as "your session
+    # is dead" is exactly the confusion this whole branch exists to remove.
+    # job_sift.session has already said which of the two it was on stderr.
+    echo "→ could not verify the CEDARS session — proceeding with the stored cookie" >&2
     ;;
   *)
     # Loud, not a shrug. We're about to run with a session CEDARS has already

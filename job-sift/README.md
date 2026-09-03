@@ -339,8 +339,19 @@ disk.
 .venv/bin/python -m job_sift.session --dry-run    # probe only, write nothing
 ```
 
-Exit codes are the contract `./sift` branches on: `0` alive, `1` dead, `2`
-unknown.
+Exit codes are the contract `./sift` branches on:
+
+| code | meaning | what `sift` does |
+|---|---|---|
+| `0` | alive | nothing |
+| `1` | CEDARS rejected the session **and** no browser had a working one | the loud log-back-in banner |
+| `2` | could not verify it — portal unreachable, `CEDARS_PORTAL_URL` unset, **or the check itself failed** | one quiet stderr line, then carries on |
+
+`1` means one thing only, and that is load-bearing. `write_cookies` can raise
+(disk full, read-only mount) *after* a session has been verified alive and
+recovered; left uncaught that exits 1, and `sift` would print "SESSION DEAD"
+about a session that was fine. So any unexpected failure maps to `2` — the code
+that already means "we cannot vouch for this" — never to `1`.
 
 ### The keep-alive timer (every 10 minutes)
 
@@ -357,10 +368,21 @@ every 10 minutes keeps that idle timer permanently reset.
 systemctl --user enable --now job-sift-keepalive.timer
 ```
 
-It runs 144×/day, so it is **quiet by construction**: `INFO` only on a state
-change (alive→dead, dead→recovered, first time the portal goes unreachable),
-`DEBUG` otherwise — its journal must not drown the daily run's. The read surface
-is `.data/state/cedars_session.json`, not the journal:
+It runs 144×/day, so it is **quiet by construction** — a steady alive, a steady
+dead, and a sustained outage all emit *nothing*. Two rules get it there:
+
+* `job_sift/session.py` logs **only at DEBUG**. It has two callers with opposite
+  noise budgets, and a library that picks its own levels serves the once-a-day
+  one and drowns the 144-a-day one. The verdict is data; announcing it is the
+  caller's job.
+* `keepalive` owns the announcement, `INFO` **only on a state change**
+  (alive→dead, dead→recovered, the first run of an outage), and pins `httpx` and
+  `httpcore` to `WARNING`. httpx logs one INFO line per request carrying the full
+  URL; at `basicConfig(level=INFO)` that alone is 144 lines a day, and a dead
+  session whose browsers hold a stale cookie measured **15 lines per run, ~2160
+  a day**. `-v` restores all of it.
+
+The read surface is `.data/state/cedars_session.json`, not the journal:
 
 ```json
 {"state": "alive", "last_alive": "2026-09-03T15:41:02+08:00",
@@ -379,7 +401,12 @@ the daily run's banner still tells you when to log back in.
 `.data/cookies/cedars.json` now has two writers — the keep-alive timer and the
 daily run — so every write goes through `session.write_cookies`: tmp file +
 `os.replace` + `chmod 0600`, the same construction as `source_health.save_health`
-and for the same reason. A reader sees the old file or the new one, never a half
+and for the same reason.
+
+The mode is *also* asserted on every **read** (`session.harden_cookie_file`),
+because the write path only runs when a cookie is replaced and the whole point of
+this design is that the alive path replaces nothing — a file that arrived at 0644
+would otherwise sit there world-readable indefinitely, holding a live credential. A reader sees the old file or the new one, never a half
 one; a truncated read would look like "no PHPSESSID", which is a `dead` verdict,
 which is the one that reaches for a browser and overwrites things.
 

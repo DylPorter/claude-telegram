@@ -44,6 +44,20 @@ timestamp.
 
 NO COOKIE VALUE IS EVER LOGGED, PRINTED, OR RETURNED from this module. Reports
 carry cookie names and character counts only.
+
+EVERYTHING HERE LOGS AT DEBUG, deliberately. This module has two callers with
+opposite noise budgets: `sift` runs it once a day and wants to be told things,
+while `keepalive` runs it 144 times a day and must be silent unless something
+CHANGED. A library that decides its own log levels serves the first caller and
+drowns the second — and the drowning is not hypothetical: at INFO, a dead
+session whose browsers hold a stale cookie emitted fifteen lines a run, about
+2160 a day, on top of httpx's own request line per probe.
+
+So the verdict is DATA (`SessionReport`), and announcing it is the CALLER's job:
+`keepalive._log_verdict` owns the INFO-on-state-change rule, and `main` prints
+one summary line to stdout for the interactive path. The single exception is
+`harden_cookie_file`, which logs INFO when it actually changes a file mode —
+that is a state change, and it can only fire once.
 """
 
 from __future__ import annotations
@@ -145,8 +159,12 @@ def check_session(
 
     target = url or config.CEDARS_PORTAL_URL
     if not target:
-        # Unconfigured is not a verdict on the cookie.
-        log.warning("cedars session: CEDARS_PORTAL_URL is not set — cannot probe")
+        # Unconfigured is not a verdict on the cookie. DEBUG rather than
+        # WARNING for the same reason as everything else in this module: a
+        # static misconfiguration would otherwise emit 144 identical warnings a
+        # day, which is precisely the drowning this design is trying to avoid.
+        # `SessionReport.summary()` names this cause on the interactive path.
+        log.debug("cedars session: CEDARS_PORTAL_URL is not set — cannot probe")
         return UNKNOWN
 
     try:
@@ -162,9 +180,47 @@ def check_session(
         log.debug("cedars session: probe could not reach the portal (%s)", type(exc).__name__)
         return UNKNOWN
 
-    verdict = classify_response(resp.status_code, resp.url.path, resp.text)
+    try:
+        verdict = classify_response(resp.status_code, resp.url.path, resp.text)
+    except Exception as exc:  # noqa: BLE001 — an unparseable body is UNKNOWN
+        # `classify_response` parses with BeautifulSoup, and a parser that
+        # chokes on a malformed body has told us exactly one thing: it could not
+        # read the page. That is the definition of UNKNOWN. Letting it escape
+        # would instead crash the process, and a crashed process is an exit code
+        # the caller has to interpret — which is how "could not look" got
+        # confused with "session dead" in the first place.
+        log.debug("cedars session: could not parse the probe response (%s)", type(exc).__name__)
+        return UNKNOWN
     log.debug("cedars session: probe -> %s (HTTP %s)", verdict, resp.status_code)
     return verdict
+
+
+def harden_cookie_file() -> None:
+    """Force the cookie file to 0600 if it is not already. Never raises.
+
+    `write_cookies` sets the mode, but it only runs when a cookie is REWRITTEN —
+    and the whole point of this branch is that the alive path rewrites nothing.
+    A file created before this change (or by hand, or by an editor's save) stays
+    at whatever mode it had, indefinitely, while holding a live credential. The
+    live file was found at 0644 — world-readable on a shared machine.
+
+    So the mode is asserted on every READ instead, which is the one event that
+    happens on every single run. Cheap: an fstat and, almost always, nothing.
+    """
+    path = config.CEDARS_COOKIES_PATH
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode != 0o600:
+            path.chmod(0o600)
+            log.info(
+                "cedars session: tightened %s from %o to 600 — it holds a live credential",
+                path.name,
+                mode,
+            )
+    except OSError:
+        # A missing or unreadable file is the caller's problem, not this
+        # function's; it resolves to a DEAD verdict a moment later.
+        pass
 
 
 def check_stored_session(
@@ -173,6 +229,7 @@ def check_stored_session(
     transport: httpx.BaseTransport | None = None,
 ) -> str:
     """`check_session` against whatever is in `CEDARS_COOKIES_PATH`."""
+    harden_cookie_file()
     return check_session(cedars.load_stored_cookies(), url=url, transport=transport)
 
 
@@ -242,7 +299,13 @@ class SessionReport:
         if self.state == ALIVE:
             return "CEDARS session alive (stored cookie still accepted)"
         if self.state == UNKNOWN:
-            return "CEDARS session state UNKNOWN — could not reach the portal; stored cookie left alone"
+            # Deliberately names both causes. The unreachable-portal case is the
+            # common one, but an unset CEDARS_PORTAL_URL lands here too and now
+            # logs at DEBUG, so this line is the only place it surfaces.
+            return (
+                "CEDARS session state UNKNOWN — could not verify it (portal unreachable, "
+                "or CEDARS_PORTAL_URL unset); stored cookie left alone"
+            )
         detail = f"; tried {', '.join(self.tried)}" if self.tried else ""
         if self.rejected:
             detail += f"; pulled a cookie from {', '.join(self.rejected)} but it was not accepted"
@@ -258,9 +321,19 @@ def ensure_session(
 ) -> SessionReport:
     """Test the stored cookie FIRST; reach for a browser only if it is truly dead.
 
-    Never raises: a caller's next move is the same whether this failed or the
-    session is simply gone, and the orchestrator must still run the other
-    sources either way.
+    NO FAILURE TO *DETERMINE* THE VERDICT ESCAPES. A transport error, a timeout,
+    a 5xx, an unparseable body — all resolve to UNKNOWN, because the caller's
+    next move is the same whether the probe failed or the session is gone, and
+    the orchestrator must still run the other sources either way.
+
+    WHAT CAN STILL RAISE, and why it is not collapsed into a verdict: writing
+    the recovered cookie. If `write_cookies` fails (disk full, read-only mount,
+    a permissions change), we have verified a live session and then failed to
+    keep it. Returning ALIVE would be a lie about what the next fetch will do —
+    the stored cookie is still the dead one — and returning DEAD would be a lie
+    about what we observed. Neither verdict is true, so the exception is left to
+    propagate and `main` maps it to its own exit code. This is the one case
+    where "I could not tell you" is genuinely a third thing.
     """
     state = check_stored_session(url=url, transport=transport)
 
@@ -270,9 +343,8 @@ def ensure_session(
 
     if state == UNKNOWN:
         # THE LOAD-BEARING BRANCH. No refresh, no write, no recorded death.
-        log.info(
-            "cedars session: could not determine liveness (transport/portal problem) "
-            "— keeping the stored cookie and proceeding"
+        log.debug(
+            "cedars session: could not determine liveness — keeping the stored cookie"
         )
         return SessionReport(state=UNKNOWN)
 
@@ -292,7 +364,7 @@ def ensure_session(
         # A pull proves a cookie EXISTS. Only a probe proves CEDARS takes it.
         verdict = check_session(pulled, url=url, transport=transport)
         if verdict != ALIVE:
-            log.info(
+            log.debug(
                 "cedars session: %s had a session cookie (%s) but CEDARS answered %s "
                 "— NOT writing it over the stored one",
                 browser,
@@ -305,7 +377,7 @@ def ensure_session(
         if not dry_run:
             write_cookies(pulled)
             report.wrote_cookie = True
-        log.info(
+        log.debug(
             "cedars session: recovered from %s (%s)%s",
             browser,
             describe_cookies(pulled),
@@ -315,7 +387,7 @@ def ensure_session(
         report.refreshed_from = browser
         return report
 
-    log.warning("cedars session: no live session in any of: %s", ", ".join(report.tried))
+    log.debug("cedars session: no live session in any of: %s", ", ".join(report.tried) or "no browser")
     return report
 
 
@@ -328,6 +400,7 @@ def cedars_pull(browser: str) -> dict[str, str]:
 
 EXIT_ALIVE = 0
 EXIT_DEAD = 1
+#: Also the code for an unexpected internal failure — see `main`.
 EXIT_UNKNOWN = 2
 
 
@@ -347,13 +420,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging to stderr")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    from job_sift.keepalive import configure_logging
 
-    report = ensure_session(first_browser=args.browser, dry_run=args.dry_run)
+    configure_logging(verbose=args.verbose)
+
+    try:
+        report = ensure_session(first_browser=args.browser, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001
+        # NOT exit 1. Exit 1 means "CEDARS rejected the session", and `sift`
+        # answers it with a banner telling the operator to go log in again. An
+        # OSError from `write_cookies` would then print "SESSION DEAD" about a
+        # session we had just verified was ALIVE and merely failed to persist —
+        # one exit code carrying two incompatible meanings, which is the exact
+        # overloading this branch exists to remove, reappearing at the process
+        # boundary. Exit 2 already means "we cannot vouch for the session";
+        # an internal failure belongs there, and `sift` proceeds rather than
+        # shouting.
+        log.error("cedars session: unexpected failure (%s: %s)", type(exc).__name__, exc)
+        print(f"CEDARS session check failed unexpectedly: {type(exc).__name__}", file=sys.stderr)
+        return EXIT_UNKNOWN
     print(report.summary())
     return {ALIVE: EXIT_ALIVE, DEAD: EXIT_DEAD}.get(report.state, EXIT_UNKNOWN)
 

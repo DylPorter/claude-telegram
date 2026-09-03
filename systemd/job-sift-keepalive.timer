@@ -19,6 +19,14 @@ OnBootSec=2min
 # caught up — the point of the request is WHEN it happens, and firing a burst of
 # them on resume would neither un-expire a session that already lapsed nor tell
 # us anything a single poke would not.
+# The two job-sift timers are INDEPENDENT and will collide. This one free-runs
+# from its last completion, so its phase drifts against job-sift.timer's 09:00
+# wall-clock slot; with a 1-minute accuracy window and a 30s jitter, a poke lands
+# inside the daily run roughly one day in ten. That is harmless and deliberately
+# not coordinated: the cookie write is atomic, both processes write only a cookie
+# they have themselves verified, and the loser of a race has written a working
+# session either way. Noted because a future reader WILL see the overlap in the
+# journal and wonder whether it is a bug.
 AccuracySec=1min
 RandomizedDelaySec=30
 Unit=job-sift-keepalive.service
