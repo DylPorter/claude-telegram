@@ -58,6 +58,18 @@ def _load_cookies() -> dict[str, str]:
         return {}
 
 
+def load_stored_cookies() -> dict[str, str]:
+    """Public alias for `_load_cookies`, for `job_sift.session`.
+
+    The session probe needs exactly the same "whatever is on disk right now"
+    read that the scraper does, including its tolerance of the legacy
+    list-of-objects export shape. Duplicating it would let the two drift, and a
+    liveness check that reads the cookie file differently from the fetcher is
+    a liveness check for a different session.
+    """
+    return _load_cookies()
+
+
 def _fetch_listings_page(page: int = 1) -> str:
     """GET one CEDARS listings page (?page=N) using stored cookies. Returns HTML."""
     cookies = _load_cookies()

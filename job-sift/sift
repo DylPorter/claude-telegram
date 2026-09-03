@@ -1,69 +1,118 @@
 #!/usr/bin/env bash
-# On-demand job sift. Refreshes the CEDARS session cookie from your logged-in
-# browser, then runs a live sift (scrape → classify → push to Telegram + write
-# the vault archive). Run this whenever you want a fresh pull — just make sure
-# you're logged into CEDARS in one of your browsers first.
+# On-demand job sift. Makes sure the CEDARS session is usable, then runs a live
+# sift (scrape → classify → push to Telegram + write the vault archive).
 #
 #   ./sift                 # live run (pushes to Telegram, saves state)
 #   ./sift --dry-run       # print what would push, no Telegram, no state save
-#   BROWSER=chrome ./sift  # force a specific browser for the cookie pull
+#   BROWSER=chrome ./sift  # browser to try FIRST if the session is dead
 set -euo pipefail
 cd "$(dirname "$0")"
 PY=.venv/bin/python
 COOKIE=.data/cookies/cedars.json
 
-# Default is firefox — that's where the HKU Portal / CEDARS login actually
-# lives. It used to default to chrome, which produced a nasty failure mode: no
-# cookie in chrome → warn → silently fall back to the stale stored file →
-# CEDARS 302s to login → the error reads "session cookie expired", so it looks
-# like an expiry problem when it's really a wrong-browser one. That cost a full
-# debug cycle twice (2026-07-03, 2026-07-31) before being fixed here.
+# Which browser to reach for FIRST if — and only if — the stored session turns
+# out to be dead. Firefox is the default because that's where the HKU Portal /
+# CEDARS login actually lives, and because it is the only browser family
+# readable from a headless systemd unit (chromium's cookie DB is encrypted
+# against the OS keyring). It used to default to chrome, which produced a nasty
+# failure mode: no cookie in chrome → warn → silently fall back to the stale
+# stored file → CEDARS 302s to login → the error reads "session cookie
+# expired", so it looks like an expiry problem when it's really a wrong-browser
+# one. That cost a full debug cycle twice (2026-07-03, 2026-07-31).
 BROWSER="${BROWSER:-firefox}"
 
-# Try the requested browser first, then the rest. The login has moved between
-# browsers before; guessing wrong shouldn't cost a debug cycle.
-refreshed=""
-tried=""
-for b in "$BROWSER" firefox chrome chromium brave; do
-  case " $tried " in *" $b "*) continue ;; esac
-  tried="$tried $b"
-  # Stdout only (the "wrote N cookie(s)" success line, no cookie value in it)
-  # is suppressed here — we print our own one-line summary below. stderr is
-  # left alone: refresh_cookie prints "not logged in" for a benign miss, but
-  # also anything else that goes wrong (bad permissions, corrupt profile,
-  # missing dependency), and those must stay visible in the journal rather
-  # than being indistinguishable from a plain miss.
-  if "$PY" -m job_sift.refresh_cookie --browser "$b" >/dev/null; then
-    refreshed="$b"
-    break
-  fi
+# TEST FIRST, REFRESH ONLY IF GENUINELY DEAD.
+#
+# This used to be an unconditional loop over firefox → chrome → chromium →
+# brave that overwrote .data/cookies/cedars.json on EVERY run, before anything
+# had asked whether the stored cookie needed replacing. On 2026-09-02 it
+# printed "cookie refreshed from firefox" and handed the scraper an expired
+# session, because Firefox's copy was older than the one already on disk. With
+# the 10-minute keep-alive timer now also maintaining that file, an
+# unconditional overwrite would undo the keep-alive's work once a day.
+#
+# `job_sift.session` inverts the order: probe the stored cookie, and only walk
+# the browsers when CEDARS actually bounced us to login. Its exit code is the
+# contract, and the third state is the one that matters —
+#
+#   0  alive    — stored cookie accepted (or a browser's was, and it was tested
+#                 before being written)
+#   1  dead     — CEDARS bounced us AND no browser had a working session.
+#                 THIS AND ONLY THIS earns the banner.
+#   2  unclear  — we could not reach the portal, OR the check itself broke
+#                 (a failed cookie write, an unparseable body). NOT evidence
+#                 the session is dead. Nothing was refreshed, nothing
+#                 overwritten; we proceed and let CEDARS speak for itself.
+#
+# The 1-vs-2 split is load-bearing and was nearly lost. `write_cookies` can
+# raise (disk full, read-only mount) AFTER a session has been verified alive and
+# recovered. Left uncaught, Python exits 1, and this script would print "SESSION
+# DEAD — CEDARS WILL FAIL THIS RUN" about a session that was alive — one exit
+# code carrying two incompatible meanings, which is the exact overloading four
+# branches were spent removing, reappearing at the process boundary. So
+# job_sift.session maps any unexpected failure to 2, not 1.
+#
+# --dry-run is forwarded, because "$@" below reaches only the orchestrator: a
+# dry run that silently rewrote the cookie file would contradict the one thing
+# --dry-run promises.
+probe_args=(--browser "$BROWSER")
+for a in "$@"; do
+  [ "$a" = "--dry-run" ] && probe_args+=(--dry-run)
 done
 
-if [ -n "$refreshed" ]; then
-  echo "→ CEDARS cookie refreshed from ${refreshed}"
-else
-  # Loud, not a shrug. We're about to run with a stored cookie that is very
-  # likely dead — say so plainly rather than letting CEDARS fail downstream
-  # with a misleading "expired" message.
-  age="never written"
-  if [ -f "$COOKIE" ]; then
-    mins=$(( ( $(date +%s) - $(stat -c %Y "$COOKIE") ) / 60 ))
-    age="${mins} min old"
-  fi
-  {
-    echo
-    echo "════════════════════════════════════════════════════════════"
-    echo " ⚠️  CEDARS COOKIE NOT REFRESHED — CEDARS WILL LIKELY FAIL"
-    echo "════════════════════════════════════════════════════════════"
-    echo " No live CEDARS session in any of:${tried}"
-    echo " Stored cookie: ${age}  (CEDARS sessions die in a few hours)"
-    echo
-    echo " Fix: open https://web2.cedars.hku.hk/jobs/ , log in via HKU"
-    echo " Portal, then re-run. Other sources will still run."
-    echo "════════════════════════════════════════════════════════════"
-    echo
-  } >&2
-fi
+set +e
+"$PY" -m job_sift.session "${probe_args[@]}"
+session_rc=$?
+set -e
+
+case "$session_rc" in
+  0)
+    : # already printed its own one-line summary
+    ;;
+  2)
+    # Deliberately NOT the loud banner. Neither an unreachable portal nor a
+    # broken check is a call to action, and dressing either up as "your session
+    # is dead" is exactly the confusion this whole branch exists to remove.
+    # job_sift.session has already said which of the two it was on stderr.
+    echo "→ could not verify the CEDARS session — proceeding with the stored cookie" >&2
+    ;;
+  1)
+    # Loud, not a shrug. We're about to run with a session CEDARS has already
+    # rejected — say so plainly rather than letting CEDARS fail downstream with
+    # a misleading "expired" message.
+    age="never written"
+    if [ -f "$COOKIE" ]; then
+      mins=$(( ( $(date +%s) - $(stat -c %Y "$COOKIE") ) / 60 ))
+      age="${mins} min old"
+    fi
+    {
+      echo
+      echo "════════════════════════════════════════════════════════════"
+      echo " ⚠️  CEDARS SESSION DEAD — CEDARS WILL FAIL THIS RUN"
+      echo "════════════════════════════════════════════════════════════"
+      echo " CEDARS bounced us to login, and no browser (${BROWSER},"
+      echo " firefox, chrome, chromium, brave) had a session it accepts."
+      echo " Stored cookie: ${age}"
+      echo
+      echo " Fix: open https://web2.cedars.hku.hk/jobs/ in FIREFOX and log"
+      echo " in via HKU Portal. Firefox specifically — its cookie store is"
+      echo " plain SQLite, so it's the only one the daily systemd unit and"
+      echo " the keep-alive timer can read without an unlocked keyring."
+      echo " Then re-run. Other sources will still run."
+      echo "════════════════════════════════════════════════════════════"
+      echo
+    } >&2
+    ;;
+  *)
+    # Anything else is the probe itself failing to run at all: 127 (bad venv,
+    # module gone), 130 (^C), a signal. The comment at the top of this block
+    # says exit 1 AND ONLY exit 1 earns the banner, and a bare `*)` quietly
+    # broke that promise — a missing venv printed "SESSION DEAD" and sent the
+    # operator to re-log-into a portal that was never contacted. Same
+    # overloading, one level further out.
+    echo "→ CEDARS session probe did not run (exit ${session_rc}) — proceeding with the stored cookie" >&2
+    ;;
+esac
 
 echo "→ running sift…"
 exec "$PY" -m job_sift.orchestrator "$@"
