@@ -311,7 +311,10 @@ def main() -> int:
     if digest.headline and not digest.headline.startswith("📊"):
         digest.headline = f"📊 Weekly — {digest.headline}"
 
-    messages = render_for_telegram(digest)
+    # The weekly review is out of scope for the 2026-09-04 daily-digest diet:
+    # it's a once-a-week long read, not part of the ~10-a-day noise floor.
+    # Opt out of the five-bubble keep-list so it keeps all of its sections.
+    messages = render_for_telegram(digest, restrict_sections=False)
 
     if args.dry_run:
         print("=" * 60)

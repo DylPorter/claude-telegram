@@ -1,17 +1,20 @@
-"""Tests for thread rendering: Telegram bubbles + daily-note audit markdown.
+"""Tests for thread rendering.
+
+As of the 2026-09-04 Telegram diet there is no Telegram thread renderer at all
+— "🧵 Your Open Threads" and "🔎 Quick check-ins" were cut from the phone by
+explicit operator instruction. Reconciliation still runs every morning and the
+daily-note audit section is unchanged, which is what these tests pin.
 
 Key behaviours under test:
-  - resolved (terminal) threads NEVER appear in the Telegram open-threads bubble
-  - the questions bubble is OMITTED ENTIRELY when there are no questions
   - the daily-note audit keeps everything (with status glyphs) for the record
+  - resolved (terminal) threads are still distinguishable from active ones
+  - no Telegram path exists for threads any more
 """
 
 from __future__ import annotations
 
-from signal_brief.render import (
-    render_threads_for_daily_note,
-    render_threads_for_telegram,
-)
+from signal_brief import render
+from signal_brief.render import render_threads_for_daily_note
 from signal_brief.threads import ReconcileResult, Thread
 
 
@@ -19,39 +22,8 @@ def _result(threads, questions=None):
     return ReconcileResult(threads=threads, questions=questions or [], rationale="r", llm_ran=True)
 
 
-def test_telegram_only_surfaces_active_threads():
-    res = _result([
-        Thread(id="a", title="Eletrolar", status="in_progress", detail="follow up Greg"),
-        Thread(id="b", title="BOCHK", status="done"),
-        Thread(id="c", title="Tracy", status="deferred"),
-    ])
-    msgs = render_threads_for_telegram(res)
-    assert len(msgs) == 1  # only the open-threads bubble, no questions bubble
-    bubble = msgs[0]
-    assert "Eletrolar" in bubble
-    assert "follow up Greg" in bubble
-    assert "BOCHK" not in bubble       # done -> not surfaced
-    assert "Tracy" not in bubble       # deferred -> not surfaced
-
-
-def test_telegram_questions_bubble_omitted_when_empty():
-    res = _result([Thread(id="a", title="A", status="open")], questions=[])
-    msgs = render_threads_for_telegram(res)
-    assert all("Quick check-ins" not in m for m in msgs)
-
-
-def test_telegram_questions_bubble_present_when_questions_exist():
-    res = _result([Thread(id="a", title="A", status="open")],
-                  questions=["Send Tracy the message today?"])
-    msgs = render_threads_for_telegram(res)
-    assert any("Quick check-ins" in m for m in msgs)
-    qbubble = [m for m in msgs if "Quick check-ins" in m][0]
-    assert "Send Tracy the message today?" in qbubble
-
-
-def test_telegram_empty_result_emits_nothing():
-    res = _result([Thread(id="a", title="A", status="done")], questions=[])
-    assert render_threads_for_telegram(res) == []
+def test_no_telegram_thread_renderer_exists():
+    assert not hasattr(render, "render_threads_for_telegram")
 
 
 def test_daily_note_keeps_resolved_threads_with_glyphs():
@@ -65,6 +37,24 @@ def test_daily_note_keeps_resolved_threads_with_glyphs():
     assert "`done`" in md
     assert "Quick check-ins" in md
     assert "Ship the deck?" in md
+
+
+def test_daily_note_orders_active_threads_first():
+    res = _result([
+        Thread(id="b", title="BOCHK", status="done"),
+        Thread(id="a", title="Eletrolar", status="in_progress", detail="follow up Greg"),
+        Thread(id="c", title="Tracy", status="deferred"),
+    ])
+    md = render_threads_for_daily_note(res)
+    assert md.index("Eletrolar") < md.index("BOCHK")
+    assert md.index("Eletrolar") < md.index("Tracy")
+    assert "follow up Greg" in md
+
+
+def test_daily_note_omits_checkins_heading_when_no_questions():
+    res = _result([Thread(id="a", title="A", status="open")], questions=[])
+    md = render_threads_for_daily_note(res)
+    assert "Quick check-ins" not in md
 
 
 def test_daily_note_handles_no_threads():

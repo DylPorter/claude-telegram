@@ -2,6 +2,11 @@
 
 Fetch all sources → LLM filter → write daily note → push chunked Telegram.
 
+Telegram carries five bubbles: intro, Today's Signal, Broad Tech/AI, Bubble
+Breaker, Quiet rest. Thread reconciliation, the filter rationale and the
+suppressed list all still run and are still written to the daily note; none of
+them notify any more.
+
 Usage:
     .venv/bin/python -m signal_brief.orchestrators.morning            # full run
     .venv/bin/python -m signal_brief.orchestrators.morning --dry-run  # print, no push
@@ -25,7 +30,6 @@ from signal_brief.render import (
     render_for_daily_note,
     render_for_telegram,
     render_threads_for_daily_note,
-    render_threads_for_telegram,
 )
 from signal_brief.schema import Item
 from signal_brief.threads import reconcile_threads, save_threads
@@ -114,13 +118,13 @@ def main() -> int:
         log.exception("thread reconciliation crashed: %s — skipping threads", e)
         reconcile = None
 
-    telegram_messages = render_for_telegram(digest)
-    thread_messages = render_threads_for_telegram(reconcile) if reconcile else []
     daily_note_md = render_for_daily_note(digest)
     threads_note_md = render_threads_for_daily_note(reconcile) if reconcile else ""
 
-    # Threads lead the brief (they're the "what do I owe today" frame), then signal.
-    all_messages = thread_messages + telegram_messages
+    # Telegram gets the five signal bubbles and nothing else. Thread
+    # reconciliation still runs and still lands in the daily note above — it
+    # just stopped notifying (operator call, 2026-09-04).
+    all_messages = render_for_telegram(digest)
 
     if args.dry_run:
         print("\n" + "=" * 60)
