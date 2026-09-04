@@ -37,7 +37,9 @@ from job_sift.classifier import (
     floor_reason,
     named_monthly_rate,
     negative_title,
+    stamp_tags,
 )
+from job_sift.tags import derive_role_type
 from job_sift.open_roles import (
     OpenRole,
     apply_status_overrides,
@@ -132,11 +134,16 @@ class TestKeywordAdmitIsNowACandidate:
         assert route == "scope", "a keyword title must still pay for a scope classification"
         assert result is None
 
-    def test_the_finance_summer_analyst_that_started_this_is_not_admitted(self):
-        """The listing named in the issue. It must not come back `in_scope`."""
+    def test_the_finance_summer_analyst_that_started_this_is_asked_not_assumed(self):
+        """The listing named in the issue.
+
+        It must not come back `in_scope` FOR FREE — but it must not come back
+        `out_of_scope` for free either, which is what the fix for it originally
+        did. The correct outcome is that nothing decides it here at all.
+        """
         listing = _listing("IED Summer Analyst", employer="Morgan Stanley", source="linkedin")
         result, route = _route(listing)
-        assert not (result is not None and result.scope == "in_scope")
+        assert result is None and route in ("full", "scope")
 
     @pytest.mark.parametrize(
         "title",
@@ -154,19 +161,33 @@ class TestKeywordAdmitIsNowACandidate:
             "Markets Research Summer Analyst",
         ],
     )
-    def test_negative_titles_are_never_admitted_by_the_quick_path(self, title):
-        """Every one of these carries an admit keyword AND is not engineering.
+    def test_a_negative_title_is_tagged_and_captured_not_deleted(self, title):
+        """INVERTED, and this is the Critical the review caught.
 
-        Drawn from the register entries the issue counted: Morgan Stanley IED /
-        GCM / Firm Risk, HSBC CIB, UBS Asset Management, Societe Generale
-        trainees, Blackstone Transaction Finance, JPMorgan Markets Research,
-        BBVA Equity Trading, JD.COM Talent Acquisition, ByteDance Strategy and
-        AI Sales.
+        Every one of these carries an admit keyword and is not engineering, and
+        every one of them used to be resolved `out_of_scope` here for free —
+        a technical-ness judgment recorded as a SCOPE verdict. That was
+        survivable while the near-miss digest still printed the rejection. It
+        is not survivable now: near-misses are terminated, the seen-set has no
+        TTL, so the keyword deleted the role permanently with nothing anywhere
+        recording that it had been seen.
+
+        Two of these titles refuted the gate outright. "Graduate Trainee
+        Programme" died on `trainee` while `rotational` is IN the accepted
+        scope definition and is what `tags` maps "graduate trainee" to. And a
+        plain "Data Analyst Intern" died on `analyst` — the same family as the
+        worked example the whole redesign was argued from.
+
+        So the quick path passes them through (None = "ask the LLM"), and the
+        business function survives as the `function` TAG.
         """
-        verdict = _scope_quick_classify(_listing(title))
-        assert verdict is not None, f"{title!r} should be settled, not passed through"
-        assert verdict.scope == "out_of_scope"
-        assert not verdict.surface
+        listing = _listing(title)
+        assert _scope_quick_classify(listing) is None, (
+            f"{title!r} must be asked, not deleted by a keyword"
+        )
+        tagged = stamp_tags(listing, ClassifierResult("skip", "in_scope", ""))
+        assert tagged.function is not None, "the keyword's information must survive as a tag"
+        assert tagged.surface, "and the role must still be captured"
 
     @pytest.mark.parametrize(
         "title",
@@ -189,20 +210,24 @@ class TestKeywordAdmitIsNowACandidate:
         """
         assert negative_title(title) is None
         assert _scope_quick_classify(_listing(title)) is None, "should go to the LLM, not be rejected"
+        # ...and with the gate removed, the rescue's remaining job is to keep
+        # the `function` tag off a genuine engineering title.
+        assert stamp_tags(_listing(title), ClassifierResult("skip", "in_scope", "")).function is None
 
-    def test_negative_titles_are_rejected_on_the_full_lane_too(self):
-        """Scope is not a property of prestige.
+    def test_negative_titles_reach_the_llm_on_the_full_lane_too(self):
+        """The other half of the same removal, and the one that costs money.
 
-        A no-name employer's sales role is out of scope for the same reason a
-        famous one's is, and paying an LLM to be told so is waste. This is also
-        where most of the cost given up by demoting the keyword admits is
-        recovered — the full lane is the busy one.
+        This branch used to resolve `out_of_scope` for free and was where most
+        of the sift's LLM saving lived. It is gone, so these titles now pay for
+        a scope pass — accepted, because batching makes the marginal cost a
+        fraction of a call and the alternative is a keyword list silently
+        deleting every marketing internship the operator will ever be offered.
         """
         result, route = _route(
             _listing("Business Development Manager", employer="Nobody Ltd", source="cedars")
         )
-        assert route == "done"
-        assert result is not None and result.scope == "out_of_scope"
+        assert route == "full"
+        assert result is None
 
 
 class TestQuickPathStillEarnsItsPlace:
@@ -221,39 +246,67 @@ class TestQuickPathStillEarnsItsPlace:
         assert route == "done"
         assert result is not None and result.scope == "out_of_scope"
 
-    def test_the_fix_does_not_turn_every_listing_into_an_llm_call(self):
-        """The explicit budget guard on this change.
+    def test_removing_the_technical_gate_costs_llm_calls_and_that_is_accepted(self):
+        """THE BUDGET NUMBER, RESTATED HONESTLY AFTER THE GATE CAME OUT.
 
-        Anthropic alone lists ~389 roles, so "just classify everything" is not
-        a free option. No real classifier_log.jsonl exists in a fresh
-        checkout to replay, so this small, MIXED corpus (5 non-boosted, 3
-        boosted employers — real `_route`, not `_scope_quick_classify` called
-        in isolation) is what's measurable here. Its own free-resolution rate
-        goes UP, not down: 3/8 -> 6/8. That agrees with the operator's real
-        45-entry register (not reproduced here — personal application data),
-        which also goes up, 40.0% -> 46.7% — see README "Two admission
-        lanes". Both numbers point the same way once they're both measured
-        through `_route` on a realistic (not boosted-employer-only) mix;
-        an earlier draft of this comment compared an artificially
-        boosted-only run against the real register and reported a
-        disagreement that was a measurement artifact, not a real one.
+        This test used to assert that the negative-title branch made MORE
+        listings free (3/8 -> 6/8 on this corpus). It did — by deleting them.
+        Every "newly free" row below was a role resolved `out_of_scope` on a
+        keyword, and once near-misses were terminated that saving was being
+        paid for in roles the operator would never see.
+
+        So the direction is now reversed on purpose, and asserted rather than
+        hidden: only the SENIORITY check resolves for free, because that is the
+        one genuine scope signal available without asking. Everything else
+        pays. The bound that keeps this affordable is batching — `_BATCH_CHUNK_
+        SIZE` listings per CLI call — not a keyword list.
         """
         corpus = [
-            # newly free — non-technical functions, previously an LLM call each
+            # Formerly deleted for free by the technical gate. All of these now
+            # reach the LLM, and can therefore reach the board.
             _listing("Business Development Manager", employer="Nobody Ltd"),
             _listing("Sales Executive", employer="Nobody Ltd"),
             _listing("Talent Acquisition Intern", employer="Nobody Ltd"),
             _listing("Marketing Analyst", employer="Nobody Ltd"),
             _listing("Graduate Trainee Programme", employer="Nobody Ltd"),
-            # still free — seniority, unchanged
+            # Still free — seniority is a real scope judgment, not a taste one.
             _listing("Senior Software Engineer", employer="Google"),
-            # newly paid — the demoted keyword admits
+            # Keyword admits: candidates, never verdicts. Unchanged.
             _listing("Software Engineer Intern", employer="Google"),
             _listing("Data Science Summer Analyst", employer="Google"),
         ]
         routes = [route for _, route in map(_route, corpus)]
-        free = routes.count("done")
-        assert free >= len(corpus) - 3, f"too many listings routed to an LLM: {routes}"
+        assert routes.count("done") == 1, f"only seniority resolves for free now: {routes}"
+        assert all(r != "done" for r in routes[:5]), (
+            "a business function in the title must never resolve a scope verdict"
+        )
+
+    @pytest.mark.parametrize(
+        "title",
+        ["Marketing Intern", "Data Analyst Intern", "Graduate Trainee Programme"],
+    )
+    def test_the_three_titles_the_review_named_reach_the_register(self, title):
+        """Executed, end to end through the routing layer the orchestrator uses.
+
+        None of the three may be resolved by a keyword, and each must carry a
+        tag that says what the keyword knew.
+        """
+        listing = _listing(title, employer="Nobody Ltd", source="cedars")
+        result, route = _route(listing)
+        assert result is None and route == "full", f"{title!r} was decided without asking"
+        # And once a real verdict arrives, it is captured and tagged.
+        judged = assign_lane(listing, ClassifierResult("skip", "in_scope", "ok"))
+        assert judged.surface
+        assert (judged.function, judged.role_type) != (None, None)
+
+    def test_graduate_trainee_no_longer_contradicts_its_own_role_type(self):
+        """The self-refuting case. `trainee` was a delete keyword while
+        `rotational` — what `tags` maps "graduate trainee" TO — is in the
+        accepted scope definition, so the full lane could never produce a
+        `rotational` row."""
+        listing = _listing("Graduate Trainee Programme", employer="Nobody Ltd")
+        assert derive_role_type(listing.title) == "rotational"
+        assert stamp_tags(listing, ClassifierResult("skip", "in_scope", "")).role_type == "rotational"
 
 
 # ---------------------------------------------------------------------------
@@ -453,18 +506,13 @@ class TestLaneOverlapResolution:
         assert twice == once
 
     def test_a_listing_appears_exactly_once_across_the_rendered_lanes(self):
+        """Moved from the digest to the archive, because the digest no longer
+        renders listings at all — it is a pointer to the board. The property
+        is the same one: lanes partition, so nothing is written twice."""
         listing = _listing("AI Engineer (12-month contract)", employer="Anthropic")
         surfaced = [(listing, assign_lane(listing, ClassifierResult("prestige", "in_scope", "ok")))]
-        blob = "\n".join(
-            render(
-                surfaced=surfaced,
-                skipped=[],
-                total_new=1,
-                total_processed=1,
-                today=TODAY,
-            )
-        )
-        assert blob.count(listing.apply_url) == 1
+        md = render_vault_archive(surfaced=surfaced, skipped=[], today=TODAY)
+        assert md.count(listing.apply_url) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -478,36 +526,33 @@ def _pair(title, employer, prestige):
 
 
 class TestLanesRenderSeparately:
-    def test_the_digest_puts_the_floor_lane_under_its_own_header(self):
+    def test_the_archive_puts_the_floor_lane_under_its_own_header(self):
         prestige = _pair("AI Research Intern", "Anthropic", "prestige")
         floor = _pair("Data Scientist, 6-12 month contract", "Aster Recruiting", "skip")
         assert floor[1].lane == "floor"
 
+        md = render_vault_archive(
+            surfaced=[prestige, floor], skipped=[], today=TODAY
+        )
+        assert md.index("Anthropic") < md.index("floor lane") < md.index("Aster Recruiting")
+        assert md.count(floor[0].apply_url) == 1
+
+    def test_the_digest_renders_no_listings_at_all(self):
+        """Telegram is a pointer now. Whatever the lanes did, the push is one
+        summary bubble — the reading happens on the board."""
         messages = render(
-            surfaced=[prestige, floor],
+            surfaced=[
+                _pair("AI Research Intern", "Anthropic", "prestige"),
+                _pair("Data Scientist, 6-12 month contract", "Aster Recruiting", "skip"),
+            ],
             skipped=[],
             total_new=2,
             total_processed=2,
             today=TODAY,
         )
-        blob = "\n".join(messages)
-        header_idx = next(i for i, m in enumerate(messages) if "Floor lane" in m)
-        prestige_idx = next(i for i, m in enumerate(messages) if "Anthropic" in m)
-        floor_idx = next(i for i, m in enumerate(messages) if "Aster Recruiting" in m)
-        assert prestige_idx < header_idx < floor_idx, "the floor header must separate the lanes"
-        assert blob.count(floor[0].apply_url) == 1
-
-    def test_no_floor_header_when_nothing_took_that_lane(self):
-        """An empty lane must not cost a bubble — the digest is chunked and
-        every bubble is a notification."""
-        messages = render(
-            surfaced=[_pair("AI Research Intern", "Anthropic", "prestige")],
-            skipped=[],
-            total_new=1,
-            total_processed=1,
-            today=TODAY,
-        )
-        assert not any("Floor lane" in m for m in messages)
+        assert len(messages) == 1
+        assert "Anthropic" not in messages[0]
+        assert "2 new" in messages[0]
 
     def test_the_archive_splits_the_lanes_and_says_none_explicitly(self):
         md = render_vault_archive(
@@ -614,9 +659,17 @@ class TestRegisterBackCompat:
         )
         assert role.lane == "prestige"
 
-    def test_a_garbage_lane_falls_back_rather_than_propagating(self):
+    def test_a_garbage_lane_falls_back_to_the_weakest_claim(self):
+        """An unrecognised lane resolves to "broad", not "prestige".
+
+        A MISSING lane still resolves to "prestige" (the test above) because
+        every row written before the field existed genuinely was surfaced by
+        the only lane there was. An unrecognised one is a hand-edit or a
+        newer vocabulary, and resolving it to "prestige" would upgrade
+        garbage into the strongest claim the field can make — a claim about
+        the employer that nothing checked."""
         role = OpenRole.from_dict({"dedup_key": "cedars:1", "lane": "banana"})
-        assert role.lane == "prestige"
+        assert role.lane == "broad"
 
     def test_upsert_still_accepts_two_tuples(self):
         """The lane is optional: a caller that does not know about lanes gets
@@ -632,10 +685,40 @@ class TestSurfaceSemantics:
 
     def test_the_floor_lane_surfaces_without_prestige(self):
         assert ClassifierResult("skip", "in_scope", "", lane="floor").surface
-        assert not ClassifierResult("skip", "in_scope", "").surface
+
+    def test_prestige_is_no_longer_a_gate(self):
+        """The capture inversion: an in-scope role at a no-name employer that
+        no lane claims is CAPTURED, and tagged `broad`. It used to be dropped
+        at classification time and lost forever, which is the whole reason
+        prestige became a tag."""
+        assert ClassifierResult("skip", "in_scope", "").surface
+        assert ClassifierResult("marginal", "in_scope", "", lane="broad").surface
+
+    def test_scope_is_still_a_gate(self):
+        for lane in ("prestige", "floor", "broad"):
+            assert not ClassifierResult("skip", "out_of_scope", "", lane=lane).surface
 
     def test_positional_construction_keeps_its_old_meaning(self):
-        assert ClassifierResult("skip", "out_of_scope", "nope").lane == "prestige"
+        """Reading back a dataclass default proves nothing on its own — the old
+        version of this test constructed a fresh `ClassifierResult` with no
+        lane and asserted the default, which passes for any input.
+
+        What actually needs protecting is that a three-argument construction
+        still means what it meant before there were lanes: the caller said
+        nothing about a lane, so nothing may claim one on its behalf, and
+        `assign_lane` is what decides. So this asserts the pair — the default
+        AND that the value is not silently upgraded by the thing that stamps
+        lanes.
+        """
+        bare = ClassifierResult("skip", "out_of_scope", "nope")
+        assert bare.lane == "prestige"
+        listing = _listing("Data Scientist, 6-12 month contract")
+        # Out of scope, so `assign_lane` returns before it can claim a lane.
+        assert assign_lane(listing, bare).lane == "prestige"
+        # In scope, and the SAME listing does get claimed — proving the
+        # assertion above is about the caller's silence, not about a value
+        # nothing ever writes.
+        assert assign_lane(listing, ClassifierResult("skip", "in_scope", "")).lane == "floor"
 
 
 class TestConfigLivesInTheProfile:
@@ -795,27 +878,52 @@ class TestFloorLaneIsBrandAgnostic:
         assert surfaced.surface is True
 
     def test_the_prestige_lane_verdict_is_unchanged_for_these_employers(self):
-        """The instruction was explicit: fix the floor lane, do not change
-        what the prestige lane does with hard-skip/hard-marginal employers.
-        `result.surface` under the OLD `lane` default (never stamped floor)
-        must still be False — i.e. these never surface in the prestige lane,
-        exactly as before this fix."""
+        """The PRESTIGE VERDICT is unchanged for hard-skip/hard-marginal
+        employers — that was the original instruction and it still holds.
+
+        What changed underneath it is that the verdict is no longer a gate.
+        These listings now reach the board tagged `prestige="skip"`, where a
+        reader can filter them out by hand, instead of being deleted at
+        capture. So the assertion is on the tag, not on `surface`: the old
+        version asserted `surface is False`, which today would be asserting
+        that a captured role is thrown away."""
         listing = _listing("AI Platform Engineer, Contract", employer="Hermes International")
         result, _ = _route(listing)
-        assert result.prestige != "prestige"
-        assert ClassifierResult(result.prestige, result.scope, result.reason).surface is False
+        assert result.prestige == "skip"
+        # NOT a re-read of the dataclass default. The previous version built a
+        # fresh `ClassifierResult` with no lane and asserted it came back
+        # "prestige", which is true for every possible input and therefore
+        # asserted nothing. What matters is what `assign_lane` — the only thing
+        # that ever writes the field — decides for THIS listing: it is
+        # technical, contract and reachable, so the floor lane claims it even
+        # though the prestige tag says "skip". That is the brand-agnostic
+        # behaviour this class is named for, and it fails if the employer gate
+        # is ever allowed to veto the floor lane again.
+        stamped = assign_lane(listing, result)
+        assert stamped.lane == "floor"
+        assert stamped.prestige == "skip", "the prestige TAG is unchanged by the lane"
 
-    def test_a_hard_skip_employer_with_a_negative_title_is_still_rejected_outright(self):
-        """The floor lane is looser, not blind: a genuinely non-technical
-        title at a hard-skip employer must not be rescued into the floor
-        lane just because the employer check ran first."""
+    def test_a_hard_skip_employer_with_a_negative_title_is_tagged_not_deleted(self):
+        """The floor lane is looser, not blind — and capture is looser still.
+
+        This used to assert the listing was DELETED (`out_of_scope`,
+        `surface is False`) on the strength of the word "Sales". It is now
+        captured, because a business function is not a scope judgment; what
+        the keyword knew survives as `prestige="skip"` and `function="sales"`,
+        which is what a reader filters on.
+
+        The property that genuinely belongs to the floor lane is unchanged and
+        still asserted: a non-technical title must NOT be rescued into that
+        lane just because the employer check ran first.
+        """
         listing = _listing("Sales Executive, Luxury Retail", employer="Hermes International", location="Hong Kong")
         result, route = _route(listing)
         assert route == "done"
-        assert result.scope == "out_of_scope"
+        assert result.prestige == "skip"
         surfaced = assign_lane(listing, result)
-        assert surfaced.lane != "floor"
-        assert surfaced.surface is False
+        assert surfaced.lane == "broad", "claimed by neither lane, and honest about it"
+        assert surfaced.function == "sales"
+        assert surfaced.surface is True
 
 
 class TestFloorLaneQualifierRescueDoesNotEscapeToTechnical:
@@ -1086,11 +1194,14 @@ class TestClassifierOutageProducesNoVerdict:
         from job_sift import classifier
 
         monkeypatch.setattr(classifier.subprocess, "run", self._timeout)
+        # A SENIORITY title, not a sales one. "Sales Executive" used to resolve
+        # for free here; it no longer does, because a business function is not
+        # a scope verdict. Seniority still is, so it is what this asserts on.
         free = JobListing(
             source="cedars",
             external_id="99",
-            employer="Nobody Ltd",
-            title="Sales Executive",
+            employer="Google",
+            title="Senior Staff Software Engineer",
             apply_url="https://example.com/99",
         )
         results = classifier.classify_batch([free] + self._listings())

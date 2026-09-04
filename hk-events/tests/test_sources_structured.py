@@ -1021,7 +1021,11 @@ class TestSeenSetSurvivesTheHandOff:
         # counter can see a push at all.
         run1 = orchestrated(ics=[], page=[page])
         assert len(run1) == 1
-        assert page.title in "\n".join(run1[0])
+        # The push is a POINTER now, not a digest, so the title is on the board
+        # rather than in the bubble. What run 1 has to prove is only that a
+        # genuinely-new event pushes at all — that is what makes the run-3
+        # assertion (nothing pushed) mean something.
+        assert "1 new" in "\n".join(run1[0])
         assert self.API_ID in json.loads((tmp_path / "seen_luma_discover.json").read_text())
 
         # run 2 — both sources carry it. The only run that can teach `luma` the

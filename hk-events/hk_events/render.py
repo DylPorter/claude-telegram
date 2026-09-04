@@ -1,8 +1,15 @@
-"""Format classified events into Telegram-friendly chunked messages.
+"""Format a run into Telegram messages and the vault archive.
 
-Mirrors job-sift/render.py. Per the operator's delivery preferences
-(feedback_telegram_delivery_format): short, chunked into multiple sub-messages —
-concision is the deliverable, one event per bubble.
+TELEGRAM IS NOW A POINTER, NOT A DIGEST — mirroring job-sift, and for the same
+reason. One bubble per event was readable while a precision-biased filter was
+throwing most of them away; capture is broad now, and a bubble-per-row digest
+of a deliberately-unfiltered capture is unreadable by construction. So the run
+reports ONE bubble — how many are new, how many are upcoming, what is starting
+soon, and where the board is — and the board is where the reading happens.
+
+TWO THINGS ARE EXEMPT and still push on their own: the staleness alarm and the
+⚠️ source-health line. They exist to be seen on a day when everything else is
+quiet, which is exactly the day a summary line reads "0 new".
 """
 
 from __future__ import annotations
@@ -86,6 +93,15 @@ def _prepend_alarm(
     return banners + messages
 
 
+def _fmt_soon(soon: list) -> str:
+    """Name the events starting soonest. A bare count is not actionable."""
+    if not soon:
+        return ""
+    named = "; ".join(e.title[:40] for e, _, _ in soon[:3])
+    more = f" +{len(soon) - 3} more" if len(soon) > 3 else ""
+    return f"⏰ Starting soon: {named}{more}"
+
+
 def render(
     *,
     surfaced: list[tuple[Event, RelevanceResult, str]],
@@ -96,55 +112,39 @@ def render(
     source_errors: dict[str, str] | None = None,
     staleness_alarm: str | None = None,
     drop_notice: str | None = None,
+    board_path=None,
+    board_problem: str | None = None,
+    upcoming_count: int | None = None,
+    purged: int = 0,
 ) -> list[str]:
-    """Build the chunked message list for /push. One event per bubble.
+    """Build the message list for /push. ONE summary bubble, plus exemptions.
 
-    Reminders lead — an event starting in two days is more actionable than one
-    discovered six weeks out, so it goes at the top where it will actually be read.
+    The shape is:
 
-    If nothing surfaced, returns a single quiet heartbeat bubble. The caller
-    decides whether to actually send that (see HK_EVENTS_PUSH_EMPTY) — pushing
-    "nothing today" every day is what trains you to stop opening the digest.
-    Any failed sources get a ⚠️ health bubble appended so a broken source is
-    never mistaken for a quiet day, and a `staleness_alarm` (a source dead for
-    3+ consecutive runs) is PREPENDED so it leads the digest it invalidates —
-    the orchestrator pushes an otherwise-silent empty digest when one is set.
+        [staleness alarm]   — exempt, leads, never suppressed
+        [drop notice]       — exempt, leads
+         summary bubble     — the only bubble a normal run produces
+        [⚠️ source health]  — exempt, follows
+
+    The caller still decides whether to send an otherwise-empty run at all (see
+    HK_EVENTS_PUSH_EMPTY); the two exemptions override that silence, which is
+    the whole reason they are separate bubbles rather than lines in the summary.
     """
     health = _fmt_source_health(source_errors)
-
-    if not surfaced:
-        out = [
-            f"🎟 *HK events — {today.isoformat()}*\n"
-            f"No new relevant events today. "
-            f"Scanned {total_processed} events, {total_new} new."
-        ]
-        if health:
-            out.append(health)
-        return _prepend_alarm(out, staleness_alarm, drop_notice)
-
     soon = [s for s in surfaced if s[2] == "soon"]
-    fresh = [s for s in surfaced if s[2] != "soon"]
-    founder = [s for s in fresh if s[1].tag == "founder_ai"]
-    sme = [s for s in fresh if s[1].tag == "sme_buyer"]
 
-    headline_bits = []
-    if soon:
-        headline_bits.append(f"{len(soon)} starting soon")
-    if fresh:
-        headline_bits.append(
-            f"{len(fresh)} new ({len(founder)} founder/AI · {len(sme)} SME-buyer)"
-        )
-
-    messages: list[str] = [
-        f"🎟 *HK events — {today.isoformat()}*\n" + "  ·  ".join(headline_bits)
-    ]
-    for event, result, stage in soon + fresh:
-        messages.append(_fmt_event(event, result, stage))
-
-    if health:
-        messages.append(health)
-
-    footer = f"_Scanned {total_processed}, {total_new} new, {len(surfaced)} surfaced."
+    lines = [f"🎟 *HK events — {today.isoformat()}*"]
+    counted = f"{len(surfaced)} new · "
+    counted += (
+        "register unavailable" if upcoming_count is None else f"{upcoming_count} upcoming"
+    )
+    if purged:
+        counted += f" · {purged} purged"
+    lines.append(counted)
+    soon_line = _fmt_soon(soon)
+    if soon_line:
+        lines.append(soon_line)
+    footer = f"_Scanned {total_processed}, {total_new} new."
     if calendar_stats:
         footer += (
             f" Calendar: {calendar_stats.get('created', 0)} added, "
@@ -152,8 +152,19 @@ def render(
         )
     else:
         footer += "_"
-    messages.append(footer)
-    return _prepend_alarm(messages, staleness_alarm, drop_notice)
+    lines.append(footer)
+    if board_path:
+        lines.append(f"🗂 Board: `{board_path}`")
+    else:
+        # Said out loud rather than omitted, and with the reason that was
+        # actually observed — see job_sift/render.py for the bug this fixes.
+        why = board_problem or "reason unrecorded"
+        lines.append(f"🗂 Board: not written this run ({why}).")
+
+    out = ["\n".join(lines)]
+    if health:
+        out.append(health)
+    return _prepend_alarm(out, staleness_alarm, drop_notice)
 
 
 def render_vault_archive(

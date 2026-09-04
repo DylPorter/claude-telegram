@@ -112,6 +112,75 @@ def _vault_path(env_key: str, default_rel: str) -> Path | None:
 
 HK_EVENTS_ARCHIVE_DIR = _vault_path("HK_EVENTS_ARCHIVE_DIR", "Inbox/HK Events")
 
+# ---------------------------------------------------------------------------
+# The board — ONE self-contained HTML file, rewritten every run.
+#
+# Defaults into the vault next to job-sift's, but it is deliberately a plain
+# path: the file has no dependencies at all (no CDN, no build step, no server),
+# so it is meant to be copyable to someone else's machine and opened from disk.
+BOARD_PATH = _vault_path("HK_EVENTS_BOARD_PATH", "Areas/Work/Events Board.html")
+
+
+def board_path() -> Path | None:
+    """Resolved at CALL time, so a one-off run can redirect it with an env var."""
+    override = os.environ.get("HK_EVENTS_BOARD_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return BOARD_PATH
+
+
+def events_feed_path() -> Path:
+    """Where hk-events PUBLISHES its rows for job-sift's Events tab."""
+    override = os.environ.get("HK_EVENTS_EVENTS_FEED", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return STATE_DIR / "events_feed.json"
+
+
+def jobs_feed_path() -> Path:
+    """Where hk-events READS job-sift's rows for its own Jobs tab. Missing →
+    the tab says the feed is missing; it never renders a fake zero."""
+    override = os.environ.get("HK_EVENTS_JOBS_FEED", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return BOT_ROOT / "job-sift" / ".data" / "state" / "jobs_feed.json"
+
+
+# ---------------------------------------------------------------------------
+# The purge (see open_events.purge). Three clocks, all overridable.
+def _positive_int_env(key: str, default: int) -> int:
+    """Read at CALL time so a one-off run can override without re-importing."""
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an integer — using %d", key, raw, default)
+        return default
+    if value < 0:
+        log.warning("%s=%s must not be negative — using %d", key, raw, default)
+        return default
+    return value
+
+
+def purge_past_after_days() -> int:
+    from hk_events.open_events import PURGE_PAST_AFTER_DAYS
+
+    return _positive_int_env("HK_EVENTS_PURGE_PAST_DAYS", PURGE_PAST_AFTER_DAYS)
+
+
+def purge_unseen_after_days() -> int:
+    from hk_events.open_events import PURGE_UNSEEN_AFTER_DAYS
+
+    return _positive_int_env("HK_EVENTS_PURGE_UNSEEN_DAYS", PURGE_UNSEEN_AFTER_DAYS)
+
+
+def purge_max_age_days() -> int:
+    from hk_events.open_events import PURGE_MAX_AGE_DAYS
+
+    return _positive_int_env("HK_EVENTS_PURGE_MAX_AGE_DAYS", PURGE_MAX_AGE_DAYS)
+
 
 def assert_required() -> None:
     """Fail fast on critical config."""

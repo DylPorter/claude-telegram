@@ -14,3 +14,19 @@ __pycache__/
 # Operator profiles — personal, never committed (see job-sift/config/profile.yaml.example)
 config/profile.yaml
 */config/profile.yaml
+
+# Generated boards. A board is built FROM the operator's own register —
+# employers, titles, and which roles he applied to — so it is personal data and
+# this repo is public. `.data/` above covers the DEFAULT output locations only;
+# these two patterns cover the conventional names for a board written elsewhere
+# in the tree for inspection. They are NOT a general guard: `JOB_SIFT_BOARD_PATH`
+# accepts any path, and a board written to one this does not match will be
+# committed by `git add -A`. Keep boards under `.data/` or name them `*.local.html`.
+*.local.html
+board-sample*.html
+
+# The working plan for the board redesign. Untracked on purpose: it quotes the
+# operator verbatim, and the quote names a third party. Redact it before
+# committing, or leave it here — an untracked file that `git add -A` would
+# sweep into a public repo is exactly the accident this line prevents.
+docs/superpowers/plans/board-plan.md

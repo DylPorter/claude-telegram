@@ -16,7 +16,14 @@ ScopeVerdict = Literal["in_scope", "out_of_scope"]
 #   "floor"    — brand-agnostic: technical + local/remote + contract/part-time
 # A listing carries exactly ONE lane; see classifier.assign_lane for the
 # precedence rule that keeps an overlapping listing from appearing twice.
-Lane = Literal["prestige", "floor"]
+# A THIRD VALUE, "broad", was added when prestige stopped being a GATE and
+# became a tag (see `ClassifierResult.surface`). Before that, every in-scope
+# listing was either a recognisable brand ("prestige") or a technical
+# short-engagement match ("floor") — anything else never reached the register at
+# all, so two values covered everything that existed. Now everything in scope is
+# captured, so most rows are neither, and calling those "prestige" would be a
+# false claim about the employer printed on a board the reader filters by.
+Lane = Literal["prestige", "floor", "broad"]
 
 # Everything that is not a letter or a digit becomes a single space, so
 # "IMC Trading." and "IMC  trading" key the same. Deliberately nothing more
@@ -109,18 +116,43 @@ class ClassifierResult:
     reason: str  # short human-readable explanation from the LLM
     # Defaults to "prestige" so every existing positional construction —
     # ClassifierResult("skip", "out_of_scope", "...") — keeps its old meaning.
-    # Only classifier.assign_lane ever sets "floor".
+    # Only classifier.assign_lane ever sets "floor" or "broad".
     lane: Lane = "prestige"
+
+    # ------------------------------------------------------------------
+    # ADVISORY TAGS. None means UNTAGGED and nothing else — never "no", never
+    # a default. They are carried into the register and rendered as board
+    # facets; not one of them is allowed to decide whether a role is captured.
+    # `role_type` is derived from the title in Python (job_sift.tags), the
+    # other two come from the same LLM call that already returns `reason`.
+    # ------------------------------------------------------------------
+    role_type: str | None = None
+    industry: str | None = None
+    is_technical: bool | None = None
+    # The non-technical business function named in the title ("sales",
+    # "analyst", "talent acquisition"), or None. THIS FIELD IS THE FORMER
+    # TECHNICAL GATE. The same keyword list used to stamp `out_of_scope` and
+    # delete the role; it now stamps a tag and the board filters on it. See
+    # classifier._route for the full account.
+    function: str | None = None
 
     @property
     def surface(self) -> bool:
-        """True if this listing should be pushed to Telegram.
+        """True if this listing is captured into the register and the board.
 
-        Scope is the shared gate: a role that is out of scope is out of scope
-        whichever lane looked at it. Above that gate the two lanes disagree on
-        what matters — the prestige lane wants a recognisable employer, the
-        floor lane deliberately does not care who is hiring.
+        SCOPE IS THE ONLY GATE, and that is the inversion this codebase was
+        rebuilt around. It used to also require a recognisable employer (or a
+        floor-lane match), so a taste decision was taken at capture time and
+        everything it rejected was gone — which is why two work cycles were
+        burned arguing about keyword lists that could not tell a research
+        internship at a lab from a research associate at an asset manager.
+
+        Scope survives because it is not a taste question: "is this a role a
+        student could actually take" has an answer that does not vary by
+        reader, and a permanent senior role is not relevant to anyone this runs
+        for. Prestige and technical-ness DO vary by reader — the sibling
+        deployment's reader wants design and art roles — so they are tags on
+        the row, filtered in the UI, where being wrong costs a dropdown and not
+        a lost opportunity.
         """
-        if self.scope != "in_scope":
-            return False
-        return self.lane == "floor" or self.prestige == "prestige"
+        return self.scope == "in_scope"

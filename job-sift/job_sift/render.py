@@ -1,7 +1,18 @@
-"""Format classified listings into Telegram-friendly chunked messages.
+"""Format a run into Telegram messages, the vault archive and the register note.
 
-Per the operator's delivery preferences (feedback_telegram_delivery_format):
-short, chunked into multiple sub-messages — concision is the deliverable.
+TELEGRAM IS NOW A POINTER, NOT A DIGEST. It used to be one bubble per surfaced
+listing — the operator's own summary was that "they're all in separate messages
+which is kinda overwhelming". Since capture went broad the count only goes up,
+and a per-listing digest of a deliberately-unfiltered capture is unreadable by
+construction. So the run reports ONE bubble — how many are new, how many are
+open, what is closing, and where the board is — and the board is where the
+reading happens.
+
+TWO THINGS ARE EXEMPT and still push on their own. The staleness alarm and the
+⚠️ source-health line exist to be seen on a day when everything else is quiet;
+folding them into the summary line would put "cedars has been dead for three
+runs" in the same bubble the reader learns to skim. They lead, they are
+separate, and they are not suppressed by anything.
 """
 
 from __future__ import annotations
@@ -11,16 +22,6 @@ from datetime import date
 from job_sift.open_roles import OpenRole, active_roles, closing_within, in_lane
 from job_sift.profile import floor_lane_config
 from job_sift.schema import ClassifierResult, JobListing
-
-
-def _fmt_listing(listing: JobListing) -> str:
-    parts = [f"**{listing.employer}** — {listing.title}"]
-    if listing.location:
-        parts.append(f"📍 {listing.location}")
-    if listing.deadline:
-        parts.append(f"⏰ deadline {listing.deadline.isoformat()}")
-    parts.append(f"[apply]({listing.apply_url})")
-    return "\n".join(parts)
 
 
 # The two lanes are rendered under separate headings everywhere — digest,
@@ -34,16 +35,21 @@ def _fmt_listing(listing: JobListing) -> str:
 # value each, assigned by precedence in `classifier.assign_lane`, so these
 # partitions are disjoint by construction rather than by the caller being
 # careful.
-_FLOOR_HEADER = "🧱 *Floor lane — technical contract / part-time, any employer:*"
-
-
 def _split_lanes(
     items: list[tuple[JobListing, ClassifierResult]],
-) -> tuple[list[tuple[JobListing, ClassifierResult]], list[tuple[JobListing, ClassifierResult]]]:
-    """Partition surfaced listings into (prestige lane, floor lane)."""
-    prestige = [pair for pair in items if pair[1].lane != "floor"]
-    floor = [pair for pair in items if pair[1].lane == "floor"]
-    return prestige, floor
+) -> dict[str, list[tuple[JobListing, ClassifierResult]]]:
+    """Partition surfaced listings by lane. Every item lands in exactly one.
+
+    Three buckets now, not two — see `schema.Lane`. An unrecognised lane is
+    filed under "broad" rather than dropped: the archive is an audit trail, and
+    an entry silently missing from it is worse than one under a weak heading.
+    """
+    out: dict[str, list[tuple[JobListing, ClassifierResult]]] = {
+        "prestige": [], "floor": [], "broad": [],
+    }
+    for pair in items:
+        out.get(pair[1].lane, out["broad"]).append(pair)
+    return out
 
 
 def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
@@ -69,56 +75,6 @@ def _fmt_source_health(source_errors: dict[str, str] | None) -> str | None:
     return "\n".join(lines)
 
 
-def _fmt_near_misses(skipped: list[tuple[JobListing, ClassifierResult]]) -> str | None:
-    """Format a 'near miss' digest for prestige companies that failed scope.
-
-    Only shows prestige=prestige entries — these are companies the operator cares about
-    but that had the wrong role type (FT, non-HK, senior, etc.).
-    """
-    near_misses = [
-        (listing, result)
-        for listing, result in skipped
-        if result.prestige == "prestige"
-    ]
-    if not near_misses:
-        return None
-
-    # Group by employer, collect (title, reason) pairs
-    by_employer: dict[str, list[str]] = {}
-    for listing, result in near_misses:
-        employer = listing.employer
-        short_reason = result.reason or result.scope
-        entry = f"{listing.title} ({short_reason})"
-        by_employer.setdefault(employer, []).append(entry)
-
-    lines = ["📊 *Near misses — prestige but filtered:*"]
-    for employer, roles in sorted(by_employer.items()):
-        count = len(roles)
-        role_str = "; ".join(roles[:2])
-        if count > 2:
-            role_str += f" +{count - 2} more"
-        lines.append(f"• **{employer}** ({count}) — {role_str}")
-    return "\n".join(lines)
-
-
-def _fmt_rolling_state(
-    open_roles: list[OpenRole] | None, surfaced_count: int, today: date
-) -> str | None:
-    """One-line rolling-state chip: what's live right now, not just today's delta.
-
-    The whole point of the register is that a role the operator didn't act on yesterday
-    is still his problem today, so the digest has to report the standing total
-    and the ones about to close — not only the new arrivals.
-    """
-    if open_roles is None:
-        return None
-    open_count = len(active_roles(open_roles))
-    closing = len(closing_within(open_roles, today))
-    return (
-        f"📋 {surfaced_count} new · {open_count} open · {closing} closing this week"
-    )
-
-
 def _prepend_alarm(
     messages: list[str],
     staleness_alarm: str | None,
@@ -134,6 +90,29 @@ def _prepend_alarm(
     return banners + messages
 
 
+def _closing_line(open_roles: list[OpenRole] | None, today: date) -> str:
+    """The soonest deadlines, named. A bare count of "closing this week" is a
+    number the reader cannot act on; two employers and their dates is."""
+    if not open_roles:
+        return ""
+    closing = closing_within(open_roles, today)
+    if not closing:
+        return ""
+    # Grouped by employer+date: two roles at one employer closing the same day
+    # is one thing to know, printed twice.
+    groups: dict[tuple[str, str | None], int] = {}
+    for role in closing:
+        if not role.employer:
+            continue
+        groups[(role.employer, role.deadline)] = groups.get((role.employer, role.deadline), 0) + 1
+    items = [
+        f"{employer} ({deadline})" + (f" ×{count}" if count > 1 else "")
+        for (employer, deadline), count in list(groups.items())[:3]
+    ]
+    more = f" +{len(groups) - 3} more" if len(groups) > 3 else ""
+    return f"\n⏰ Closing: {'; '.join(items)}{more}"
+
+
 def render(
     *,
     surfaced: list[tuple[JobListing, ClassifierResult]],
@@ -145,65 +124,60 @@ def render(
     open_roles: list[OpenRole] | None = None,
     staleness_alarm: str | None = None,
     drop_notice: str | None = None,
+    board_path=None,
+    board_problem: str | None = None,
+    purged: int = 0,
 ) -> list[str]:
-    """Build the chunked message list for /push.
+    """Build the message list for /push. ONE summary bubble, plus exemptions.
 
-    Each listing gets its own bubble. A header chip leads, a footer chip closes
-    with stats. If nothing surfaced, returns a single quiet "no matches" bubble
-    so the daily heartbeat is visible. Any failed sources get a ⚠️ health
-    bubble appended so a broken source is never mistaken for a quiet day, and a
-    `staleness_alarm` (a source dead for 3+ consecutive runs) is PREPENDED so it
-    leads the digest it invalidates.
+    The shape is:
+
+        [staleness alarm]   — exempt, leads, never suppressed
+        [drop notice]       — exempt, leads
+         summary bubble     — the only bubble the normal run produces
+        [⚠️ source health]  — exempt, follows
+
+    `skipped` is still accepted and is still written to the archive, but it no
+    longer produces a bubble of its own. The "near miss" digest it used to feed
+    is gone: it was a list of things the prestige gate rejected, and there is no
+    prestige gate any more — everything in scope is on the board, where a reader
+    who wants to see the marginal employers filters for them instead of being
+    sent a summary of what he was not shown.
+
+    The two exemptions are load-bearing and must stay separate bubbles. They are
+    the only channel that distinguishes "nothing was found" from "I could not
+    look", and the day they matter most is the day the summary line says zero.
     """
     health = _fmt_source_health(source_errors)
-    rolling = _fmt_rolling_state(open_roles, len(surfaced), today)
 
-    if not surfaced and not any(r.prestige == "prestige" for _, r in skipped):
-        quiet = (
-            f"📋 *Job sift — {today.isoformat()}*\n"
-            f"No new prestige matches today. "
-            f"Processed {total_processed} listings, {total_new} new."
-        )
-        out = [quiet]
-        if rolling:
-            out.append(rolling)
-        if health:
-            out.append(health)
-        return _prepend_alarm(out, staleness_alarm, drop_notice)
-
-    prestige_lane, floor_lane = _split_lanes(surfaced)
-
-    messages: list[str] = []
-    messages.append(
-        f"📋 *Job sift — {today.isoformat()}*\n"
-        f"{len(prestige_lane)} new prestige match"
-        f"{'es' if len(prestige_lane) != 1 else ''}"
-        + (f" · {len(floor_lane)} floor" if floor_lane else "")
-        + " ↓"
+    open_count = len(active_roles(open_roles)) if open_roles is not None else None
+    lines = [f"📋 *Job sift — {today.isoformat()}*"]
+    counted = f"{len(surfaced)} new · "
+    counted += "open register unavailable" if open_count is None else f"{open_count} open"
+    if purged:
+        counted += f" · {purged} purged"
+    lines.append(counted)
+    closing = _closing_line(open_roles, today)
+    if closing:
+        lines.append(closing.lstrip("\n"))
+    lines.append(
+        f"_Processed {total_processed} listings, {total_new} new._"
     )
-    for listing, _ in prestige_lane:
-        messages.append(_fmt_listing(listing))
+    if board_path:
+        lines.append(f"🗂 Board: `{board_path}`")
+    else:
+        # Said out loud rather than omitted: a summary that points nowhere,
+        # silently, reads as a summary that had nothing to point at. And the
+        # REASON is whatever actually happened — this line used to hardcode
+        # "no board path configured" for a `None` that also meant a render
+        # exception, which is a cause reported without being checked.
+        why = board_problem or "reason unrecorded"
+        lines.append(f"🗂 Board: not written this run ({why}).")
 
-    if floor_lane:
-        messages.append(_FLOOR_HEADER)
-        for listing, _ in floor_lane:
-            messages.append(_fmt_listing(listing))
-
-    near_miss_bubble = _fmt_near_misses(skipped)
-    if near_miss_bubble:
-        messages.append(near_miss_bubble)
-
-    if rolling:
-        messages.append(rolling)
-
+    out = ["\n".join(lines)]
     if health:
-        messages.append(health)
-
-    messages.append(
-        f"_Processed {total_processed} listings, {total_new} new, "
-        f"{len(surfaced)} surfaced._"
-    )
-    return _prepend_alarm(messages, staleness_alarm, drop_notice)
+        out.append(health)
+    return _prepend_alarm(out, staleness_alarm, drop_notice)
 
 
 def _archive_entries(items: list[tuple[JobListing, ClassifierResult]]) -> list[str]:
@@ -273,28 +247,23 @@ def render_vault_archive(
             lines.append(f"- **{src}** — {msg}")
         lines.append("")
 
-    prestige_lane, floor_lane = _split_lanes(surfaced)
-
-    if prestige_lane:
-        lines.append("## Surfaced — prestige lane (prestige + in-scope)")
-        lines.append("")
-        lines.extend(_archive_entries(prestige_lane))
-    else:
-        lines.append("## Surfaced — prestige lane")
-        lines.append("")
-        lines.append("_None today._")
-        lines.append("")
+    lanes = _split_lanes(surfaced)
 
     # Written even when empty, for the same reason the register keeps its empty
     # sections explicit: a missing heading reads as a rendering bug, an explicit
     # "none" reads as a fact about the day.
-    lines.append("## Surfaced — floor lane (technical contract / part-time, any employer)")
-    lines.append("")
-    if floor_lane:
-        lines.extend(_archive_entries(floor_lane))
-    else:
-        lines.append("_None today._")
+    for key, heading in (
+        ("prestige", "## Surfaced — prestige lane (recognisable employer + in-scope)"),
+        ("floor", "## Surfaced — floor lane (technical contract / part-time, any employer)"),
+        ("broad", "## Surfaced — broad capture (in scope, claimed by neither lane)"),
+    ):
+        lines.append(heading)
         lines.append("")
+        if lanes[key]:
+            lines.extend(_archive_entries(lanes[key]))
+        else:
+            lines.append("_None today._")
+            lines.append("")
 
     if skipped:
         lines.append("## Filtered out")
@@ -407,6 +376,23 @@ def render_open_roles(roles: list[OpenRole], today: date) -> str:
             lines.append("")
     else:
         lines.append("_No open floor-lane roles._")
+        lines.append("")
+
+    lines.append("## 🗂 Open — broad capture")
+    lines.append("")
+    lines.append(
+        "_In scope and captured, but claimed by neither lane above. Since "
+        "prestige and technical-ness became tags rather than gates this is "
+        "most of what comes in — filter it on the HTML board, not here._"
+    )
+    lines.append("")
+    broad_rest = in_lane(rest, "broad")
+    if broad_rest:
+        for role in broad_rest:
+            lines.extend(_fmt_open_role_entry(role, today))
+            lines.append("")
+    else:
+        lines.append("_No open broad-capture roles._")
         lines.append("")
 
     lines.append("## ✅ Applied")

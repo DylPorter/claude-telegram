@@ -24,23 +24,57 @@ from job_sift.profile import (
     scope_guard_config,
 )
 from job_sift.schema import ClassifierResult, JobListing
+from job_sift.tags import clean_bool, clean_function, clean_tag, derive_role_type
 
 log = logging.getLogger(__name__)
 
 
 _PROFILE = profile_block()
 
+# ---------------------------------------------------------------------------
+# ⚠️ `accepts` / `rejects` ARE INTERPOLATED VERBATIM FROM A GITIGNORED FILE.
+#
+# Since the technical gate was removed from the code (see `_route`), the LLM is
+# the SOLE authority on scope — and the text that steers it comes from
+# `config/profile.yaml`, which is not in this repo and not covered by any test.
+# The shipped example's `rejects` is permanence-only, so the default is safe;
+# but a private `rejects` line reading "non-technical roles" would restore the
+# deleted gate silently and untestably, one layer further from anywhere a
+# reviewer looks.
+#
+# So both system prompts ring-fence the field the same way they already
+# ring-fence `industry` / `is_technical`: scope is about role SHAPE AND
+# DURATION ONLY, and a profile line that asks for anything else is explicitly
+# overridden. The fence lives in the prompt rather than in a validator because
+# there is nothing to validate — the failure is a judgement, not a value.
+# ---------------------------------------------------------------------------
+
 CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
     You are a job-listing classifier for {_PROFILE['identity']}.
     They are looking for **{_PROFILE['seeking']}**.
 
-    For each listing, return STRICT JSON with three fields:
+    For each listing, return STRICT JSON with five fields:
 
     {{
-      "prestige": "prestige" | "marginal" | "skip",
-      "scope":    "in_scope" | "out_of_scope",
-      "reason":   "<one short sentence, max 20 words>"
+      "prestige":     "prestige" | "marginal" | "skip",
+      "scope":        "in_scope" | "out_of_scope",
+      "reason":       "<one short sentence, max 20 words>",
+      "industry":     "<1-3 words naming the EMPLOYER's industry, or null>",
+      "is_technical": true | false | null
     }}
+
+    `industry` and `is_technical` are TAGS, not filters — they never decide
+    whether a listing is kept, only how a reader can slice the board later.
+    So answer them honestly and use null when you genuinely cannot tell from
+    the employer and title. A guess is worse than a null here: null shows up
+    as "untagged" and stays visible, a wrong guess files the role under a
+    label the reader may have filtered away.
+
+    `industry` names what the EMPLOYER does (e.g. "investment banking",
+    "semiconductors", "university", "recruitment agency"), not what the role
+    does. `is_technical` is about the ROLE: true for engineering, software,
+    data, research and quantitative work; false for sales, marketing, HR,
+    admin, legal and general business functions.
 
     PRESTIGE rules:
     - "prestige": the employer is globally recognisable in **tech, software, AI, quantitative finance, or
@@ -55,11 +89,28 @@ CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
       whose primary industry is fashion, luxury goods, retail, hospitality, FMCG, real estate, or
       manufacturing. Global brand recognition in a non-tech sector does NOT make a company prestige here.
 
-    SCOPE rules — ACCEPT:
+    SCOPE rules.
+
+    SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY — never about function,
+    discipline, seniority of subject matter, or whether the work is technical.
+    "Is this an internship / contract / part-time / rotational / RA position a
+    student could take?" is the entire question. A marketing internship, a
+    design contract and a finance summer analyst position are all `in_scope`:
+    they are the right SHAPE, and whether the reader wants that kind of work is
+    decided later, by a filter they control. Answering "out_of_scope" because a
+    role is not technical is the one mistake that cannot be undone downstream —
+    the listing is dropped and never offered again.
+
+    ACCEPT:
 {_PROFILE['accepts']}
 
     REJECT:
 {_PROFILE['rejects']}
+
+    The ACCEPT and REJECT lists above are operator-supplied and describe role
+    SHAPE. If a line in them appears to ask you to reject on function,
+    discipline or technical-ness, that line is out of scope for this field —
+    apply the shape rule above instead.
 
     If the role type is unclear from the title (e.g. just "Software Engineer"),
     {_PROFILE['unclear_role_default']}.
@@ -143,35 +194,25 @@ def _hard_marginal_check(employer: str) -> bool:
 
 
 def _employer_gated_result(prestige: str, reason: str, listing: JobListing) -> ClassifierResult:
-    """Free-rejection verdict for an employer the prestige lane excludes on
-    brand/domain grounds (hard-skip / hard-marginal).
+    """Verdict for an employer the PRESTIGE TAG excludes on brand/domain
+    grounds (hard-skip / hard-marginal).
 
-    `scope` here used to be hardcoded to `out_of_scope` — a convenience,
-    because nothing downstream cared what it said as long as `prestige`
-    wasn't "prestige". That stopped being harmless once `assign_lane` started
-    reading `scope` to decide floor-lane eligibility: a prestige/domain
-    opinion about the EMPLOYER was being recorded as a scope verdict about
-    the ROLE, and silently vetoed the floor lane for it — Coinbase, Binance,
-    Hermes and every other hard-skip/hard-marginal employer never reached
-    `floor_reason` even when the listing itself was a perfectly good
-    technical/contract match. Issue #2 wants the floor lane to run
-    "regardless of employer brand", which has to include these employers too.
+    `prestige` is a tag now, not a gate, so this function records a brand
+    opinion and nothing else. `scope` is `in_scope` — a CANDIDATE, not a
+    confirmed yes, which is the epistemic state `assign_lane` already expects
+    to hand to `floor_reason` (that does its own independent technical /
+    reachable / engagement check before claiming anything).
 
-    So scope is now decided the same free way the full LLM lane's no-LLM
-    branch decides it in `_route` — `negative_title` only. A non-technical
-    title is still out_of_scope for both lanes. A title with no free reason
-    to reject stays a scope CANDIDATE (`in_scope`), not a confirmed yes — but
-    that is exactly the epistemic state `assign_lane` already expects to
-    hand to `floor_reason`, which does its own independent technical /
-    reachable / engagement check before admitting anything. Prestige stays
-    exactly "skip"/"marginal" either way, so the prestige lane's behaviour
-    for these employers is unchanged.
+    IT NO LONGER CONSULTS `negative_title`, and that removal is the point.
+    Scope used to be resolved here from the title's business function — a
+    TECHNICAL-NESS judgment recorded as a SCOPE verdict, which is exactly the
+    laundering the capture inversion exists to end. Under the old design that
+    cost a digest line; once prestige stopped gating and near-misses were
+    terminated, the same keyword deleted the role from the register with
+    nothing anywhere recording that it had ever been seen. The business
+    function is now stamped as the `function` TAG (see `stamp_tags`), and the
+    board filters on it.
     """
-    negative = negative_title(listing.title)
-    if negative is not None:
-        return ClassifierResult(
-            prestige, "out_of_scope", f"{reason}; non-technical function in title ({negative})"
-        )
     return ClassifierResult(prestige, "in_scope", reason)
 
 
@@ -196,18 +237,10 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
     if _boost_check(listing.employer):
         log.debug("boost-list hit for %s — running scope-only path", listing.employer)
         return classify_scope_only(listing, timeout=timeout)
-    negative = negative_title(listing.title)
-    if negative is not None:
-        # Same free rejection the batched path applies in `_route` — kept in
-        # step deliberately, because the two entry points must not disagree
-        # about what the sift admits.
-        log.debug("negative-title hit (%s) for %s", negative, listing.title)
-        return ClassifierResult(
-            prestige="skip",
-            scope="out_of_scope",
-            reason=f"non-technical function in title ({negative})",
-        )
-
+    # NO negative-title short-circuit here, deliberately — see `_route`, which
+    # dropped the same branch. A business function in the title is a tag, not a
+    # verdict, and the scope question still has to be answered by something
+    # that actually asked it.
     user_prompt = _build_user_prompt(listing)
     cmd = [
         CLAUDE_BIN,
@@ -248,6 +281,8 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
                 prestige=data["prestige"],
                 scope=data["scope"],
                 reason=data.get("reason", ""),
+                industry=clean_tag(data.get("industry")),
+                is_technical=clean_bool(data.get("is_technical")),
             ),
         )
     except (json.JSONDecodeError, KeyError) as exc:
@@ -367,6 +402,14 @@ def named_monthly_rate(text: str) -> str | None:
 def negative_title(title: str, cfg: ScopeGuardConfig | None = None) -> str | None:
     """The non-technical business function this title names, or None.
 
+    ⚠️ THIS IS A TAG SOURCE, NOT A GATE, AND MUST NOT BECOME ONE AGAIN. It
+    feeds `stamp_tags`' `function` tag and (via the stricter
+    `_negative_title_no_subject_rescue`) the floor LANE — which is itself a
+    tag. Nothing here may return, imply or contribute to an `out_of_scope`
+    verdict: "this title names a sales function" and "a student could not take
+    this role" are different claims, and the second is the only one scope is
+    allowed to make.
+
     A negative term is CANCELLED by any technical qualifier anywhere in the
     title. That carve-out is what separates "Summer Analyst" (finance, out) from
     "Technology Summer Analyst" (in), and it is applied to every negative term
@@ -484,14 +527,11 @@ def _scope_quick_classify(listing: JobListing) -> ClassifierResult | None:
     """
     title_l = listing.title.lower()
 
-    negative = negative_title(listing.title)
-    if negative is not None:
-        return ClassifierResult(
-            prestige="prestige",
-            scope="out_of_scope",
-            reason=f"non-technical function in title ({negative})",
-        )
-
+    # THE NEGATIVE-TITLE BRANCH IS GONE. It resolved `out_of_scope` for free on
+    # a business function in the title — a technical-ness judgment wearing a
+    # scope verdict's clothes. The seniority check below stays, because THAT is
+    # a real scope signal: "Senior Staff Engineer" is not a role a student can
+    # take, and the answer does not vary by reader.
     if any(k in title_l for k in _SCOPE_KEYWORDS_OUT):
         return ClassifierResult(prestige="prestige", scope="out_of_scope", reason="title indicates senior/perm role")
 
@@ -505,13 +545,38 @@ SCOPE_SYSTEM_PROMPT = dedent(f"""
     classify SCOPE.
 
     Return STRICT JSON:
-      {{ "scope": "in_scope" | "out_of_scope", "reason": "<one short sentence, max 20 words>" }}
+      {{
+        "scope":        "in_scope" | "out_of_scope",
+        "reason":       "<one short sentence, max 20 words>",
+        "industry":     "<1-3 words naming the EMPLOYER's industry, or null>",
+        "is_technical": true | false | null
+      }}
+
+    `industry` and `is_technical` are TAGS, not filters — they never decide
+    whether a listing is kept, only how a reader can slice the board later.
+    Use null rather than guessing; null renders as "untagged" and stays
+    visible, a wrong guess misfiles the role.
+
+    SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY — never about function,
+    discipline, seniority of subject matter, or whether the work is technical.
+    "Is this an internship / contract / part-time / rotational / RA position a
+    student could take?" is the entire question. A marketing internship, a
+    design contract and a finance summer analyst position are all `in_scope`:
+    they are the right SHAPE, and whether the reader wants that kind of work is
+    decided later, by a filter they control. Answering "out_of_scope" because a
+    role is not technical is the one mistake that cannot be undone downstream —
+    the listing is dropped and never offered again.
 
     ACCEPT:
 {_PROFILE['accepts']}
 
     REJECT:
 {_PROFILE['rejects']}
+
+    The ACCEPT and REJECT lists above are operator-supplied and describe role
+    SHAPE. If a line in them appears to ask you to reject on function,
+    discipline or technical-ness, that line is out of scope for this field —
+    apply the shape rule above instead.
 
     If the role type is unclear from the title (e.g. just "Software Engineer"),
     {_PROFILE['unclear_role_default']}.
@@ -527,7 +592,7 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
     """
     quick = _scope_quick_classify(listing)
     if quick is not None:
-        return quick
+        return assign_lane(listing, quick)
 
     user_prompt = _build_user_prompt(listing)
     cmd = [
@@ -553,10 +618,15 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
 
     try:
         data = json.loads(stdout)
-        return ClassifierResult(
-            prestige="prestige",  # source-curated
-            scope=data["scope"],
-            reason=data.get("reason", ""),
+        return assign_lane(
+            listing,
+            ClassifierResult(
+                prestige="prestige",  # source-curated
+                scope=data["scope"],
+                reason=data.get("reason", ""),
+                industry=clean_tag(data.get("industry")),
+                is_technical=clean_bool(data.get("is_technical")),
+            ),
         )
     except (json.JSONDecodeError, KeyError):
         return ClassifierResult(prestige="prestige", scope="out_of_scope", reason="scope parse error")
@@ -694,18 +764,73 @@ def assign_lane(
     what they claim. "Anthropic is hiring" is strictly more informative than
     "someone in Hong Kong wants a contractor", and demoting it into the floor
     section would bury the signal the digest exists to deliver.
+
+    THE THIRD LANE, "broad", is what the capture inversion added. Neither lane
+    CLAIMS most of what is now captured — an in-scope role at an unremarkable
+    employer that is not a short technical engagement is simply a role, and
+    since prestige stopped being a gate those reach the register in bulk.
+    Stamping them "prestige" would print a claim about the employer that
+    nothing checked. So `lane` still answers one question — "which lane, if
+    any, actively claimed this?" — and "broad" is the honest answer for most
+    rows.
+
+    This function is also the single place tags are stamped, because it is
+    already the single place every verdict passes through — heuristic and LLM
+    alike. Tags are stamped BEFORE the scope check so an out-of-scope verdict
+    still carries them; they cost nothing, and a caller that logs a rejection
+    can say what it rejected.
     """
+    result = stamp_tags(listing, result)
     if result.scope != "in_scope":
-        return result  # out of scope is out of scope in both lanes
+        return result  # out of scope is out of scope in every lane
     if result.prestige == "prestige":
         return result  # prestige lane already has it
-    if result.lane == "floor":
+    if result.lane in ("floor", "broad"):
         return result  # already stamped; re-stamping would duplicate the reason
     reason = floor_reason(listing, cfg)
     if reason is None:
-        return result
+        return replace(result, lane="broad")
     combined = f"{result.reason} · {reason}" if result.reason else reason
     return replace(result, lane="floor", reason=combined)
+
+
+def stamp_tags(listing: JobListing, result: ClassifierResult) -> ClassifierResult:
+    """Attach the two DERIVED tags to a verdict. Idempotent.
+
+    Two are derived here because both are keyword lookups over the title —
+    deterministic, free, offline — so paying an LLM for either would add cost
+    and variance to something a regex answers. `industry` and `is_technical`
+    ride along from the classifier call that was already being made and are
+    left exactly as they arrived.
+
+    * `role_type` — the engagement shape. Derived from the TITLE ONLY. It
+      deliberately does NOT read the description, even though the description
+      often names the shape: a permanent role whose body mentions "our summer
+      internship programme" would be tagged `intern`, which is the confident
+      wrong answer `tags.py` forbids. Title-only also keeps this identical to
+      the fallback `board.job_row` applies to rows written before the field
+      existed, so the two can never disagree.
+
+    * `function` — the non-technical business function the title names, from
+      the same `negative_title` term list that used to produce an
+      `out_of_scope` VERDICT and delete the role. Recording it as a tag is the
+      whole of the fix: the information the keyword list carries is real and
+      useful for filtering, it simply was never a scope judgment.
+
+    A derivation that finds nothing leaves the tag None. `role_type` does NOT
+    fall back to "full-time" — the commonest untyped title is a bare "Software
+    Engineer", and filing every one of those under the role type a reader is
+    most likely to have filtered out would hide roles behind a tag nobody
+    asserted.
+    """
+    role_type = derive_role_type(listing.title)
+    function = clean_function(negative_title(listing.title))
+    changes = {}
+    if role_type is not None and role_type != result.role_type:
+        changes["role_type"] = role_type
+    if function is not None and function != result.function:
+        changes["function"] = function
+    return replace(result, **changes) if changes else result
 
 
 # ---------------------------------------------------------------------------
@@ -730,13 +855,31 @@ _AUTO_PRESTIGE_SOURCES: set[str] = {"greenhouse", "lever", "ashby"}
 _BATCH_CHUNK_SIZE = 20
 
 
-def _coerce(prestige: str, scope: str, reason: str) -> ClassifierResult:
-    """Clamp model output to valid enum values (precision-bias defaults)."""
+def _coerce(prestige: str, scope: str, reason: str, obj: dict | None = None) -> ClassifierResult:
+    """Clamp model output to valid values.
+
+    The two VERDICT fields keep their precision-biased defaults: an
+    unrecognised value there is a model that did not follow instructions, and
+    the safe direction for a gate is to reject.
+
+    The TAG fields default the other way, to None. A tag is not a gate, so
+    there is no "safe direction" to fail toward — only an honest one. `None`
+    renders as "untagged" and leaves the row visible under every filter; a
+    fabricated `false` would hide it from a reader filtering `technical = yes`
+    on the strength of a value the model never produced.
+    """
     if prestige not in ("prestige", "marginal", "skip"):
         prestige = "skip"
     if scope not in ("in_scope", "out_of_scope"):
         scope = "out_of_scope"
-    return ClassifierResult(prestige=prestige, scope=scope, reason=reason or "")
+    obj = obj or {}
+    return ClassifierResult(
+        prestige=prestige,
+        scope=scope,
+        reason=reason or "",
+        industry=clean_tag(obj.get("industry")),
+        is_technical=clean_bool(obj.get("is_technical")),
+    )
 
 
 def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
@@ -767,26 +910,36 @@ def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
             return quick, "done"
         return None, "scope"
 
-    # The scope guard is not a property of prestige, so it applies to the full
-    # lane as well: a sales or talent-acquisition title is out of scope whoever
-    # posted it, and paying for an LLM call to be told so is waste. This
-    # branch — not `_scope_quick_classify` — is where MOST of the real cost
-    # saving actually lives: the full lane is the busy one (CEDARS +
-    # LinkedIn, mostly non-boosted employers that never touched
-    # `_scope_quick_classify` either way), and measured against both a small
-    # mixed corpus and a real employer register the net effect of this
-    # change is fewer LLM calls, not more. See the cost note on
-    # `_scope_quick_classify` and README "Two admission lanes" for the
-    # numbers.
-    negative = negative_title(listing.title)
-    if negative is not None:
-        return (
-            ClassifierResult(
-                "skip", "out_of_scope", f"non-technical function in title ({negative})"
-            ),
-            "done",
-        )
-
+    # THIS IS WHERE THE TECHNICAL GATE USED TO LIVE, AND WHY IT HAD TO GO.
+    #
+    # A `negative_title` hit resolved `out_of_scope` for free here, so a
+    # keyword list decided capture with no LLM ever consulted. Executed
+    # against the real term lists, that dropped "Marketing Intern",
+    # "Data Analyst Intern", "Graduate Trainee Programme", "Sales Development
+    # Representative", "Talent Acquisition Intern" and every "Trading" or
+    # "Risk" title — a TECHNICAL-NESS judgment recorded as a SCOPE verdict,
+    # which is precisely the laundering the capture inversion exists to end.
+    #
+    # Two of those are self-refuting. "Graduate Trainee Programme" died on
+    # `trainee` while `rotational` is in the accepted scope definition AND is
+    # what `tags._ROLE_TYPE_TERMS` maps "graduate trainee" to — the vocabulary
+    # and the gate contradicted each other. "Data Analyst Intern" died on
+    # `analyst`, the same family as the "Microsoft Research Intern" vs
+    # "Fidelity Equity Research Associate" example the redesign was argued
+    # from.
+    #
+    # It was survivable while a rejection cost a digest line and the near-miss
+    # section still printed it. Terminating near-misses removed the last place
+    # such a deletion was visible, so a free rejection now costs the role
+    # itself, permanently (the seen-set has no TTL — see `dedupe.filter_new`).
+    #
+    # THE COST OF REMOVING IT IS REAL AND ACCEPTED. These titles now reach the
+    # `full` LLM route instead of resolving for free, so the batch pass sees
+    # more listings. Batching is ~1 CLI call per 20 listings, so the marginal
+    # cost is a fraction of a call per title, and it buys back the ability to
+    # ever see a marketing internship. The business function is preserved as
+    # the `function` tag (see `stamp_tags`) so the board can filter on exactly
+    # what this branch used to delete.
     return None, "full"
 
 
@@ -903,7 +1056,9 @@ def _batch_llm(
         if not (0 <= i < n):
             continue
         prestige = "prestige" if scope_only else str(obj.get("prestige", "skip"))
-        out[i] = _coerce(prestige, str(obj.get("scope", "out_of_scope")), str(obj.get("reason", "")))
+        out[i] = _coerce(
+            prestige, str(obj.get("scope", "out_of_scope")), str(obj.get("reason", "")), obj
+        )
     missing = sum(1 for r in out if r is None)
     if missing:
         log.error(

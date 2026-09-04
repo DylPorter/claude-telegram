@@ -1,11 +1,67 @@
 # hk-events
 
-Daily Hong Kong **events** digest for the operator — sibling to `job-sift`, same
-architecture. Aggregates HK tech/startup/AI events **plus the right SME-buyer
-events**, dedupes, LLM-classifies each for relevance (precision-biased: uncertain
-→ drop), pushes a chunked Telegram digest via the same `/push` endpoint
-signal-brief + job-sift use, and **idempotently creates Google Calendar events**
-(registration link in the body) via the `gws` CLI.
+Daily Hong Kong **events** capture for the operator — sibling to `job-sift`,
+same architecture. Aggregates HK tech/startup/AI events **plus the right
+SME-buyer events**, dedupes, LLM-classifies each for relevance, keeps everything
+in a rolling register, writes a self-contained HTML board you filter by hand,
+pushes ONE summary bubble via the same `/push` endpoint signal-brief + job-sift
+use, and **idempotently creates Google Calendar events** (registration link in
+the body) via the `gws` CLI.
+
+## Capture broadly, filter in the UI
+
+The relevance classifier is still precision-biased, and its verdict still
+decides what gets a calendar entry. What changed is that a `drop` verdict is now
+a **tag**, not a delete: every event inside the horizon is written to the
+rolling register (`.data/state/open_events.json`) with `room` as a filterable
+facet. Precision-biasing a push notification is reasonable; precision-biasing an
+archive is not.
+
+**Tags are advisory, never gates.** An event nobody classified is `room: null`,
+which renders as `—` and appears under every filter's untagged option. It is
+never dropped and never hidden.
+
+### The board
+
+One HTML file, two tabs (Jobs | Events). No CDN, no build step, no framework, no
+network at view time — it opens from `file://` on a machine that has none of
+this installed. Written to `Areas/Work/Events Board.html` by default
+(`HK_EVENTS_BOARD_PATH`).
+
+The Jobs tab is fed by a JSON file job-sift writes on its own run, and hk-events
+publishes the mirror-image feed for job-sift's Events tab. If the other side's
+feed is missing or unreadable the tab SAYS SO rather than rendering an empty
+table — "job-sift is tracking no roles" and "I could not read job-sift's feed"
+are different facts.
+
+### The purge
+
+Rows leave the register on three clocks (`hk_events/open_events.py`):
+
+* the event already happened, by more than `HK_EVENTS_PURGE_PAST_DAYS` (3);
+* it is undated and `last_seen` is older than `HK_EVENTS_PURGE_UNSEEN_DAYS` (30);
+* it is undated and `first_seen` is older than `HK_EVENTS_PURGE_MAX_AGE_DAYS` (60).
+
+⚠️ **A start still in the future vetoes all of them.** `last_seen` is a fact
+about our crawl, not about the world: the `luma_discover` city page shows about
+a dozen events at a time, so anything further out silently stops being
+re-sighted long before it occurs. An unparseable `starts` counts as a veto too
+(`start_state` splits "no start" from "I could not read the start" — collapsing
+them is how the veto silently stopped applying), and a sighting today vetoes the
+max-age clock. Every drop is logged with the rule that fired, and the delete is
+irreversible: the seen-set has no TTL, so a purged row is not re-captured.
+
+hk-events has **no operator marks** (nothing writes `applied`/`dismissed` here),
+so there is no sticky-status exemption to honour — unlike job-sift, where that
+exemption is the one rule in the purge that is not a heuristic. If a hand-set
+mark is ever added here, exempt it FIRST.
+
+### Telegram is a pointer
+
+One bubble: how many new, how many upcoming, what is starting soon, where the
+board is. The staleness alarm and the ⚠️ source-health line are **exempt** and
+still push on their own — they exist to be seen on a day when everything else is
+quiet.
 
 ## Architecture
 
@@ -70,6 +126,15 @@ hk-events-specific knobs are in `.env.example` — notably:
   **not** bound a `getaddrinfo` block (on 2026-09-01 a DNS outage produced 135s
   fetches against `_ical_common`'s configured 25s timeout). Raise it only if you
   also raise the unit's `TimeoutStartSec` (currently 900).
+
+- `HK_EVENTS_BOARD_PATH` — where to write the HTML board. Any absolute path;
+  the file has no dependencies, so it is meant to be copied elsewhere and
+  opened from disk.
+- `HK_EVENTS_EVENTS_FEED` / `HK_EVENTS_JOBS_FEED` — the two halves of the file
+  handoff with job-sift. A missing jobs feed makes the Jobs tab say so; it never
+  renders a fake zero.
+- `HK_EVENTS_PURGE_PAST_DAYS` / `HK_EVENTS_PURGE_UNSEEN_DAYS` /
+  `HK_EVENTS_PURGE_MAX_AGE_DAYS` — the three purge clocks (see above).
 
 ## Calendar writes (gws)
 

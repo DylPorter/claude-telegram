@@ -38,7 +38,7 @@ VALID_STATUSES = frozenset({"open", "expired", "stale", "applied", "dismissed"})
 # Which classifier lane admitted the role. Stored so the register can render the
 # two lanes under separate headings without re-running the classifier, and so a
 # role keeps its heading on the days its source does not re-list it.
-VALID_LANES = frozenset({"prestige", "floor"})
+VALID_LANES = frozenset({"prestige", "floor", "broad"})
 
 
 @dataclass
@@ -58,6 +58,21 @@ class OpenRole:
     # Defaults to "prestige" so a register written before the floor lane
     # existed loads with every role under the heading it was surfaced under.
     lane: str = "prestige"
+    # ------------------------------------------------------------------
+    # ADVISORY TAGS — filtered on in the board, never gates. Every one of
+    # them is None-able and None means UNTAGGED: a row missing a tag is shown
+    # untagged, never hidden and never given a made-up value. A register
+    # written before these fields existed loads with all of them None, which
+    # is exactly right — nothing classified those rows, so nothing may claim
+    # to have.
+    # ------------------------------------------------------------------
+    prestige: str | None = None
+    role_type: str | None = None
+    industry: str | None = None
+    is_technical: bool | None = None
+    # The non-technical business function the title names. This is the former
+    # technical GATE, kept as a tag — see classifier._route.
+    function: str | None = None
     # Part of `identity_key`. A register written before this field existed loads
     # with None, which simply means those rows key on employer+title alone and
     # will not collapse against a freshly-written row carrying a location — a
@@ -74,6 +89,13 @@ class OpenRole:
     def from_dict(cls, d: dict) -> OpenRole:
         """Tolerant of missing/extra keys so a hand-edited state file still loads."""
         status = d.get("status", "open")
+        # MISSING and UNRECOGNISED are handled differently on purpose. Missing
+        # means the row predates the lane field entirely, and every such row
+        # really was surfaced by the only lane that existed — "prestige" is a
+        # fact about those rows, not a guess. An unrecognised value is a
+        # hand-edit or a future version's vocabulary, and resolving THAT to
+        # "prestige" would upgrade garbage into the strongest claim the field
+        # can make. It falls to "broad", which claims nothing.
         lane = d.get("lane", "prestige")
         return cls(
             dedup_key=d["dedup_key"],
@@ -86,9 +108,14 @@ class OpenRole:
             last_seen=d.get("last_seen", ""),
             reason=d.get("reason", ""),
             status=status if status in VALID_STATUSES else "open",
-            lane=lane if lane in VALID_LANES else "prestige",
+            lane=lane if lane in VALID_LANES else "broad",
             location=d.get("location"),
             last_checked=d.get("last_checked"),
+            prestige=_opt_str(d.get("prestige")),
+            role_type=_opt_str(d.get("role_type")),
+            industry=_opt_str(d.get("industry")),
+            function=_opt_str(d.get("function")),
+            is_technical=d.get("is_technical") if isinstance(d.get("is_technical"), bool) else None,
         )
 
     @property
@@ -109,12 +136,43 @@ class OpenRole:
 
     @property
     def deadline_date(self) -> date | None:
+        """The parsed deadline, or None for BOTH "no deadline" and "I could not
+        read the deadline".
+
+        Callers that only need to sort or display may use this. Anything that
+        DELETES must use `deadline_state` instead — see its docstring for the
+        bug that distinction exists to prevent.
+        """
         if not self.deadline:
             return None
         try:
             return date.fromisoformat(self.deadline)
         except ValueError:
             return None
+
+    @property
+    def deadline_state(self) -> tuple[str, date | None]:
+        """`("none"|"unreadable"|"known", date_or_None)`.
+
+        THE THIRD STATE IS THE POINT, and its absence was a bug rebuilt inside
+        the fix for the same bug. `deadline_date` returns None for "there is no
+        deadline" and for "there is a deadline and I cannot parse it", so the
+        purge's future-deadline veto — the guard that stops us deleting live
+        roles — silently did not apply to any row whose date we failed to read.
+        `last_seen` and `first_seen` already had an unreadable-date exemption;
+        `deadline` did not, which is the field the exemption matters most for.
+
+        It matters most HERE because the register is documented as
+        hand-editable: an operator who types "30 Sep 2026" into the JSON gets a
+        row that is not merely mis-sorted but PURGED, and nothing in the
+        deletion log distinguishes it from a role the source really dropped.
+        """
+        if not self.deadline:
+            return ("none", None)
+        try:
+            return ("known", date.fromisoformat(self.deadline))
+        except ValueError:
+            return ("unreadable", None)
 
     def days_left(self, today: date) -> int | None:
         d = self.deadline_date
@@ -124,6 +182,14 @@ class OpenRole:
 def _state_path():
     # Through the module, not a bound name — see the note on dedupe._seen_path.
     return config.STATE_DIR / "open_roles.json"
+
+
+def _opt_str(value) -> str | None:
+    """A non-empty string, or None. Never a coerced repr of something else."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _parse_date(value: str) -> date | None:
@@ -152,10 +218,18 @@ def upsert_roles(
     New key → append as `open` with `first_seen == last_seen == today`.
     Returns a NEW list; `existing` is not mutated.
 
-    Each entry is `(listing, reason)` or `(listing, reason, lane)`. The lane is
-    optional because it is not the register's business to know how many lanes
-    the classifier has — a caller that does not supply one gets "prestige",
-    which is what every caller meant before there was a second lane.
+    Each entry is `(listing, reason)`, `(listing, reason, lane)` or
+    `(listing, reason, lane, tags)`. Both trailing elements are optional
+    because it is not the register's business to know how many lanes or tags
+    the classifier has — a caller that supplies neither gets "prestige" and no
+    tags, which is what every caller meant before either existed.
+
+    `tags` is a plain mapping of advisory fields (`prestige`, `role_type`,
+    `industry`, `is_technical`). A key that is absent, or present with a value
+    of None, LEAVES THE STORED VALUE ALONE rather than clearing it — the
+    classifier that re-sighted the role today may simply not have answered
+    that question, and "no answer today" must not erase yesterday's answer.
+    Nothing here is allowed to drop a role for want of a tag.
 
     THE LANE IS NOT PART OF THE KEY. `dedup_key` is, and it does not mention
     the lane, so a role that moves between lanes — the classifier gets better,
@@ -173,6 +247,7 @@ def upsert_roles(
     for entry in newly_surfaced:
         listing, reason, *rest = entry
         lane = rest[0] if rest and rest[0] in VALID_LANES else "prestige"
+        tags = rest[1] if len(rest) > 1 and isinstance(rest[1], dict) else {}
         key = listing.dedup_key
         deadline = listing.deadline.isoformat() if listing.deadline else None
         current = by_key.get(key)
@@ -190,6 +265,13 @@ def upsert_roles(
                 status="open",
                 lane=lane,
                 location=listing.location,
+                prestige=_opt_str(tags.get("prestige")),
+                role_type=_opt_str(tags.get("role_type")),
+                industry=_opt_str(tags.get("industry")),
+                function=_opt_str(tags.get("function")),
+                is_technical=(
+                    tags["is_technical"] if isinstance(tags.get("is_technical"), bool) else None
+                ),
             )
             merged.append(role)
             by_key[key] = role
@@ -203,6 +285,12 @@ def upsert_roles(
         current.reason = reason or current.reason
         current.lane = lane
         current.location = listing.location or current.location
+        for field_name in ("prestige", "role_type", "industry", "function"):
+            value = _opt_str(tags.get(field_name))
+            if value is not None:
+                setattr(current, field_name, value)
+        if isinstance(tags.get("is_technical"), bool):
+            current.is_technical = tags["is_technical"]
         if current.status not in STICKY_STATUSES:
             # Seen again today → it is live, whatever the ager decided earlier.
             current.status = "open"
@@ -482,18 +570,151 @@ def closing_within(roles: list[OpenRole], today: date, days: int = 7) -> list[Op
 def prune(roles: list[OpenRole], today: date, keep_days: int = 60) -> list[OpenRole]:
     """Drop closed-out records older than `keep_days` past `last_seen`.
 
-    `applied` records are kept forever — they are the operator's application history,
-    not clutter. Anything still `open` is kept by definition.
+    EVERY sticky record is kept forever, `dismissed` included — not only
+    `applied`, which is all this used to keep.
+
+    THE ORIGINAL REASON GIVEN HERE WAS WRONG AND IS CORRECTED. It claimed a
+    dropped `dismissed` row would be "re-captured as open when the source
+    re-lists it". It would not: `dedupe.filter_new` skips any id already in the
+    seen-set and the seen-set has no TTL, so a dropped row simply ceases to
+    exist and is never seen again. That makes the case for keeping both marks
+    STRONGER, not weaker — the loss is silent and total rather than merely
+    annoying. Both are decisions the operator made by hand and neither is
+    reconstructible from anything else on disk.
+
+    Anything still `open` is kept by definition.
     """
     kept = []
     for role in roles:
-        if role.status in ("open", "applied"):
+        if role.status == "open" or role.status in STICKY_STATUSES:
             kept.append(role)
             continue
         last_seen = _parse_date(role.last_seen)
         if last_seen is None or (today - last_seen).days <= keep_days:
             kept.append(role)
     return kept
+
+
+# --------------------------------------------------------------------------
+# The purge
+#
+# The register is a rolling capture, and since the capture inversion it keeps
+# everything in scope rather than only what a prestige heuristic liked. Left
+# alone that grows without bound — the operator's own words were that he was
+# "worried this will compile to like a list of 1000+ postings if we don't add a
+# purge style thing". So rows leave on two independent clocks:
+#
+#   * the source stopped listing it (`last_seen` older than N days), and
+#   * it is simply old (`first_seen` older than two months).
+#
+# Either is sufficient. Neither applies to a role the operator has marked.
+# --------------------------------------------------------------------------
+
+PURGE_UNSEEN_AFTER_DAYS = 30
+PURGE_MAX_AGE_DAYS = 60
+
+
+def purge(
+    roles: list[OpenRole],
+    today: date,
+    *,
+    unseen_after_days: int = PURGE_UNSEEN_AFTER_DAYS,
+    max_age_days: int = PURGE_MAX_AGE_DAYS,
+) -> tuple[list[OpenRole], list[tuple[OpenRole, str]]]:
+    """Drop rows that have aged out. Returns `(kept, dropped)`.
+
+    `dropped` carries a per-row REASON, and returning it rather than logging it
+    here is the point: the caller logs every drop with the rule that fired.
+    A silent purge and a broken capture produce the same register — a count
+    that went down and nothing saying why — and this codebase has already lost
+    fifty days to one value meaning two things. If the reader can see "purged
+    17: 16 not seen for 30 days, 1 older than 60 days", a capture failure looks
+    different from a normal Tuesday.
+
+    ⚠️ STICKY ROWS ARE EXEMPT FROM BOTH RULES, unconditionally and before
+    either clock is consulted. `applied` and `dismissed` are the operator's own
+    marks: an application he sent is a fact about what he did, and a dismissal
+    is what stops a role he has already refused from being handed back to him
+    every time its source re-lists it. Neither can be reconstructed from
+    anything else on disk, so neither is ever traded for tidiness. This is the
+    one rule in this function that is not a heuristic.
+
+    ⚠️ A DEADLINE STILL IN THE FUTURE VETOES BOTH CLOCKS, and this one is not
+    a nicety — without it the purge deletes live roles on the first real run.
+    `last_seen` is an inference about OUR CRAWL, not a fact about the source:
+    the CEDARS adapter paginates greedily and stops at the first all-seen page,
+    so a listing that drifts past the walk depth stops being re-sighted while
+    remaining perfectly well listed on the portal. Measured against a live 59-row
+    register, the unseen rule alone dropped ELEVEN roles whose deadlines were
+    still three weeks away — every one of them a CEDARS row the walk had simply
+    stopped reaching, not a posting that had closed. A published deadline is the
+    source's own statement that the role is open; when we have that fact we do
+    not act on the weaker inference. Once the deadline passes, `age_roles`
+    marks the row `expired` and both clocks resume against it.
+
+    ⚠️ A SIGHTING TODAY VETOES THE MAX-AGE CLOCK, for the same reason. The
+    operator did ask for "past two months, kill it", and that rule stays — but
+    a source listing the role in THIS RUN is the strongest evidence available
+    that it is live, and deleting it anyway inverts the argument the deadline
+    veto is built on (the source's statement beats our inference). What the
+    max-age clock still catches is the intermittently-sighted row: seen ten
+    days ago, first seen seventy, under the unseen threshold and over the age
+    one.
+
+    A row whose dates are missing or unparseable is KEPT — `last_seen`,
+    `first_seen` AND `deadline` alike (see `deadline_state`). An unreadable
+    date is not evidence that the source stopped listing the role; it is
+    evidence that we cannot tell, and the safe direction for a delete is to not
+    delete.
+
+    ⚠️ THIS DELETE IS IRREVERSIBLE AND THE ROW DOES NOT COME BACK. The
+    seen-set (`dedupe.filter_new`) has no TTL, so once an id has been recorded
+    as seen it is never called new again — a purged row is not re-captured the
+    next time its source lists it. That is the whole reason the exemptions
+    above are written as absolutes rather than as heuristics, and the reason
+    every drop is reported.
+    """
+    kept: list[OpenRole] = []
+    dropped: list[tuple[OpenRole, str]] = []
+    for role in roles:
+        if role.status in STICKY_STATUSES:
+            kept.append(role)
+            continue
+        state, deadline = role.deadline_state
+        if state == "unreadable":
+            log.warning(
+                "purge: %s has an unreadable deadline %r — KEEPING it. A date we "
+                "cannot parse is not evidence the role closed.",
+                role.dedup_key, role.deadline,
+            )
+            kept.append(role)
+            continue
+        if deadline is not None and deadline >= today:
+            kept.append(role)
+            continue
+        last_seen = _parse_date(role.last_seen)
+        first_seen = _parse_date(role.first_seen)
+        if last_seen is not None and (today - last_seen).days > unseen_after_days:
+            dropped.append(
+                (role, f"not listed by {role.source} for {(today - last_seen).days} days "
+                       f"(> {unseen_after_days})")
+            )
+            continue
+        if (
+            first_seen is not None
+            and (today - first_seen).days > max_age_days
+            # `last_seen` is a date here, not the ISO string — comparing it to
+            # `today.isoformat()` would never be equal and the veto would be
+            # dead code that reads as if it worked.
+            and last_seen != today
+        ):
+            dropped.append(
+                (role, f"first seen {(today - first_seen).days} days ago "
+                       f"(> {max_age_days})")
+            )
+            continue
+        kept.append(role)
+    return kept, dropped
 
 
 def parse_status_overrides(md: str) -> dict[str, str]:

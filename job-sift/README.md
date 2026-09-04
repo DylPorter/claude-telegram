@@ -1,6 +1,94 @@
 # job-sift
 
-Daily job-sift digest for the operator. Pulls listings from HKU CEDARS NETJobs, LinkedIn job-alert emails and three standardised ATS boards (Greenhouse, Lever, Ashby); LLM-classifies each new listing for prestige + scope (internships / short-term contracts only); surfaces matches to Telegram via the same `/push` endpoint the signal-brief module uses. A rolling register keeps roles visible after the day they were found. Per-day archive lands in the vault under `Inbox/Job Sift/`.
+Daily job capture for the operator. Pulls listings from HKU CEDARS NETJobs, LinkedIn job-alert emails and three standardised ATS boards (Greenhouse, Lever, Ashby); keeps everything in SCOPE (a role a student could actually take) and tags the rest; writes a single self-contained HTML board you filter by hand. Telegram gets one summary bubble pointing at the board. A rolling register keeps roles visible after the day they were found, and a purge keeps it from growing without bound. Per-day archive lands in the vault under `Inbox/Job Sift/`.
+
+## Capture broadly, filter in the UI
+
+**The taste decision used to happen at capture, and whatever it rejected was
+gone.** The classifier gated on prestige — and, briefly, on technical-ness — so
+a keyword list decided what the operator was ever allowed to see. Two work
+cycles were spent arguing about that list, because a title-only test cannot
+tell "Microsoft Research Intern" (wanted) from "Fidelity Equity Research
+Associate" (not): both are just "Research".
+
+So the question was split in two:
+
+| Question | Where it is answered | Why |
+|---|---|---|
+| **Scope** — is this a role a student could take? | still at capture, still a gate | The answer does not vary by reader. A permanent senior role is irrelevant to everyone this runs for. |
+| **Prestige, technical-ness, industry, role type, business function** | tags on the row, filtered in the UI | These DO vary by reader — the sibling deployment's reader wants design and art roles — and being wrong costs a dropdown rather than a lost opportunity. |
+
+⚠️ **"Scope" means scope, not taste wearing its badge.** The one way to
+reintroduce the bug this redesign removed is to record a taste judgment as an
+`out_of_scope` verdict, which is exactly what the old `negative_title` guard
+did — see "The scope guard" below. Only two things may resolve scope for free:
+a seniority marker, and nothing else.
+
+**Tags are advisory, never gates.** A missing, malformed or unparseable tag
+leaves the role in the board UNTAGGED. It is never dropped and never hidden:
+untagged rows appear under the `—` option of every filter, the view always
+prints "showing N of M" so an over-narrow filter reads as a filter rather than
+as an empty dataset, and a missing field renders as `—` rather than being
+invented. Recreating "one value meaning both *nothing there* and *I could not
+look*" in the tagging layer would defeat the entire point of the redesign.
+
+## The board
+
+One HTML file. No CDN, no build step, no framework, no network at view time —
+it opens from `file://` on a machine that has none of this installed. Two tabs
+(Jobs, Events), dropdown filters, sorting by recency and deadline, free-text
+search. Written to `Areas/Work/Job Board.html` by default; set
+`JOB_SIFT_BOARD_PATH` to put it anywhere.
+
+The Events tab is fed by a small JSON file hk-events writes on its own run, and
+job-sift publishes the mirror-image feed for hk-events' Jobs tab. If the other
+side's feed is missing or unreadable, the tab SAYS SO rather than rendering an
+empty table — "the other service found nothing" and "I could not read the
+other service's feed" are different facts.
+
+## The purge
+
+Broad capture grows without bound, so rows leave on two clocks — either is
+sufficient:
+
+* `last_seen` older than `JOB_SIFT_PURGE_UNSEEN_DAYS` (default 30), or
+* `first_seen` older than `JOB_SIFT_PURGE_MAX_AGE_DAYS` (default 60).
+
+Three exemptions, each documented on `open_roles.purge`:
+
+* ⚠️ **`applied` and `dismissed` survive both rules.** They are the operator's
+  own marks, neither is reconstructible, and losing a dismissal means being
+  handed back a role he already refused. Note the purge is an IRREVERSIBLE
+  delete: `dedupe.filter_new` skips any id already in the seen-set and the
+  seen-set has no TTL, so a purged row is never re-captured.
+* **A deadline still in the future vetoes both clocks.** `last_seen` is a fact
+  about OUR CRAWL — the CEDARS adapter paginates greedily and stops at the
+  first all-seen page, so a listing that drifts past the walk depth stops being
+  re-sighted while remaining perfectly well listed. Measured against a live
+  59-row register, the unseen rule alone would have deleted eleven roles whose
+  deadlines were still three weeks away.
+* **An unreadable date keeps the row** — `last_seen`, `first_seen` AND
+  `deadline` alike. `deadline_date` used to return `None` for both "no
+  deadline" and "I could not parse the deadline", so the veto above silently
+  did not apply to a malformed date; `deadline_state` splits the three cases.
+  Not being able to tell is not evidence.
+* **A sighting today vetoes the max-age clock.** The "past two months, kill it"
+  rule stays, but a source listing the role in this very run is the strongest
+  evidence available that it is live. What the clock still catches is the
+  intermittently-sighted row: seen ten days ago, first seen seventy.
+
+Every drop is logged with the rule that fired. A register that shrank and said
+nothing is indistinguishable from a capture that failed.
+
+## Telegram is a pointer, not a digest
+
+One bubble: how many new, how many open, what is closing, and where the board
+is. **Two things are exempt and still push on their own** — the staleness alarm
+and the ⚠️ source-health line. They exist to be seen on a day when everything
+else is quiet, which is exactly the day the summary reads "0 new".
+
+The "near miss" digest is gone. It was a list of what the prestige gate
+rejected, and there is no prestige gate any more.
 
 ## Architecture
 
@@ -24,22 +112,29 @@ Daily job-sift digest for the operator. Pulls listings from HKU CEDARS NETJobs, 
                     │                    ▼
                     │            JSONL classifier log
                     ▼
-     surfaced (prestige lane OR floor lane)
+     captured (everything IN SCOPE), tagged with
+     role_type / industry / is_technical / lane
                     ▼
         rolling open-roles register
         · collapse duplicates across runs
         · LinkedIn liveness re-check (throttled)
-        · age → expire/stale → prune
+        · age → expire/stale → PURGE → prune
                     ▼
-   /push to claude-telegram bot   +   daily Markdown archive to vault
-   + ⚠️ health lines for any source or stage that did NOT run
+   self-contained HTML board (Jobs | Events)   +   jobs feed for hk-events
+                    ▼
+   ONE /push bubble pointing at the board   +   daily Markdown archive to vault
+   + ⚠️ health lines for any source or stage that did NOT run (exempt: still push)
 ```
 
-## Two admission lanes
+## Three lanes
 
-A listing can be surfaced by either of two independent lanes. It carries exactly
-ONE lane, and the digest, the archive and the register all render them under
-separate headings.
+`lane` used to decide whether a listing was captured at all. It is a TAG now —
+"which lane, if any, actively claimed this?" — and a third value, `broad`, was
+added for the answer "neither", which is most of what a broad capture brings in.
+Calling those rows `prestige` would print a claim about the employer that
+nothing checked. A listing carries exactly ONE lane; the archive and the
+register render them under separate headings, and the board offers `lane` as a
+filter.
 
 | Lane | Question it asks | Typical catch |
 |---|---|---|
@@ -79,63 +174,109 @@ Issue #2 asked for "regardless of employer brand"; that now includes the
 employers the prestige lane actively excludes, not just the ones it's merely
 silent on.
 
-## The scope guard, and why the keyword path does not admit
+## The scope guard, and why the keyword path neither admits nor rejects
 
-`_scope_quick_classify` resolves obvious titles without an LLM call. The two
-directions are deliberately **not** symmetric:
+`_scope_quick_classify` resolves obvious titles without an LLM call. What it is
+allowed to resolve got narrower once prestige stopped gating, and the narrowing
+is the important part:
 
-- **Rejecting for free is safe.** Seniority markers (senior/staff/principal/…)
-  and non-technical business functions (sales, BD, talent acquisition, an
-  unqualified "Analyst") resolve `out_of_scope` with no LLM call.
-- **Admitting for free is not.** An intern/summer/contract keyword is a
-  *candidate*: it still has to pass the scope classifier.
+- **Seniority still resolves for free.** Senior / staff / principal / director
+  markers resolve `out_of_scope` with no LLM call, because that is a genuine
+  scope judgment: a permanent senior role is not one a student can take, and
+  the answer does not vary by reader.
+- **A BUSINESS FUNCTION NO LONGER RESOLVES ANYTHING.** Sales, BD, talent
+  acquisition and an unqualified "Analyst" used to resolve `out_of_scope` here
+  and in `_route`. That was a technical-ness judgment recorded as a **scope**
+  verdict — the exact laundering the capture inversion exists to end — and it
+  deleted the role. Executed against the real term lists it dropped "Marketing
+  Intern", "Data Analyst Intern", "Graduate Trainee Programme", "Sales
+  Development Representative" and every "Trading" or "Risk" title.
+
+  Two of those refute the rule outright. "Graduate Trainee Programme" died on
+  `trainee` while `rotational` is in the accepted scope definition and is what
+  the tag vocabulary maps "graduate trainee" to. "Data Analyst Intern" died on
+  `analyst`, the same family as the worked example the redesign was argued
+  from.
+
+  It was survivable while a rejection cost a digest line and the near-miss
+  section still printed it. Terminating near-misses removed the last place such
+  a deletion was visible, and the seen-set has no TTL, so a free rejection now
+  costs the role permanently and silently.
+
+  The keyword list is still useful, so it is kept — as the **`function` tag**,
+  which the board filters on. Nothing is lost except the deletion.
+- **Admitting for free is still not allowed.** An intern/summer/contract
+  keyword is a *candidate*: it still has to pass the scope classifier.
+
+**This costs LLM calls and that is the accepted trade.** Those titles now reach
+the batched classifier instead of resolving for free. Batching is ~1 CLI call
+per 20 listings, so the marginal cost is a fraction of a call per title; the
+alternative is a keyword list silently deleting every marketing internship the
+operator will ever be offered.
 
 That asymmetry is the fix for a real defect. The keyword match used to be an
 admission, so any title containing "Summer" at a boosted employer was surfaced
 with nothing ever asking whether the role was technical — 20 of 35 entries in a
 register snapshot were finance, BD and sales roles admitted exactly that way.
 
-A note on that "35", because a "45" appears a few paragraphs down and the two are
-not reconcilable from anything in this repo. Both are counts of the operator's
-own register, taken while diagnosing this issue, and neither is checked in — it
-is personal application data. They are reported as the separate, unreproducible
-snapshots they are; do not read either as a stable denominator, and do not try
-to derive one from the other.
+A note on that "35": it is a count of the operator's own register, taken while
+diagnosing that issue, and it is not checked in — it is personal application
+data. Read it as the single unreproducible snapshot it is, not as a stable
+denominator.
 
-No `classifier_log.jsonl` exists in a fresh checkout to replay against, so
-this was measured two ways instead — a small mixed corpus and a real
-register — and this time they agree, which they did not the first time this
-number was reported (an earlier draft measured the small corpus through
-`_scope_quick_classify` in isolation, as if every title came from a boosted
-employer; run correctly through `_route` instead, the disagreement was a
-measurement artifact, not a real one).
+### What resolves for free now, and what it costs
 
-`_scope_quick_classify` only runs at all for a boosted or already-prestige
-employer (`_route` decides that first); a listing from a non-boosted employer
-takes a completely different path (`full`, an LLM call either way, before or
-after this change) where the fix's only effect is the NEW free rejection at
-the end of `_route` (the non-technical-title guard, which this change adds
-unconditionally). That branch is where most of the saving actually comes
-from, because most of a real day's titles are NOT from a boosted employer.
+⚠️ **THIS SECTION USED TO ARGUE FOR A GATE THAT NO LONGER EXISTS, ~30 lines
+below the section that removed it.** It reported free-resolution going *up*
+(3/8 → 6/8 on the corpus below, 40.0% → 46.7% on a register snapshot) and
+credited "the new negative-title guard at the end of `_route`" for the gain.
+That guard is gone — see the section above — and the gain it measured was the
+cost of deleting roles. Leaving the prose in place is exactly how the gate
+survived a review: the code was corrected and the README kept vouching for the
+old behaviour. Corrected figures follow.
 
-- **8-title mixed corpus** (5 non-boosted, 3 boosted — `tests/test_classifier_lanes.py`,
-  run through the real `_route`): free-resolution goes **3/8 → 6/8, up**.
-- **The operator's real 45-entry register** (real employers, real titles,
-  real source split across CEDARS and LinkedIn — not reproduced here,
-  personal application data): free-resolution goes **40.0% → 46.7%, up**.
-  Most of that register is non-boosted employers that were paying for a full
-  LLM call before this change regardless; the new negative-title guard at the
-  end of `_route` now catches several of them for free.
+Measured through the real `_route` on the 8-title mixed corpus in
+`tests/test_classifier_lanes.py` (5 non-boosted, 3 boosted employers):
 
-Anthropic alone lists ~389 roles, so neither number should be read as "the"
-production figure — the real mix shifts over time as sources and boost-list
-membership change. Both measurements are committed here as evidence, not
-because either one is definitive; the honest answer is "measure against
-`classifier_log.jsonl` once one exists."
+| Title | Employer | Route |
+|---|---|---|
+| Business Development Manager | non-boosted | `full` |
+| Sales Executive | non-boosted | `full` |
+| Talent Acquisition Intern | non-boosted | `full` |
+| Marketing Analyst | non-boosted | `full` |
+| Graduate Trainee Programme | non-boosted | `full` |
+| Senior Software Engineer | boosted | **`done`** |
+| Software Engineer Intern | boosted | `scope` |
+| Data Science Summer Analyst | boosted | `scope` |
+
+**Free-resolution is 1/8, and it is one seniority marker.** That is the whole
+of what may be settled without asking: every other row pays for a scope
+judgment. `tests/test_classifier_lanes.py` asserts this exact count, so the
+number above cannot drift from the code the way the old one did.
+
+The direction is deliberately *down*. The five `full` rows are the five the
+negative-title guard used to resolve for free by deleting them, and buying
+LLM calls back with deleted roles is not a saving. What bounds the cost
+instead is **batching**: `classify_batch` sends `_BATCH_CHUNK_SIZE` (20)
+listings per CLI call, so the marginal cost of a title is a twentieth of a
+call, and the CLI cold-start — the thing that actually dominated and once blew
+the service timeout — is paid once per chunk rather than once per listing.
+
+`_scope_quick_classify` only runs for a boosted or already-prestige employer
+(`_route` decides that first). A listing from a non-boosted employer takes the
+`full` path and always has; what changed is that it is no longer intercepted on
+the way there.
+
+Anthropic alone lists ~389 roles, so none of this should be read as "the"
+production figure — the real mix shifts as sources and boost-list membership
+change. The honest answer remains "measure against `classifier_log.jsonl` once
+one exists"; no such file is in a fresh checkout.
 
 The term lists behind both features live in `config/profile.yaml` (gitignored),
 not in `classifier.py`. The matcher is the mechanism; the terms are who the
-digest is for.
+digest is for. ⚠️ `negative_titles` is a **tag** vocabulary — it names the
+`function` facet's values and can no longer reject anything. See
+`config/profile.yaml.example`.
 
 ## "I could not look" is never "there was nothing"
 
@@ -273,6 +414,20 @@ JOB_SIFT_MODEL=haiku
 # JOB_SIFT_LIVENESS_INTERVAL_DAYS=7
 # Hard wall-clock budget for the whole liveness pass, in seconds. Default 60.
 # JOB_SIFT_LIVENESS_BUDGET_S=60
+
+# The board. Any absolute path — the file has no dependencies, so it is meant
+# to be copied to another machine and opened from disk.
+# JOB_SIFT_BOARD_PATH=Areas/Work/Job Board.html
+# Where job-sift PUBLISHES its rows for hk-events' Jobs tab.
+# JOB_SIFT_JOBS_FEED=.data/state/jobs_feed.json
+# Where it READS hk-events' rows for its own Events tab. Missing → the tab says
+# so; it never renders a fake zero.
+# JOB_SIFT_EVENTS_FEED=../hk-events/.data/state/events_feed.json
+
+# The purge (see "The purge" above). Either clock is sufficient; a future
+# deadline and a hand-set applied/dismissed status are exempt from both.
+# JOB_SIFT_PURGE_UNSEEN_DAYS=30
+# JOB_SIFT_PURGE_MAX_AGE_DAYS=60
 ```
 
 Two phases run in parallel, on the same `run_with_budget` machinery, with

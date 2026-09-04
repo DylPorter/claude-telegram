@@ -257,7 +257,10 @@ class TestRenderPlacement:
             staleness_alarm=alarm,
         )
         assert messages[0] == alarm
-        assert "No new relevant events today" in messages[1]
+        # ...and the summary it invalidates is still there, but now second.
+        # The wording changed when Telegram became a pointer; the property
+        # under test — the alarm LEADS — did not.
+        assert "HK events" in messages[1]
 
     def test_alarm_leads_a_populated_digest(self):
         alarm = "🚨 alarm"

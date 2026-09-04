@@ -41,13 +41,33 @@ unclear_role_default: >
   intern / contract / rotational / co-op / summer / winter / trainee keywords
 
 # ---------------------------------------------------------------------------
-# Scope guard — the cheap, pre-LLM sanity check on a job title.
+# Scope guard — the cheap, pre-LLM read of a job title.
 #
 # An intern/summer/contract keyword in the title is a CANDIDATE, never an
-# admission: it still has to pass the scope classifier. This block is the other
-# half of that — titles naming a non-technical business function are rejected
-# with no LLM call at all. "Morgan Stanley IED Summer Analyst" contains
-# "summer" and is not an engineering role.
+# admission: it still has to pass the scope classifier.
+#
+# ⚠️ `negative_titles` IS A TAG VOCABULARY, NOT A REJECT LIST. This is the one
+# file where you configure that list, so read this before you fill it in.
+#
+# It used to be a gate: a title naming a non-technical business function was
+# resolved `out_of_scope` with no LLM call and the role was dropped. That was a
+# TECHNICAL-NESS judgment recorded as a SCOPE verdict, and once the digest
+# stopped printing near-misses the drop became invisible and permanent (the
+# seen-set has no TTL, so a dropped listing is never offered again). Executed
+# against a list like the one sketched below it deleted "Marketing Intern",
+# "Data Analyst Intern" and "Graduate Trainee Programme" — the last of which
+# is a `rotational` role, which the accepted scope definition explicitly wants.
+#
+# Now a match sets the `function` TAG on the row — "sales", "analyst",
+# "talent acquisition" — which becomes a column and a dropdown on the HTML
+# board. NOTHING here can remove a listing from the board. Adding a term makes
+# a filter available; it does not make roles disappear. If you want a term to
+# hide roles, hide them in the board's dropdown, where you can see how many you
+# hid and undo it.
+#
+# `technical_qualifiers` still cancels a match, so a genuine engineering title
+# is not tagged with a business function it does not have: "Technology Summer
+# Analyst" gets no `function` tag, a bare "Summer Analyst" gets `analyst`.
 #
 # BOTH KEYS ARE OPTIONAL. Omit either and job-sift uses its built-in default,
 # which is a generic engineering-vs-business role taxonomy — the authoritative
@@ -60,14 +80,21 @@ unclear_role_default: >
 # Terms match on word boundaries; a trailing `*` means prefix, so
 # `business develop*` covers "Business Development" and "Business Developer".
 #
-# Two traps worth knowing if you write your own lists:
+# Two traps worth knowing if you write your own lists. Both are now cosmetic —
+# getting either wrong mislabels a tag rather than deleting a role, which is
+# the entire point of the change described above:
 #   - a qualifier must be NARROWER than the negatives it overrides. Bare
 #     "developer" cancels "business develop*".
 #   - "programm*" matches "Programme", so a graduate trainee PROGRAMME reads as
 #     technical. Use "programmer*" / "programming".
+#
+# The `*` prefix marker is stripped before the term becomes a tag, so
+# `business develop*` shows up in the dropdown as "business develop" rather
+# than as a glob.
 # ---------------------------------------------------------------------------
 # scope_guard:
-#   # Non-technical business functions. Never admitted by the quick path.
+#   # Non-technical business functions. These become the `function` TAG on the
+#   # board. They do NOT reject anything.
 #   negative_titles:
 #     - sales
 #     - business develop*

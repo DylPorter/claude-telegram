@@ -527,7 +527,7 @@ class TestAClassifierOutageIsVisibleAndNonConsuming:
             orchestrator, "_fetch_all_sources", lambda: (list(listings), {}, ["cedars"])
         )
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "classify_batch", lambda ls: list(verdicts))
 
@@ -542,9 +542,12 @@ class TestAClassifierOutageIsVisibleAndNonConsuming:
         assert orchestrator.run() == 0
 
         blob = "\n".join(pushed)
-        # The exact digest the reviewer reproduced: a quiet line and a rolling
-        # chip, with nothing anywhere saying the classifier never ran.
-        assert "No new prestige matches today" in blob, "quiet line still expected"
+        # The exact digest the reviewer reproduced: a summary line reporting
+        # zero, with nothing anywhere saying the classifier never ran. The
+        # summary wording changed when Telegram became a pointer; the property
+        # under test did not, and is the reason the ⚠️ line is EXEMPT from the
+        # one-bubble rule.
+        assert "0 new" in blob, "the zero summary is still expected"
         assert "⚠️" in blob, "an outage must not render as a clean quiet day"
         assert "classifier" in blob
         assert "3" in blob
@@ -755,7 +758,7 @@ class TestAnUnclassifiedWinnerTakesItsMirroredLoserWithIt:
             orchestrator, "_fetch_all_sources", lambda: (list(pair), {}, ["cedars"])
         )
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
         monkeypatch.setattr(orchestrator, "classify_batch", lambda ls: list(verdicts))

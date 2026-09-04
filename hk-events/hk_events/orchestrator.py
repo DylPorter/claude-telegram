@@ -14,7 +14,10 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
+from typing import NamedTuple
 
+from hk_events import board as board_mod
 from hk_events import config, source_health
 from hk_events.calendar_sync import sync_events
 from hk_events.classifier import classify
@@ -30,6 +33,15 @@ from hk_events.dedupe import (
     save_seen,
 )
 from hk_events.errors import SourceNotConfiguredError
+from hk_events.open_events import (
+    OpenEvent,
+    age_events,
+    load_events,
+    purge,
+    save_events,
+    upcoming,
+    upsert_events,
+)
 from hk_events.render import render, render_vault_archive
 from hk_events.schema import Event, RelevanceResult
 from hk_events.sources import (
@@ -175,6 +187,115 @@ def _fetch_all_sources() -> tuple[list[Event], dict[str, str], list[str]]:
     return events, errors, succeeded
 
 
+def _update_event_register(
+    events: list[Event],
+    seen_by_source: dict[str, dict[str, dict]],
+    today: date,
+    *,
+    dry_run: bool,
+) -> tuple[list[OpenEvent], int]:
+    """Fold this run's FETCHED events into the rolling register.
+
+    Fetched, not surfaced — and the difference is the whole point. `filter_due`
+    only yields an event at the two moments it deserves a notification, so a
+    register fed from `surfaced` would record an event once and then never
+    learn that its source is still listing it. `last_seen` would decay to
+    "nobody has listed this in a month" for an event that is on every feed
+    today, and the purge would then delete it. So every event inside the
+    horizon is upserted every run, and the room tag rides along from the
+    seen-set, where the classifier's verdict is already cached.
+
+    Runs even on a zero-surfaced day: ageing and purging are time-driven, so
+    the register would go stale if we only touched it when something new
+    landed.
+    """
+    stored = load_events()
+    rows = []
+    for event in events:
+        rec = (seen_by_source.get(event.source) or {}).get(event.external_id) or {}
+        # `tag` may be absent (legacy state) or None (never classified). Both
+        # mean UNTAGGED, and `upsert_events` leaves any stored tag alone rather
+        # than clearing it — "nobody classified it this run" is not a verdict.
+        rows.append((event, rec.get("tag"), None))
+    merged = upsert_events(stored, rows, today)
+    aged = age_events(merged, today)
+    kept, purged = purge(
+        aged,
+        today,
+        past_after_days=config.purge_past_after_days(),
+        unseen_after_days=config.purge_unseen_after_days(),
+        max_age_days=config.purge_max_age_days(),
+    )
+    for record, why in purged:
+        log.info("purged %s (%s): %s", record.dedup_key, record.title[:60], why)
+    log.info(
+        "event register: %d row(s), %d upcoming, %d purged",
+        len(kept), len(upcoming(kept)), len(purged),
+    )
+
+    if dry_run:
+        log.info("dry-run — NOT writing open_events.json")
+        return kept, len(purged)
+    save_events(kept)
+    return kept, len(purged)
+
+
+class _BoardWrite(NamedTuple):
+    """What happened to the board this run.
+
+    A bare `Path | None` was not enough, and the gap showed up in the push:
+    `None` meant three different things — dry run, no path configured, and a
+    render that raised — while the summary bubble printed only one of them,
+    "no board path configured". That is a cause the code never checked,
+    reported to the one reader who could act on it. Same shape as every other
+    bug this codebase keeps deleting: one value standing in for several facts.
+
+    `path` is truthy exactly when a file was written, so `if result.path:`
+    still reads naturally at the call sites.
+    """
+
+    path: Path | None
+    problem: str | None = None
+
+
+def _write_board(records: list[OpenEvent], today: date, *, dry_run: bool):
+    """Write the HTML board and the feed job-sift reads.
+
+    Returns a `_BoardWrite`: the path when a file was written, otherwise the
+    reason there is none, so the push can report the cause it actually
+    observed rather than guessing at one.
+
+    Wrapped whole: the board is a VIEW of state that is already persisted, so a
+    failure to render it must never take down a run that has fetched,
+    classified, pushed and saved. Returning None rather than a path that does
+    not exist is what lets the push say "not written this run" instead of
+    pointing the reader at an absent file.
+    """
+    if dry_run:
+        # --dry-run writes no state, pushes nothing, and writes NO BOARD.
+        log.info("dry-run — NOT writing the board")
+        return _BoardWrite(None, "dry run")
+    # The feed first, and above the board-path check: it is what the OTHER
+    # service reads for its Events tab, so it is not conditional on this
+    # deployment having somewhere to put an HTML file of its own.
+    try:
+        board_mod.write_feed(config.events_feed_path(), records, today)
+    except Exception as exc:  # noqa: BLE001
+        log.error("events feed could not be written: %s", exc)
+    path = config.board_path()
+    if path is None:
+        log.info("no board path configured — skipping the board")
+        return _BoardWrite(None, "no board path configured")
+    try:
+        html = board_mod.build_board(
+            records, today, jobs_feed_path=config.jobs_feed_path()
+        )
+        return _BoardWrite(board_mod.write_board(path, html))
+    except Exception as exc:  # noqa: BLE001 — a view must not kill the run
+        log.error("board could not be written to %s: %s", path, exc)
+        return _BoardWrite(None, f"could not be written to {path}")
+
+
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
     _setup_logging()
     today = date.today()
@@ -250,8 +371,12 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     if not events:
         log.warning("no events fetched from any source — pushing heartbeat")
+        # Ageing and purging are time-driven, so the register still needs a
+        # pass on a dead day.
+        records, purged = _update_event_register([], {}, today, dry_run=dry_run)
+        board = _write_board(records, today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
+            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, upcoming_count=len(upcoming(records)), purged=purged))
             write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -307,6 +432,11 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     calendar_stats = sync_events([e for e, _, _ in surfaced], dry_run=dry_run)
     log.info("calendar sync: %s", calendar_stats)
 
+    # 4b. Roll the rolling register forward, then write the board — BEFORE the
+    #     push, so the summary bubble can only point at a file that exists.
+    records, purged = _update_event_register(events, seen_by_source, today, dry_run=dry_run)
+    board = _write_board(records, today, dry_run=dry_run)
+
     # 5. Push to Telegram
     messages = render(
         surfaced=surfaced,
@@ -317,6 +447,10 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         source_errors=source_errors,
         staleness_alarm=staleness_alarm,
         drop_notice=drop_notice,
+        board_path=board.path,
+        board_problem=board.problem,
+        upcoming_count=len(upcoming(records)),
+        purged=purged,
     )
     if dry_run:
         log.info("dry-run — would push %d messages:", len(messages))

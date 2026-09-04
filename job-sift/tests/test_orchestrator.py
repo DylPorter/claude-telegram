@@ -277,7 +277,7 @@ class _OrderHarness:
         )
         monkeypatch.setattr(orchestrator, "filter_new", lambda ls: (ls, {"greenhouse": {"1"}}))
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(
             orchestrator,
             "classify_batch",
@@ -356,7 +356,7 @@ def _health_after_run(monkeypatch, tmp_path, *, fetched, seeded=None):
     state.write_text(json.dumps(_SEEDED_HEALTH if seeded is None else seeded))
 
     monkeypatch.setattr(orchestrator, "_fetch_all_sources", lambda: fetched)
-    monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+    monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
     monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
     monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
 
@@ -413,7 +413,7 @@ class TestSucceededComesFromTheFetchPhase:
         state.write_text(json.dumps(_SEEDED_HEALTH))
 
         monkeypatch.setattr(orchestrator, "_fetch_all_sources", lambda: ([], {}, []))
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(
             orchestrator, "push_messages", lambda msgs: pytest.fail("dry-run pushed")
         )
