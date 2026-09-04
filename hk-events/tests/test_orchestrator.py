@@ -582,17 +582,12 @@ class _NoBoard:
 
 class TestDryRunWritesNoState:
     def _run(self, monkeypatch, tmp_path, *, dry_run: bool) -> int:
-        from hk_events import dedupe
         from hk_events.schema import RelevanceResult
 
+        # `dedupe` resolves `config.STATE_DIR` at call time (see
+        # TestStateDirIsRedirectable in test_dedupe_state_paths.py), so
+        # patching `config.STATE_DIR` alone is enough to redirect `_log_path()`.
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-        # `dedupe` does `from hk_events.config import STATE_DIR`, binding the
-        # path at IMPORT time, so patching `config.STATE_DIR` alone leaves
-        # `_log_path()` pointing at the REAL `.data/state/`. Patch the name the
-        # module actually reads. (job-sift resolves this at call time and has a
-        # test pinning that; hk-events still binds at import — noted, not fixed
-        # here, since this change is a dry-run guard, not a refactor.)
-        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         monkeypatch.setenv("HK_EVENTS_STUB", "0")
         monkeypatch.setattr(config, "assert_required", lambda: None)
 

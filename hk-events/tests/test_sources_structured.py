@@ -735,7 +735,6 @@ def test_the_orchestrator_collapses_before_the_seen_set_diff(monkeypatch, tmp_pa
     `events, collapsed = collapse_cross_source(events)` → `collapsed = []`.
     """
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
 
     page_events = luma_discover._parse_next_data(_fixture("luma_hong_kong.html"))
     monkeypatch.setattr(
@@ -817,7 +816,6 @@ class TestSeenSetSurvivesTheHandOff:
         """One full run's worth of dedupe: collapse → diff → verdict → mirror →
         persist. Mirrors `orchestrator.run` steps 1d through 3b and 6."""
         monkeypatch.setattr(config, "STATE_DIR", state)
-        monkeypatch.setattr(dedupe, "STATE_DIR", state)
         kept, collapsed = collapse_cross_source(events)
         due, seen_by_source = dedupe.filter_due(kept)
         for event, _stage, _tag in due:
@@ -868,7 +866,6 @@ class TestSeenSetSurvivesTheHandOff:
     def _settle(self, events, state, monkeypatch, *, verdict="founder_ai"):
         """collapse → diff → verdict → mirror → persist, returning the winner."""
         monkeypatch.setattr(config, "STATE_DIR", state)
-        monkeypatch.setattr(dedupe, "STATE_DIR", state)
         kept, collapsed = collapse_cross_source(events)
         due, seen_by_source = dedupe.filter_due(kept)
         for event, _stage, _tag in due:
@@ -913,7 +910,6 @@ class TestSeenSetSurvivesTheHandOff:
         """
         ics, page = self._pair()
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         # Winner's record: discovery only.
         dedupe.save_seen("luma", {ics.external_id: {"stages": ["new"], "tag": "founder_ai"}})
         # Loser's record: reminder ALREADY fired.
@@ -943,7 +939,6 @@ class TestSeenSetSurvivesTheHandOff:
         re-fire it after a hand-off."""
         ics, page = self._pair()
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         dedupe.save_seen(
             "luma", {ics.external_id: {"stages": ["new", "soon"], "tag": "founder_ai"}}
         )
@@ -982,7 +977,6 @@ class TestSeenSetSurvivesTheHandOff:
         is real and only its outbound edges are stubbed.
         """
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
-        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
         monkeypatch.setattr(orchestrator.config, "assert_required", lambda: None)
         monkeypatch.setattr(orchestrator, "write_archive", lambda today, md: None)
         monkeypatch.setattr(orchestrator, "sync_events", lambda events, dry_run: None)

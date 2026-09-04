@@ -6,19 +6,24 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from hk_events.config import HK_EVENTS_ARCHIVE_DIR, VAULT_ROOT
+from hk_events import config
 
 log = logging.getLogger(__name__)
 
 
+# Resolved through the `config` MODULE on every call, never bound at import
+# time — same reasoning as dedupe._seen_path. A test that points
+# `config.HK_EVENTS_ARCHIVE_DIR` at a tmp_path must actually redirect the
+# write, or it silently lands in the live vault instead.
 def write_archive(today: date, content: str) -> Path | None:
     """Write the rendered archive note to the vault. Returns path or None if vault not configured."""
-    if VAULT_ROOT is None or HK_EVENTS_ARCHIVE_DIR is None:
+    archive_dir = config.HK_EVENTS_ARCHIVE_DIR
+    if config.VAULT_ROOT is None or archive_dir is None:
         log.info("vault not configured — skipping archive")
         return None
 
-    HK_EVENTS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    path = HK_EVENTS_ARCHIVE_DIR / f"{today.isoformat()}.md"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / f"{today.isoformat()}.md"
     path.write_text(content)
     log.info("archive written to %s", path)
     return path

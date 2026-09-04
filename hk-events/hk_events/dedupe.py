@@ -32,7 +32,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from hk_events.config import HK_EVENTS_REMINDER_DAYS, STATE_DIR
+from hk_events import config
 from hk_events.schema import Event
 
 log = logging.getLogger(__name__)
@@ -41,12 +41,18 @@ STAGE_NEW = "new"
 STAGE_SOON = "soon"
 
 
+# Resolved through the `config` MODULE on every call, never bound at import
+# time. `source_health` already did this and says why: a test that points
+# `config.STATE_DIR` at a tmp_path must actually redirect the writes. With a
+# `from ... import STATE_DIR` binding it silently does not, and the test writes
+# to the live deployment's state instead — which for these two files means
+# re-notifying an event or losing the relevance log.
 def _seen_path(source: str) -> Path:
-    return STATE_DIR / f"seen_{source}.json"
+    return config.STATE_DIR / f"seen_{source}.json"
 
 
 def _log_path() -> Path:
-    return STATE_DIR / "relevance_log.jsonl"
+    return config.STATE_DIR / "relevance_log.jsonl"
 
 
 def _migrate(raw) -> dict[str, dict]:
@@ -260,7 +266,7 @@ def _is_soon(event: Event, *, now: datetime | None = None) -> bool:
     start = event.start
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
-    return now <= start <= now + timedelta(days=HK_EVENTS_REMINDER_DAYS)
+    return now <= start <= now + timedelta(days=config.HK_EVENTS_REMINDER_DAYS)
 
 
 def filter_due(

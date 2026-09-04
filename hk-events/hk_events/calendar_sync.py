@@ -40,36 +40,40 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from hk_events.config import (
-    CACHE_DIR,
-    GWS_BIN,
-    HK_EVENTS_CALENDAR_ENABLED,
-    HK_EVENTS_CALENDAR_ID,
-)
+from hk_events import config
+from hk_events.config import GWS_BIN, HK_EVENTS_CALENDAR_ENABLED, HK_EVENTS_CALENDAR_ID
 from hk_events.schema import Event
 
 log = logging.getLogger(__name__)
 
 GWS_TIMEOUT = 30.0
-_SYNCED_PATH = CACHE_DIR / "calendar_synced.json"
 
 # Default event duration when a feed gives a start but no end (lots of scraped
 # events omit it). 2h is a reasonable HK meetup default.
 _DEFAULT_DURATION_HOURS = 2
 
 
+# Resolved through the `config` MODULE on every call, never bound at import
+# time — same reasoning as dedupe._seen_path. A test that points
+# `config.CACHE_DIR` at a tmp_path must actually redirect the idempotency map,
+# or it silently reads/writes the live deployment's calendar_synced.json.
+def _synced_path() -> Path:
+    return config.CACHE_DIR / "calendar_synced.json"
+
+
 def _load_synced() -> dict[str, dict]:
-    if not _SYNCED_PATH.exists():
+    p = _synced_path()
+    if not p.exists():
         return {}
     try:
-        return json.loads(_SYNCED_PATH.read_text())
+        return json.loads(p.read_text())
     except Exception as exc:
         log.warning("failed to load calendar idempotency map: %s — starting fresh", exc)
         return {}
 
 
 def _save_synced(data: dict[str, dict]) -> None:
-    _SYNCED_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
+    _synced_path().write_text(json.dumps(data, indent=2, sort_keys=True))
 
 
 def _rfc3339(dt: datetime) -> str:
