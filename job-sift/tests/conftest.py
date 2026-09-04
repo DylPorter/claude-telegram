@@ -142,21 +142,34 @@ def no_network(monkeypatch):
 # works exactly as before.
 
 #: Captured at conftest import, BEFORE anything is patched.
-#: DELIBERATELY NARROW — see the same note in hk-events/tests/conftest.py.
-#: `STATE_DIR`, `COOKIE_DIR` and `LOG_DIR` are all written by
-#: `job-sift-keepalive.timer` EVERY TEN MINUTES (it refreshes
-#: `state/cedars_session.json` so the PHPSESSID does not idle out). Guarding
-#: them means any suite run that straddles a tick fails falsely — observed
-#: ticks at 01:22:38 and 01:33:38 during review. `VAULT_ROOT` is the whole
-#: vault and is worse still.
+#: `STATE_DIR` IS guarded, and an earlier draft that dropped it was wrong.
+#: It holds `seen_*.json` (507 entries in `seen_cedars.json`),
+#: `classifier_log.jsonl` and `open_roles.json` — so dropping it left
+#: `save_open_roles` unguarded while `write_open_roles`, in the very same
+#: module, was guarded. With `STATE_DIR` absent, neutering the redirect and
+#: calling `dedupe.save_seen` empties the real seen-set 507 -> 0, suite green
+#: and silent. That is the exact class of loss this whole change exists to
+#: prevent.
 #:
-#: What remains is the set the SUITE writes and no timer does: the two vault
-#: notes and the board.
+#: The false positive that motivated dropping it is real but is ONE FILE:
+#: `job-sift-keepalive.timer` rewrites `state/cedars_session.json` every ten
+#: minutes to keep the PHPSESSID alive (ticks observed at 01:22:38, 01:33:39,
+#: 01:44:40), so any suite run straddling a tick would fail falsely. Excluding
+#: that single filename keeps the alarm honest without blinding it.
+#:
+#: `VAULT_ROOT` stays absent — it is the whole vault, written by cron, gbrain
+#: sync and every git command.
 _REAL_PATHS = {
+    "STATE_DIR": config.STATE_DIR,
     "ARCHIVE_DIR": config.JOB_SIFT_ARCHIVE_DIR,
     "OPEN_ROLES_PATH": config.OPEN_ROLES_PATH,
     "BOARD_PATH": config.BOARD_PATH,
 }
+
+#: Files inside a guarded directory that an EXTERNAL process rewrites on a
+#: schedule. Excluded from the comparison so the timer cannot cry wolf. Keep
+#: this list as short as it can possibly be: every entry is a blind spot.
+_SNAPSHOT_EXCLUDE = {"STATE_DIR": frozenset({"cedars_session.json"})}
 
 #: Backed by a config attribute the fixture redirects — safe to clear.
 _PATH_ENV_VARS = (
@@ -167,17 +180,23 @@ _PATH_ENV_VARS = (
     "DEFAULT_CWD",
 )
 
-#: NOT backed by any attribute: `events_feed_path()` falls through to a
-#: hardcoded `BOT_ROOT/hk-events/.data/state/events_feed.json`, i.e. the
-#: sibling project's real state. Clearing these steers a read OUT of the
-#: sandbox, so they are SET rather than deleted.
+#: `events_feed_path()` (config.py:204) falls through to a hardcoded
+#: `BOT_ROOT/hk-events/.data/state/events_feed.json` — the SIBLING project's
+#: real state, unreachable by any patch of this project's `config`. Clearing it
+#: steers a read OUT of the sandbox, so it is SET rather than deleted.
+#: (`jobs_feed_path()` falls back to this project's own redirected `STATE_DIR`,
+#: so only one of the pair is actually hazardous — but setting both keeps them
+#: symmetric and survives either resolver changing.)
 _FEED_ENV_VARS = ("JOB_SIFT_JOBS_FEED", "JOB_SIFT_EVENTS_FEED")
 
 
-def _snapshot(path):
+def _snapshot(path, exclude=frozenset()):
     """(size, mtime_ns) per file, not mere existence — the notes this suite can
     clobber ALREADY EXIST on a real machine, so an existence check catches
-    nothing."""
+    nothing.
+
+    `exclude` drops files an external timer rewrites on its own schedule.
+    """
     if path is None:
         return None
     p = Path(path)
@@ -189,7 +208,7 @@ def _snapshot(path):
     return {
         str(f.relative_to(p)): (f.stat().st_size, f.stat().st_mtime_ns)
         for f in p.rglob("*")
-        if f.is_file()
+        if f.is_file() and f.name not in exclude
     }
 
 
@@ -235,12 +254,17 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
 def _assert_real_dirs_untouched():
     """After the whole session the REAL directories must be byte-for-byte what
     they were before it."""
-    before = {name: _snapshot(p) for name, p in _REAL_PATHS.items()}
+    def snap():
+        return {
+            name: _snapshot(p, _SNAPSHOT_EXCLUDE.get(name, frozenset()))
+            for name, p in _REAL_PATHS.items()
+        }
+
+    before = snap()
     yield
+    after = snap()
     damaged = [
-        f"{name} -> {path}"
-        for name, path in _REAL_PATHS.items()
-        if _snapshot(path) != before[name]
+        f"{name} -> {_REAL_PATHS[name]}" for name in _REAL_PATHS if after[name] != before[name]
     ]
     assert not damaged, (
         "the test suite wrote to REAL directories: "

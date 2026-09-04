@@ -118,8 +118,10 @@ conftest pytest loads. `load_dotenv` does not override an already-set variable, 
 
 Every module binds paths with `from signal_brief.config import <X>`, and three freeze
 them again (`exposure.EXPOSURE_FILE:21`, `sources/rss.SEEN_CACHE:25`,
-`threads.THREADS_STATE_PATH:54`). The fixture patches the config module *and* all
-16 bound names, including `LOG_DIR` on each of the three orchestrators.
+`threads.THREADS_STATE_PATH:54`). The fixture patches the config module *and* every bound name.
+(Round 2 claimed "all 16"; the real count then was 15 — `filter.VAULT_ROOT` was
+missed. It is 17 bound names across 10 modules plus 11 `config` attributes now,
+verified by parsing the fixture rather than by counting by eye.)
 
 **Agent spawn:** `threads.py` and `vault_agent.py` run `claude --permission-mode
 bypassPermissions` with `cwd=VAULT_ROOT`. A `no_agent_spawn` autouse fixture now
@@ -182,3 +184,92 @@ timer, not the suite, and exactly the false positive that motivated narrowing
 **Note:** `signal-brief/.data/logs/2026-09-05-{morning,evening,weekly}.log` (all
 stamped 01:32:36) are residue from the reviewer's run of the previous commit. They
 are gitignored and harmless; delete at will.
+
+---
+
+# Round 3 — re-review findings addressed
+
+## Important 1: narrowing went too far and disarmed the guard over the incident
+
+Round 2 dropped `STATE_DIR` from `_REAL_PATHS` in both repos. That removed the
+alarm from **exactly where the destroyed file lives**: `state/seen_luma.json` is
+the 58-entry dedup set a previous agent emptied. Reproduced in a sandbox — with
+`STATE_DIR` absent, a test that escapes the redirect and calls
+`dedupe.save_seen("luma", {})` takes the real file **58 → 0 with the suite green
+and no alarm**. Same in job-sift: `seen_cedars.json` **507 → 0**, silent. And
+because `open_roles.json` lives in `STATE_DIR`, `save_open_roles` was unguarded
+while `write_open_roles` — in the same module — was guarded.
+
+The stated justification was also wrong for hk-events. Its only timer is
+`hk-events.timer`, daily at 09:30; there is no short-cadence writer in that tree.
+The false positive belongs to job-sift alone and is **one file**,
+`state/cedars_session.json`, rewritten every ten minutes by
+`job-sift-keepalive.timer`.
+
+So: `STATE_DIR` is restored outright in hk-events, and restored in job-sift with
+`cedars_session.json` excluded from `_snapshot` via a `_SNAPSHOT_EXCLUDE` map.
+That map is kept as short as it can be — every entry is a blind spot.
+
+Proved both directions in a sandbox with the real `.data` replicated:
+
+| Probe | Expected | Result |
+|---|---|---|
+| hk-events: escape redirect, `save_seen("luma", {})` → 58→0 | **fires** | fires, names `STATE_DIR` |
+| job-sift: escape redirect, `save_seen("cedars", set())` → 507→0 | **fires** | fires, names `STATE_DIR` |
+| job-sift: rewrite `cedars_session.json` (keep-alive shape) | **silent** | 659 passed, no alarm |
+
+## Important 2: the sandbox had silently disabled a live test
+
+`test_replace_against_real_home_preserves_rest_byte_for_byte` resolves
+`config.HOME_NOTE` and skips when the file is absent. Pointing the vault at an
+empty `mkdtemp` meant it skipped on every machine, forever — and "97 passed +
+1 skipped" was reported as the expected result, so it passed unchallenged.
+
+`tests/fixtures/home_sample.md` is now seeded into every sandbox vault as
+`Home.md`, so the test runs. It never wrote to a vault, so this was never a
+hazard; it did make the suite depend on a file outside the repo, which the
+fixture also removes. signal-brief is now **98 passed, 0 skipped**.
+
+## Minors
+
+- **Two-tier sandbox closed.** `filter.VAULT_ROOT` (a bound name, and the site of
+  the *third* `bypassPermissions` spawn at `filter.py:275-280`) plus
+  `config.HOME_NOTE` / `DONE_LOG_NOTE` stayed on the session-scope vault while
+  everything else moved to the per-test one. All three are patched now. Both tiers
+  were sandbox paths, so no real-write hazard — but a split like that is a trap.
+- **`mkdtemp` leak fixed.** 23 `/tmp/signal-brief-sandbox-*` dirs had accumulated.
+  `atexit.register(shutil.rmtree, ...)` now cleans up; verified zero leaked after a
+  full run.
+- **`subprocess.run([])`** raised `IndexError` from inside the guard, masking the
+  stdlib error. Empty argv now falls through to subprocess.
+- **Feed-var comments corrected.** Only one resolver of each pair is hardcoded to a
+  sibling path (`hk_events/config.py:145`, `job_sift/config.py:204`); the other
+  falls back to its own redirected `STATE_DIR`. Setting both env vars is still
+  right — it keeps the pair symmetric — but the comments no longer overstate it.
+
+## Known edges (recorded, not fixed)
+
+- `no_agent_spawn` wraps `subprocess.run` only. **`subprocess.Popen` and
+  `check_output` are unguarded.** Nothing in the package uses them today; a future
+  spawn via either would bypass the guard.
+- `pytest --confcutdir=tests` skips the root conftest entirely, taking the whole
+  signal-brief sandbox with it. That is a deliberate flag, not an accident, but it
+  is the one invocation that disarms everything here.
+- The `_SNAPSHOT_EXCLUDE` entry for `cedars_session.json` is a real blind spot: a
+  test that clobbers that one file will not be caught.
+
+## Round-3 verification
+
+Four suites: hk-events **262**, job-sift **658**, signal-brief **98 passed,
+0 skipped**, sibling **277**. Snapshots of `hk-events/.data`, `job-sift/.data`,
+`signal-brief/.data` and the vault archive dir: **all four byte-identical**, with
+no keep-alive tick inside the window this round. `seen_luma.json` still 58 entries,
+`seen_cedars.json` still 507.
+
+## ⚠️ Unrelated finding, not fixed here
+
+`signal-brief/tests/test_home_refresh.py`'s `SAMPLE_HOME` constant embeds a real
+family member's first name (a `## 🚨 <name>'s uni admissions` heading and a
+`[[<name>]]` wikilink) in what is a **public** repo — the same class of content the
+recent history rewrite removed. It predates this work and is out of scope for a
+test-isolation change, so it has been left alone and raised separately.

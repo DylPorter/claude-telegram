@@ -2,8 +2,8 @@
 
 The load-bearing guarantee: the This Week block replacement is SURGICAL — every
 other section of Home (Family commitments, Funding, `Next / in the picture`, Clients, etc.) is
-preserved byte-for-byte. We prove that against the REAL Home.md (read-only copy;
-the test never writes to the vault), plus idempotency / no-empty-header rules for
+preserved byte-for-byte. We prove that against a seeded fixture Home note
+(tests/fixtures/home_sample.md; nothing here ever writes to a vault), plus idempotency / no-empty-header rules for
 the Done Log sweep.
 """
 
@@ -138,11 +138,23 @@ def test_replace_preserves_everything_outside_this_week():
 
 
 def test_replace_against_real_home_preserves_rest_byte_for_byte():
-    """Run the replacement against the LIVE Home.md and prove only the This Week
-    block changed — everything from the next heading onward is identical."""
-    # Resolved from config (DEFAULT_CWD / SIGNAL_BRIEF_VAULT_ROOT), not a literal
-    # path: this asserts against whatever vault the checkout is configured for,
-    # and skips cleanly on a machine that has none.
+    """Run the replacement against a full multi-section Home note and prove only
+    the This Week block changed — everything from the next heading onward is
+    byte-for-byte identical.
+
+    It used to read the operator's LIVE Home.md, resolved from
+    DEFAULT_CWD/SIGNAL_BRIEF_VAULT_ROOT. It never wrote, so it was not a
+    hazard, but it did make the suite's result depend on a file outside the
+    repo. `conftest.py` now seeds `tests/fixtures/home_sample.md` into the
+    sandbox vault as `Home.md`, so this runs everywhere and asserts on content
+    the repo controls.
+
+    (The seeding is load-bearing: the first version of that sandbox pointed the
+    vault at an empty tmp dir, so `HOME_NOTE` never existed and this test
+    skipped on every machine, forever — live code, silently disabled.)
+
+    The skips below stay as a safety net for a checkout with no vault at all.
+    """
     from signal_brief.config import HOME_NOTE
 
     if HOME_NOTE is None:

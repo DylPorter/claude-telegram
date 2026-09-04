@@ -138,19 +138,23 @@ def no_network(monkeypatch):
 #: The genuine paths, captured at conftest import BEFORE anything is patched.
 #: `_assert_real_dirs_untouched` compares against these at the end of the
 #: session, so a leak is caught even if it escaped every per-test assertion.
-#: DELIBERATELY NARROW. An earlier draft guarded `VAULT_ROOT` and `STATE_DIR`
-#: wholesale, which makes the alarm useless: `VAULT_ROOT` is the entire vault
-#: (~1800 files, 212 of them under `.git`), written continuously by four
-#: signal-brief timers, hk-events itself, gbrain sync and every git command, so
-#: any suite run overlapping any of that would fail with "the test suite wrote
-#: to REAL directories" and be wrong. Same for the `.data` dirs the project's
-#: own timers touch. After an incident like this one, a backstop that cries
-#: wolf is worse than no backstop, because the next real alarm gets waved off.
+#: `VAULT_ROOT` is deliberately absent: it is the entire vault (~1800 files,
+#: 212 under `.git`), written by cron timers, gbrain sync and every git
+#: command, so guarding it would fail for reasons unrelated to the suite. A
+#: backstop that cries wolf is worse than none — the next real alarm gets
+#: waved off.
 #:
-#: What is left is exactly the set the SUITE can write and no timer does on a
-#: 10-minute cadence: the vault archive dir (where the incident landed), the
-#: board file, and the calendar idempotency cache.
+#: `STATE_DIR` IS guarded, and an earlier draft that dropped it was wrong.
+#: `seen_*.json` and `relevance_log.jsonl` live there — the 58-entry dedup set
+#: that a previous agent destroyed is `state/seen_luma.json`. Removing
+#: `STATE_DIR` took the alarm off the exact file the incident killed: with it
+#: absent, neutering the redirect and calling `dedupe.save_seen("luma", {})`
+#: empties the real seen-set 58 -> 0 with the suite green and silent.
+#:
+#: This project's only timer is `hk-events.timer`, daily at 09:30 — no
+#: short-cadence writer, so guarding `STATE_DIR` here costs nothing.
 _REAL_PATHS = {
+    "STATE_DIR": config.STATE_DIR,
     "ARCHIVE_DIR": config.HK_EVENTS_ARCHIVE_DIR,
     "BOARD_PATH": config.BOARD_PATH,
     "CACHE_DIR": config.CACHE_DIR,
@@ -166,12 +170,16 @@ _PATH_ENV_VARS = (
     "DEFAULT_CWD",
 )
 
-#: Env vars with NO config attribute behind them. `events_feed_path()` and
-#: `jobs_feed_path()` (config.py) fall through to a HARDCODED
-#: `BOT_ROOT/<project>/.data/state/*.json` — the sibling project's real state.
-#: Clearing these therefore steers a read straight OUT of the sandbox, which is
-#: the same backwards shape as clearing a write target and letting it fall
-#: through to the default. They must be SET, not deleted.
+#: Env vars with no redirectable attribute behind BOTH sides of the pair.
+#: `jobs_feed_path()` (config.py:145) falls through to a HARDCODED
+#: `BOT_ROOT/job-sift/.data/state/jobs_feed.json` — the SIBLING project's real
+#: state, which no patch of this project's `config` can reach. Clearing it
+#: therefore steers a read straight OUT of the sandbox, the same backwards
+#: shape as clearing a write target and letting it fall through to a default.
+#: (`events_feed_path()` falls back to this project's own `STATE_DIR`, which
+#: the fixture does redirect, so only one of the two is actually hazardous —
+#: but setting both keeps the pair symmetric and survives either resolver
+#: changing.)
 _FEED_ENV_VARS = ("HK_EVENTS_EVENTS_FEED", "HK_EVENTS_JOBS_FEED")
 
 

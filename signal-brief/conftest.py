@@ -38,17 +38,28 @@ nothing. The fixture below patches the config module AND every bound name.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+#: A realistic multi-section Home note, seeded into every sandbox vault. Lets
+#: `test_replace_against_real_home_preserves_rest_byte_for_byte` actually RUN:
+#: it resolves `config.HOME_NOTE` and skips if the file is absent, so pointing
+#: the vault at an empty tmp dir silently disabled it on every machine forever.
+_HOME_FIXTURE = Path(__file__).parent / "tests" / "fixtures" / "home_sample.md"
+
 # ---------------------------------------------------------------------------
 # STEP 1 — sandbox the environment BEFORE signal_brief is imported anywhere.
 _SESSION_SANDBOX = Path(tempfile.mkdtemp(prefix="signal-brief-sandbox-"))
+# Removed at interpreter exit; without this every run leaked a /tmp dir.
+atexit.register(shutil.rmtree, _SESSION_SANDBOX, True)
 _SANDBOX_VAULT = _SESSION_SANDBOX / "vault"
-for _sub in ("Daily Notes", "Reviews", "Inbox", ".claude-memory"):
+for _sub in ("Daily Notes", "Reviews", "Inbox", ".claude-memory", "Areas/Personal"):
     (_SANDBOX_VAULT / _sub).mkdir(parents=True, exist_ok=True)
+shutil.copyfile(_HOME_FIXTURE, _SANDBOX_VAULT / "Home.md")
 
 os.environ["SIGNAL_BRIEF_VAULT_ROOT"] = str(_SANDBOX_VAULT)
 os.environ["SIGNAL_BRIEF_DAILY_NOTES_DIR"] = str(_SANDBOX_VAULT / "Daily Notes")
@@ -59,7 +70,7 @@ os.environ["SIGNAL_BRIEF_MEMORY_DIR"] = str(_SANDBOX_VAULT / ".claude-memory")
 # STEP 2 — now it is safe to import.
 import pytest  # noqa: E402
 
-from signal_brief import config, daily_note, exposure, threads, vault_agent  # noqa: E402
+from signal_brief import config, daily_note, exposure, filter as sb_filter, threads, vault_agent  # noqa: E402
 from signal_brief.orchestrators import agent_watch, evening, morning, weekly  # noqa: E402
 from signal_brief.sources import rss  # noqa: E402
 
@@ -101,8 +112,9 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
     reviews = vault / "Reviews"
     inbox = vault / "Inbox"
     memory = vault / ".claude-memory"
-    for d in (vault, cache, logs, daily, reviews, inbox, memory):
+    for d in (vault, cache, logs, daily, reviews, inbox, memory, vault / "Areas" / "Personal"):
         d.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_HOME_FIXTURE, vault / "Home.md")
 
     # The config module itself.
     for name, value in (
@@ -115,6 +127,12 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
         ("INBOX_DIR", inbox),
         ("MEMORY_DIR", memory),
         ("MEMORY_INDEX", memory / "MEMORY.md"),
+        # Without these two the sandbox was TWO-TIER: `config.VAULT_ROOT` was
+        # the per-test dir while HOME_NOTE/DONE_LOG_NOTE still pointed into the
+        # session-scope one. Both are sandbox paths, so it was never a
+        # real-write hazard — but a split like that is a trap for the next test.
+        ("HOME_NOTE", vault / "Home.md"),
+        ("DONE_LOG_NOTE", vault / "Areas" / "Personal" / "Done Log.md"),
     ):
         monkeypatch.setattr(config, name, value, raising=False)
 
@@ -131,6 +149,9 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
         (threads, "DAILY_NOTES_DIR", daily),
         (threads, "VAULT_ROOT", vault),
         (vault_agent, "VAULT_ROOT", vault),
+        # filter.py binds VAULT_ROOT at import too, and spawns the THIRD
+        # bypassPermissions subprocess in this package (filter.py:275-280).
+        (sb_filter, "VAULT_ROOT", vault),
         (agent_watch, "CACHE_DIR", cache),
         (morning, "LOG_DIR", logs),
         (evening, "LOG_DIR", logs),
@@ -145,7 +166,7 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def no_agent_spawn(monkeypatch):
-    """`threads.py` and `vault_agent.py` spawn
+    """`threads.py`, `vault_agent.py` AND `filter.py` each spawn
 
         claude -p --permission-mode bypassPermissions   (cwd=VAULT_ROOT)
 
@@ -163,7 +184,10 @@ def no_agent_spawn(monkeypatch):
     def _guarded(cmd, *args, **kwargs):
         argv = [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
         joined = " ".join(argv)
-        if "bypassPermissions" in joined or os.path.basename(argv[0] or "") == "claude":
+        # `argv[0]` on an empty list raised IndexError from inside the guard,
+        # masking the stdlib's own error. Defer to subprocess for that case.
+        head = os.path.basename(argv[0]) if argv and argv[0] else ""
+        if "bypassPermissions" in joined or head == "claude":
             raise AssertionError(
                 "a test tried to spawn a real Claude agent "
                 f"({joined[:120]!r}, cwd={kwargs.get('cwd')!r}). Patch "
