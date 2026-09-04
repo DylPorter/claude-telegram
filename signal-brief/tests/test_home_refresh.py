@@ -39,9 +39,9 @@ updated: 2026-06-03
 
 _✅ Done items live in [[Done Log]] — Home stays active-only._
 
-## 🚨 Family commitments's uni admissions *(CANNOT forget)*
-> The Family commitments block — must be preserved byte-for-byte.
-- A bullet with [[Family commitments]].
+## 🚨 Family commitments *(CANNOT forget)*
+> This block — must be preserved byte-for-byte.
+- A bullet with [[A Family Note]].
 
 ## 🔭 Next / in the picture
 > The backlog — must NOT be deleted.
@@ -119,9 +119,9 @@ def test_replace_preserves_everything_outside_this_week():
 
     # Every other section preserved byte-for-byte.
     for sentinel in (
-        "## 🚨 Family commitments's uni admissions *(CANNOT forget)*",
-        "> The Family commitments block — must be preserved byte-for-byte.",
-        "- A bullet with [[Family commitments]].",
+        "## 🚨 Family commitments *(CANNOT forget)*",
+        "> This block — must be preserved byte-for-byte.",
+        "- A bullet with [[A Family Note]].",
         "## 🔭 Next / in the picture",
         "> The backlog — must NOT be deleted.",
         "- **[[Portfolio]]** — on deck.",
