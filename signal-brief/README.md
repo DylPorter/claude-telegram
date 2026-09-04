@@ -10,7 +10,7 @@ Lives as a sibling to the [`claude-telegram`](../) bot — they share `.env`
 
 ## What it gives you
 
-- A chunked-bubble daily digest pushed to your phone via Telegram at 07:00 every
+- A five-bubble daily digest pushed to your phone via Telegram at 07:00 every
   day, calibrated to whatever's in your `.claude-memory/` index — not a generic
   tech-news feed
 - An evening vault sweep at 22:00 — inbox processing, orphan-note linking,
@@ -19,6 +19,24 @@ Lives as a sibling to the [`claude-telegram`](../) bot — they share `.env`
   audit, graph health, written to `Reviews/YYYY-WXX.md`
 - Telegram-first: the human deliverable is the chat bubbles you'll actually
   read on your phone; the vault note is the searchable audit trail
+
+### What notifies, and what doesn't (Telegram diet, 2026-09-04)
+
+Every routine below still **runs** on its timer and still writes its full
+record to the vault. Only the notification changed.
+
+| Routine | Runs | Notifies |
+|---|---|---|
+| Morning brief 07:00 | yes | **5 bubbles**: intro, Today's Signal, Broad Tech/AI, Bubble Breaker, Quiet rest |
+| Thread reconciliation (inside morning) | yes | **no** — daily note only |
+| Filter rationale / suppressed list | yes | **no** — daily note only |
+| Evening sweep 22:00 | yes — inbox, orphan sweep, Research Log, Teaching Queue, gbrain resync | **no**, except a ⚠️ alarm if the sweep degraded |
+| Agent-identity trip-wire 13:00 | yes | yes — unchanged, fires only on a hit (0 pushes in the 14 days before the diet) |
+| Weekly review Sun 20:00 | yes | yes — unchanged, opts out via `diet=False` |
+
+`Today's Signal` keeps its prose format verbatim; the other three bubbles are
+bullet-pointed. Source-health and staleness ⚠️ lines bypass the keep-list
+everywhere — they exist to be seen on a quiet day.
 
 The intelligence layer is `claude -p` running with full vault tool access. It
 reads your `MEMORY.md` and project notes on demand and uses *them* as the

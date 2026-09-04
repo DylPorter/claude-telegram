@@ -60,8 +60,31 @@ also written to their vault daily note.
    strong candidates.
 
 2. **Telegram chunked output**: each section becomes ONE Telegram message
-   (one chat bubble). Aim for 4-7 bubbles total. Each bubble under ~600 chars
-   where possible. Concise. No filler. No "executive summary" preamble.
+   (one chat bubble). Each bubble under ~600 chars, aim for ~300. Concise.
+   No filler. No "executive summary" preamble.
+
+   **Only these four section titles are pushed to Telegram** — use these exact
+   titles, in this order:
+
+     `Today's Signal` · `Broad Tech/AI` · `Bubble Breaker` · `Quiet rest`
+
+   With the headline that is five bubbles, which is the whole budget. You may
+   still emit other sections (e.g. `Happening Now`) — they are written to the
+   vault daily note. Two things also reach the phone: a section carrying a ⚠️,
+   and a section whose items include a conference running TODAY. Liveness is
+   read from the item data, not the title — so a `Happening Now` section
+   **must** list its conference URLs in `item_urls` or it will stay
+   vault-only however you title it.
+
+2b. **Bullet points everywhere except Today's Signal.**
+   - `Today's Signal` — keep the current prose-with-*bold*-leads format
+     EXACTLY as is. Do not convert it to bullets. It is the one format the
+     user has said is already right.
+   - `Broad Tech/AI`, `Bubble Breaker`, `Quiet rest` — write as a short bullet
+     list, one `- ` line per point, max 5 lines, one clause per line.
+     `Quiet rest` in particular must be bullets, not a paragraph: one bullet
+     per skipped cluster ("- Dezeen: 3 architecture pieces"), not a sentence
+     with semicolons in it.
 
 3. **Conferences happening NOW or this week are ALWAYS surfaced.** Source items
    with `kind: conference` get a dedicated section. Missing a live keynote is
@@ -111,14 +134,17 @@ vault (where wikilinks resolve). Link liberally when it adds context.
 }
 ```
 
-**Suggested section order:**
-1. **Today's Signal** — top 2-3 items hitting active projects/lodestones
-2. **Broad Tech/AI** — notable tech developments worth knowing regardless of project hooks
-3. **Happening Now** — conferences live or starting this week
-4. **Bubble Breaker** — MANDATORY genuinely-outside-tech item
-5. **Quiet rest** — short paragraph noting the rest
+**Section order:**
+1. **Today's Signal** — top 2-3 items hitting active projects/lodestones (prose)
+2. **Broad Tech/AI** — notable tech developments worth knowing regardless of project hooks (bullets)
+3. **Bubble Breaker** — MANDATORY genuinely-outside-tech item (bullets)
+4. **Quiet rest** — bullets, one line per skipped cluster
+5. **Happening Now** — conferences live or starting this week. Always attach
+   `item_urls`; it reaches the phone only if one of those conferences is
+   actually running today, otherwise it is vault-only.
 
-You may add/remove sections to fit the day's signal. Quality > template adherence.
+Omit any of 1-4 that genuinely has nothing in it — an omitted section is better
+than a filler one. Do not invent extra Telegram sections beyond this list.
 """
 
 
@@ -235,10 +261,10 @@ def filter_items(items: list[Item], *, today: str | None = None) -> Digest:
         return Digest(
             date=today,
             sections=[DigestSection(
-                title="Quiet day",
+                title="⚠️ Quiet day — no items collected",
                 body="_No signal items collected. Sources may be down — check logs._",
             )],
-            headline="Quiet day — no signal.",
+            headline="⚠️ Quiet day — no signal collected.",
             all_items=[],
             rationale="No items in.",
         )
@@ -282,8 +308,25 @@ def _build_digest(parsed: dict, items: list[Item], today: str) -> Digest:
     for s in parsed.get("sections", []):
         urls = s.get("item_urls", []) or []
         sec_items = [by_url[u] for u in urls if u in by_url]
+        title = s.get("title", "").strip()
+        # A section that cited items but resolved none is a data failure, not an
+        # itemless section — and it reads identically downstream. `is_live_section`
+        # gates the conference lane on this data, so an unresolvable URL silently
+        # demotes a live conference to vault-only. Say so.
+        if urls and not sec_items:
+            log.warning(
+                "section %r cited %d item_url(s) but none resolved against the "
+                "collected items — section will have no items (urls=%s)",
+                title, len(urls), urls[:5],
+            )
+        elif len(sec_items) < len(urls):
+            log.warning(
+                "section %r: %d of %d item_url(s) did not resolve (unresolved=%s)",
+                title, len(urls) - len(sec_items), len(urls),
+                [u for u in urls if u not in by_url][:5],
+            )
         sections.append(DigestSection(
-            title=s.get("title", "").strip(),
+            title=title,
             body=s.get("body", "").strip(),
             items=sec_items,
         ))

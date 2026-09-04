@@ -7,7 +7,15 @@ Spawns a vault-aware Claude subagent to:
   4. Update Research Log + Teaching Queue
   5. Stub any obvious missing entity notes (per [[proactive-linking]])
 
-Then pushes a SHORT chunked summary to Telegram.
+**The sweep still runs on its timer; it no longer sends a digest.** As of
+2026-09-04 the Telegram summary is cut — Inbox / Links added / Git
+housekeeping / Patterns / Tomorrow were named as useless by the operator. All
+of the vault-side work above is unchanged and the full summary is still
+written to the daily note under `## 🌙 Evening Sweep`.
+
+The one thing that still notifies is the alarm lane: if the vault agent fails
+or degrades (⚠️ / 🚨), a single short bubble goes out, because a sweep that
+has been silently broken for a week is the failure this guards against.
 
 Usage:
     .venv/bin/python -m signal_brief.orchestrators.evening
@@ -23,7 +31,7 @@ from datetime import date
 
 from signal_brief.config import LOG_DIR, assert_required
 from signal_brief.daily_note import upsert_signal_section
-from signal_brief.render import render_for_daily_note, render_for_telegram
+from signal_brief.render import render_alarm_for_telegram, render_for_daily_note
 from signal_brief.telegram_client import TelegramPushError, push_messages
 from signal_brief.vault_agent import result_to_digest, run_vault_agent
 
@@ -96,6 +104,13 @@ EVENING_PROMPT = """You are running the evening vault sweep for an Obsidian-styl
 
 If a section is empty, OMIT it entirely. No "nothing to report" filler.
 
+**Where this output goes:** the vault daily note only — this summary is NOT
+sent to the user's phone. Write it as an audit record for later grep, not as a
+notification. The single exception: if something went WRONG (a task you could
+not complete, a source that looks broken, a vault state that needs a human),
+put ⚠️ in the headline or in that section — ⚠️ sections are the only ones that
+still reach the user, so use the marker for real problems only.
+
 Output ONLY the JSON object. No markdown fences. No prose before or after.
 """
 
@@ -139,7 +154,8 @@ def main() -> int:
     if digest.headline and not digest.headline.startswith("🌙"):
         digest.headline = f"🌙 Evening — {digest.headline}"
 
-    messages = render_for_telegram(digest)
+    # Digest bubbles are dead; only alarms notify now.
+    messages = render_alarm_for_telegram(digest)
     daily_md = render_for_daily_note(digest).replace(
         "## 🌅 Morning Signal Brief",
         "## 🌙 Evening Sweep",
@@ -147,7 +163,8 @@ def main() -> int:
 
     if args.dry_run:
         print("=" * 60)
-        print(f"DRY RUN — would push {len(messages)} Telegram messages:")
+        print(f"DRY RUN — would push {len(messages)} Telegram messages "
+              f"(alarm lane only; 0 is the healthy case):")
         print("=" * 60)
         for i, m in enumerate(messages, 1):
             print(f"\n--- message {i} ({len(m)} chars) ---\n{m}")
@@ -160,9 +177,14 @@ def main() -> int:
     path = upsert_signal_section_evening(today, daily_md)
     log.info("daily note: %s", path)
 
+    if not messages:
+        log.info("no alarm — evening sweep complete, nothing pushed")
+        log.info("=== evening sweep done ===")
+        return 0
+
     try:
         result_push = push_messages(messages)
-        log.info("telegram: %d sent, %d failed",
+        log.info("telegram alarm: %d sent, %d failed",
                  len(result_push.get("sent", [])), len(result_push.get("failed", [])))
     except TelegramPushError as e:
         log.error("telegram push failed: %s", e)
