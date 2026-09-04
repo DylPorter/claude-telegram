@@ -142,25 +142,36 @@ def no_network(monkeypatch):
 # works exactly as before.
 
 #: Captured at conftest import, BEFORE anything is patched.
+#: DELIBERATELY NARROW — see the same note in hk-events/tests/conftest.py.
+#: `STATE_DIR`, `COOKIE_DIR` and `LOG_DIR` are all written by
+#: `job-sift-keepalive.timer` EVERY TEN MINUTES (it refreshes
+#: `state/cedars_session.json` so the PHPSESSID does not idle out). Guarding
+#: them means any suite run that straddles a tick fails falsely — observed
+#: ticks at 01:22:38 and 01:33:38 during review. `VAULT_ROOT` is the whole
+#: vault and is worse still.
+#:
+#: What remains is the set the SUITE writes and no timer does: the two vault
+#: notes and the board.
 _REAL_PATHS = {
-    "STATE_DIR": config.STATE_DIR,
-    "LOG_DIR": config.LOG_DIR,
-    "COOKIE_DIR": config.COOKIE_DIR,
     "ARCHIVE_DIR": config.JOB_SIFT_ARCHIVE_DIR,
     "OPEN_ROLES_PATH": config.OPEN_ROLES_PATH,
     "BOARD_PATH": config.BOARD_PATH,
-    "VAULT_ROOT": config.VAULT_ROOT,
 }
 
+#: Backed by a config attribute the fixture redirects — safe to clear.
 _PATH_ENV_VARS = (
     "JOB_SIFT_BOARD_PATH",
     "JOB_SIFT_ARCHIVE_DIR",
     "JOB_SIFT_OPEN_ROLES_PATH",
-    "JOB_SIFT_JOBS_FEED",
-    "JOB_SIFT_EVENTS_FEED",
     "JOB_SIFT_VAULT_ROOT",
     "DEFAULT_CWD",
 )
+
+#: NOT backed by any attribute: `events_feed_path()` falls through to a
+#: hardcoded `BOT_ROOT/hk-events/.data/state/events_feed.json`, i.e. the
+#: sibling project's real state. Clearing these steers a read OUT of the
+#: sandbox, so they are SET rather than deleted.
+_FEED_ENV_VARS = ("JOB_SIFT_JOBS_FEED", "JOB_SIFT_EVENTS_FEED")
 
 
 def _snapshot(path):
@@ -214,6 +225,8 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
 
     for name in _PATH_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    for name in _FEED_ENV_VARS:
+        monkeypatch.setenv(name, str(state / f"{name.lower()}.json"))
 
     return sandbox
 

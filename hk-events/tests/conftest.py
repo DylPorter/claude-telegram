@@ -138,25 +138,41 @@ def no_network(monkeypatch):
 #: The genuine paths, captured at conftest import BEFORE anything is patched.
 #: `_assert_real_dirs_untouched` compares against these at the end of the
 #: session, so a leak is caught even if it escaped every per-test assertion.
+#: DELIBERATELY NARROW. An earlier draft guarded `VAULT_ROOT` and `STATE_DIR`
+#: wholesale, which makes the alarm useless: `VAULT_ROOT` is the entire vault
+#: (~1800 files, 212 of them under `.git`), written continuously by four
+#: signal-brief timers, hk-events itself, gbrain sync and every git command, so
+#: any suite run overlapping any of that would fail with "the test suite wrote
+#: to REAL directories" and be wrong. Same for the `.data` dirs the project's
+#: own timers touch. After an incident like this one, a backstop that cries
+#: wolf is worse than no backstop, because the next real alarm gets waved off.
+#:
+#: What is left is exactly the set the SUITE can write and no timer does on a
+#: 10-minute cadence: the vault archive dir (where the incident landed), the
+#: board file, and the calendar idempotency cache.
 _REAL_PATHS = {
-    "STATE_DIR": config.STATE_DIR,
-    "CACHE_DIR": config.CACHE_DIR,
-    "LOG_DIR": config.LOG_DIR,
     "ARCHIVE_DIR": config.HK_EVENTS_ARCHIVE_DIR,
     "BOARD_PATH": config.BOARD_PATH,
-    "VAULT_ROOT": config.VAULT_ROOT,
+    "CACHE_DIR": config.CACHE_DIR,
 }
 
-#: Env vars that can steer a write target. Cleared so a patched attribute is
-#: not silently overridden by the developer's shell.
+#: Env vars that steer a path and DO have a config attribute behind them.
+#: Clearing is safe here: the resolver falls back to the attribute, which the
+#: fixture has already redirected.
 _PATH_ENV_VARS = (
     "HK_EVENTS_BOARD_PATH",
-    "HK_EVENTS_EVENTS_FEED",
-    "HK_EVENTS_JOBS_FEED",
     "HK_EVENTS_ARCHIVE_DIR",
     "HK_EVENTS_VAULT_ROOT",
     "DEFAULT_CWD",
 )
+
+#: Env vars with NO config attribute behind them. `events_feed_path()` and
+#: `jobs_feed_path()` (config.py) fall through to a HARDCODED
+#: `BOT_ROOT/<project>/.data/state/*.json` — the sibling project's real state.
+#: Clearing these therefore steers a read straight OUT of the sandbox, which is
+#: the same backwards shape as clearing a write target and letting it fall
+#: through to the default. They must be SET, not deleted.
+_FEED_ENV_VARS = ("HK_EVENTS_EVENTS_FEED", "HK_EVENTS_JOBS_FEED")
 
 
 def _snapshot(path):
@@ -206,6 +222,8 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
 
     for name in _PATH_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    for name in _FEED_ENV_VARS:
+        monkeypatch.setenv(name, str(state / f"{name.lower()}.json"))
 
     return sandbox
 
