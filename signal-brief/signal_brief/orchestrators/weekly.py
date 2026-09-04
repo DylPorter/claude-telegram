@@ -314,7 +314,7 @@ def main() -> int:
     # The weekly review is out of scope for the 2026-09-04 daily-digest diet:
     # it's a once-a-week long read, not part of the ~10-a-day noise floor.
     # Opt out of the five-bubble keep-list so it keeps all of its sections.
-    messages = render_for_telegram(digest, restrict_sections=False)
+    messages = render_for_telegram(digest, diet=False)
 
     if args.dry_run:
         print("=" * 60)

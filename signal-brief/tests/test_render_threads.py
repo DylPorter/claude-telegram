@@ -28,12 +28,12 @@ def test_no_telegram_thread_renderer_exists():
 
 def test_daily_note_keeps_resolved_threads_with_glyphs():
     res = _result([
-        Thread(id="a", title="Eletrolar", status="open", detail="ping Greg"),
-        Thread(id="b", title="BOCHK", status="done"),
+        Thread(id="a", title="Northwind", status="open", detail="ping the intro"),
+        Thread(id="b", title="Contoso", status="done"),
     ], questions=["Ship the deck?"])
     md = render_threads_for_daily_note(res)
     assert "## 🧵 Thread Reconciliation" in md
-    assert "Eletrolar" in md and "BOCHK" in md  # audit keeps both
+    assert "Northwind" in md and "Contoso" in md  # audit keeps both
     assert "`done`" in md
     assert "Quick check-ins" in md
     assert "Ship the deck?" in md
@@ -41,14 +41,14 @@ def test_daily_note_keeps_resolved_threads_with_glyphs():
 
 def test_daily_note_orders_active_threads_first():
     res = _result([
-        Thread(id="b", title="BOCHK", status="done"),
-        Thread(id="a", title="Eletrolar", status="in_progress", detail="follow up Greg"),
-        Thread(id="c", title="Tracy", status="deferred"),
+        Thread(id="b", title="Contoso", status="done"),
+        Thread(id="a", title="Northwind", status="in_progress", detail="follow up the intro"),
+        Thread(id="c", title="Client B", status="deferred"),
     ])
     md = render_threads_for_daily_note(res)
-    assert md.index("Eletrolar") < md.index("BOCHK")
-    assert md.index("Eletrolar") < md.index("Tracy")
-    assert "follow up Greg" in md
+    assert md.index("Northwind") < md.index("Contoso")
+    assert md.index("Northwind") < md.index("Client B")
+    assert "follow up the intro" in md
 
 
 def test_daily_note_omits_checkins_heading_when_no_questions():

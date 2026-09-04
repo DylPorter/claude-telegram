@@ -69,9 +69,12 @@ also written to their vault daily note.
      `Today's Signal` · `Broad Tech/AI` · `Bubble Breaker` · `Quiet rest`
 
    With the headline that is five bubbles, which is the whole budget. You may
-   still emit other sections (e.g. `Happening Now` for a live conference) —
-   they are written to the vault daily note. Only a section that is live-now
-   urgent or carries a ⚠️ also reaches the phone.
+   still emit other sections (e.g. `Happening Now`) — they are written to the
+   vault daily note. Two things also reach the phone: a section carrying a ⚠️,
+   and a section whose items include a conference running TODAY. Liveness is
+   read from the item data, not the title — so a `Happening Now` section
+   **must** list its conference URLs in `item_urls` or it will stay
+   vault-only however you title it.
 
 2b. **Bullet points everywhere except Today's Signal.**
    - `Today's Signal` — keep the current prose-with-*bold*-leads format
@@ -136,8 +139,9 @@ vault (where wikilinks resolve). Link liberally when it adds context.
 2. **Broad Tech/AI** — notable tech developments worth knowing regardless of project hooks (bullets)
 3. **Bubble Breaker** — MANDATORY genuinely-outside-tech item (bullets)
 4. **Quiet rest** — bullets, one line per skipped cluster
-5. **Happening Now** — conferences live or starting this week. Vault-only unless
-   something is running TODAY, in which case say so in the title.
+5. **Happening Now** — conferences live or starting this week. Always attach
+   `item_urls`; it reaches the phone only if one of those conferences is
+   actually running today, otherwise it is vault-only.
 
 Omit any of 1-4 that genuinely has nothing in it — an omitted section is better
 than a filler one. Do not invent extra Telegram sections beyond this list.

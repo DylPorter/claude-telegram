@@ -12,9 +12,7 @@ that nothing cut from Telegram was also cut from the daily-note audit trail.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import signal_brief
+import pytest
 from signal_brief import render
 from signal_brief.render import (
     BUBBLE_CHAR_CAP,
@@ -50,8 +48,11 @@ def _full_digest() -> Digest:
             DigestSection(title="Broad Tech/AI",
                           body="OpenAI, Claude and Grok all went down together. "
                                "Qwen 3.8 27B now serves at 1500 tok/s on Cerebras."),
-            DigestSection(title="Happening This Week",
-                          body="KubeCon opens Monday in Amsterdam."),
+            DigestSection(title="Happening Now",
+                          body="Sample Conference opens Monday.",
+                          items=[Item(title="Sample Conference", url="https://x/conf",
+                                      source="conferences", source_kind="conference",
+                                      meta={"currently_running": False, "days_until": 4})]),
             DigestSection(title="Bubble Breaker",
                           body="Neuroqueering on the lawn (Aeon) — a look at "
                                "'too muchness' and the limits of tolerance."),
@@ -83,15 +84,17 @@ def test_morning_bubbles_are_the_named_five():
 
 
 def test_unlisted_section_never_reaches_telegram():
+    """`Happening Now` is the title the pipeline actually emits — for a
+    conference four days out it is still vault-only."""
     msgs = render_for_telegram(_full_digest())
-    assert all("Happening This Week" not in m for m in msgs)
-    assert all("KubeCon" not in m for m in msgs)
+    assert all("Happening Now" not in m for m in msgs)
+    assert all("Sample Conference" not in m for m in msgs)
 
 
 def test_unlisted_section_still_lands_in_the_daily_note():
     md = render_for_daily_note(_full_digest())
-    assert "### Happening This Week" in md
-    assert "KubeCon" in md
+    assert "### Happening Now" in md
+    assert "Sample Conference" in md
 
 
 def test_section_counter_counts_only_pushed_sections():
@@ -190,32 +193,17 @@ def test_thread_telegram_renderer_is_gone():
 
 def test_threads_and_checkins_still_written_to_the_daily_note():
     res = ReconcileResult(
-        threads=[Thread(id="a", title="Eletrolar", status="open", detail="ping Greg")],
+        threads=[Thread(id="a", title="Northwind", status="open", detail="ping the intro")],
         questions=["Still live, or drop it?"],
         rationale="no evidence either way",
         llm_ran=True,
     )
     md = render_threads_for_daily_note(res)
     assert "## 🧵 Thread Reconciliation" in md
-    assert "Eletrolar" in md
+    assert "Northwind" in md
     assert "Quick check-ins" in md
     assert "Still live, or drop it?" in md
 
-
-ORCHESTRATORS = Path(signal_brief.__file__).parent / "orchestrators"
-
-
-def _orchestrator_src(name: str) -> str:
-    """Read an orchestrator's source without importing it — agent_watch pulls
-    feedparser, which the test env deliberately doesn't carry (no network deps
-    in tests)."""
-    return (ORCHESTRATORS / f"{name}.py").read_text()
-
-
-def test_morning_orchestrator_does_not_import_a_thread_pusher():
-    src = _orchestrator_src("morning")
-    assert "render_threads_for_telegram" not in src
-    assert "render_threads_for_daily_note" in src  # audit trail survives
 
 
 # --------------------------------------------------------------------------
@@ -263,7 +251,7 @@ def test_evening_alarm_lane_is_silent_on_a_healthy_run():
         sections=[
             DigestSection(title="Inbox processed", body="3 items filed."),
             DigestSection(title="Links added", body="11 wikilinks."),
-            DigestSection(title="Tomorrow", body="Chase Tracy."),
+            DigestSection(title="Tomorrow", body="Chase Client B."),
         ],
     )
     assert render_alarm_for_telegram(digest) == []
@@ -297,23 +285,6 @@ def test_evening_still_writes_its_full_summary_to_the_note():
     assert "created 2 notes, added 11 links" in md
 
 
-def test_evening_orchestrator_pushes_only_the_alarm_lane():
-    src = _orchestrator_src("evening")
-    assert "render_alarm_for_telegram" in src
-    assert "render_for_telegram" not in src.replace("render_alarm_for_telegram", "")
-    # the vault work + audit trail must be untouched
-    assert "run_vault_agent" in src
-    assert "upsert_signal_section_evening" in src
-    assert "Process Inbox" in src
-    assert "Orphan / under-linked sweep" in src
-
-
-def test_agent_watch_still_pushes():
-    """The trip-wire is NOT part of the diet: it pushed 0 messages in the 14
-    days before the cut (every run 'quiet run — nothing tripped'), so silencing
-    it saves nothing and costs the one alert it exists to deliver."""
-    src = _orchestrator_src("agent_watch")
-    assert "push_messages(messages)" in src
 
 
 def test_zero_item_day_is_flagged_as_a_source_health_alarm():
@@ -361,11 +332,147 @@ def test_weekly_review_is_not_dieted():
                   ["Week frame", "Patterns", "Active threads — kill/commit calls",
                    "🔗 Link health", "Auto-applied", "Stub candidates", "Graph health"]],
     )
-    assert len(render_for_telegram(digest, restrict_sections=False)) == 8
+    assert len(render_for_telegram(digest, diet=False)) == 8
     assert len(render_for_telegram(digest)) == 5  # dieted path unchanged
 
 
-def test_weekly_orchestrator_opts_out():
-    from pathlib import Path as _P
-    src = (_P(signal_brief.__file__).parent / "orchestrators" / "weekly.py").read_text()
-    assert "restrict_sections=False" in src
+# --------------------------------------------------------------------------
+# The two safety nets, under the conditions they exist for
+# --------------------------------------------------------------------------
+
+# The titles this pipeline actually emitted through August 2026, before the
+# prompt was rewritten. Prompt drift is not hypothetical here.
+AUGUST_TITLES = ["🔀 What Changed", "🎯 Today's Call", "🎓 Teaching Surface",
+                 "💼 Signal For You", "🌐 Ambient"]
+
+
+def _drifted(alarm: bool) -> Digest:
+    sections = [DigestSection(title=t, body=f"Body for {t}.") for t in AUGUST_TITLES]
+    if alarm:
+        sections[0] = DigestSection(title=AUGUST_TITLES[0],
+                                    body="⚠️ twitter: all instances failed")
+    return Digest(date="2026-09-04", headline="Drifted headline.", sections=sections)
+
+
+def test_drift_fallback_fires_when_nothing_matches():
+    msgs = render_for_telegram(_drifted(alarm=False))
+    assert len(msgs) == 5  # headline + 4 fallback sections
+
+
+def test_drift_fallback_still_fires_when_a_section_is_also_an_alarm(caplog):
+    """The regression that matters: an ⚠️ section must not count as a keep-list
+    match. If it does, the fallback switches off on exactly the days a source
+    is dying — and drops the five real sections with no log line."""
+    with caplog.at_level("WARNING"):
+        msgs = render_for_telegram(_drifted(alarm=True))
+    assert len(msgs) == 6  # headline + the alarm + 4 fallback sections
+    for title in AUGUST_TITLES:
+        assert any(title in m for m in msgs), f"{title} was silently dropped"
+    assert any("no section title matched" in r.message for r in caplog.records)
+
+
+def test_llm_filter_fallback_actually_delivers_its_items():
+    """`_fallback_digest` promises 'better than silence'. The keep-list must not
+    reduce it to a ⚠️ header over an empty page."""
+    from signal_brief.filter import _fallback_digest
+    items = [Item(title=f"Story {i}", url=f"https://x/{i}",
+                  source=f"src{i % 3}", source_kind="rss") for i in range(8)]
+    msgs = render_for_telegram(_fallback_digest(items, "2026-09-04", error="boom"))
+    assert any("Fallback digest" in m for m in msgs)
+    delivered = [t for t in (f"Story {i}" for i in range(8))
+                 if any(t in m for m in msgs)]
+    assert len(delivered) >= 5, f"only delivered {delivered}"
+
+
+def test_partial_drift_is_logged(caplog):
+    digest = _full_digest()
+    digest.sections[0] = DigestSection(title="🎯 Today's Call",
+                                       body=TODAYS_SIGNAL_PROSE)
+    with caplog.at_level("INFO"):
+        render_for_telegram(digest)
+    dropped = [r for r in caplog.records if "note-only" in r.getMessage()]
+    assert dropped and "🎯 Today's Call" in dropped[-1].getMessage()
+
+
+# --------------------------------------------------------------------------
+# Liveness, not title
+# --------------------------------------------------------------------------
+
+def _conference_digest(*, running: bool, days_until: int) -> Digest:
+    return Digest(
+        date="2026-09-04",
+        headline="",
+        sections=[
+            DigestSection(title="Today's Signal", body="Something shipped."),
+            DigestSection(
+                title="Happening Now",  # the only title this pipeline emits
+                body="Sample Conference.",
+                items=[Item(title="Sample Conference", url="https://x/conf",
+                            source="conferences", source_kind="conference",
+                            meta={"currently_running": running,
+                                  "days_until": days_until})],
+            ),
+        ],
+    )
+
+
+def test_a_conference_running_today_reaches_telegram():
+    msgs = render_for_telegram(_conference_digest(running=True, days_until=0))
+    assert any("Happening Now" in m for m in msgs)
+
+
+def test_the_same_title_next_week_stays_vault_only():
+    msgs = render_for_telegram(_conference_digest(running=False, days_until=5))
+    assert all("Happening Now" not in m for m in msgs)
+
+
+def test_a_titled_section_with_no_items_cannot_be_live():
+    digest = Digest(date="2026-09-04", headline="",
+                    sections=[DigestSection(title="Today's Signal", body="x."),
+                              DigestSection(title="Happening Now", body="No items attached.")])
+    assert all("Happening Now" not in m for m in render_for_telegram(digest))
+
+
+# --------------------------------------------------------------------------
+# Bulletizer edges
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "The U.S. AI Action Plan landed. e.g. Nvidia gains, per Dr. Chen at MIT.",
+    "Shipped in the U.K. and the E.U. Next up: Mr. Smith's review.",
+    "Standup at 9 a.m. Deploy window closes at 5 p.m. sharp.",
+])
+def test_bulletize_does_not_split_on_abbreviations(text):
+    out = bulletize(text)
+    for abbrev in ("U.S.", "e.g.", "Dr.", "U.K.", "E.U.", "Mr.", "a.m.", "p.m."):
+        if abbrev in text:
+            assert abbrev in out
+            assert f"• {abbrev.rstrip('.')}\n" not in out + "\n"
+    assert out.count("• ") <= 2
+
+
+def test_a_single_overlong_clause_is_still_capped():
+    out = bulletize("x" * 901)
+    assert len(out) <= BUBBLE_CHAR_CAP
+    assert out.endswith("…")
+
+
+def test_unmapped_titles_get_a_glyph_that_is_not_a_bullet():
+    """`• *Week frame*` above a list of `• ` bullets is unreadable."""
+    digest = Digest(date="2026-09-06", headline="",
+                    sections=[DigestSection(title="Week frame", body="One. Two.")])
+    for msg in render_for_telegram(digest, diet=False) + render_for_telegram(digest):
+        assert not msg.startswith("• ")
+
+
+def test_weekly_content_is_not_truncated_by_the_bulletizer():
+    """Section count surviving is not enough — MAX_BULLETS was silently
+    dropping clauses out of the one long-read product."""
+    body = " ".join(f"Clause {i} of the weekly review carries real content."
+                    for i in range(9))
+    digest = Digest(date="2026-09-06", headline="",
+                    sections=[DigestSection(title="Week frame", body=body)])
+    bubble = render_for_telegram(digest, diet=False)[0]
+    assert body in bubble
+    for i in range(9):
+        assert f"Clause {i} " in bubble

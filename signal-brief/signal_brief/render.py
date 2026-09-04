@@ -17,6 +17,7 @@ quiet day, which is the entire reason it exists.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 
 from signal_brief.schema import Digest, DigestSection
@@ -60,7 +61,7 @@ def _emoji_for(title: str) -> str:
     for k, v in SECTION_EMOJI.items():
         if k in key:
             return v
-    return "•"
+    return "📌"
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +89,11 @@ NEVER_BULLETIZE = (
     "todays signal",
 )
 
-# Alarm lane. These bypass the keep-list entirely: a degraded run, a dead
-# source, or a conference that is live RIGHT NOW must reach the phone even
-# though none of them are "news". Rare by construction.
-ALARM_TITLE_MARKERS = ("⚠️", "🚨", "fallback", "happening now", "live now")
-ALARM_BODY_MARKERS = ("⚠️", "🚨")
+# Alarm lane. These bypass the keep-list entirely: a degraded run or a dead
+# source must reach the phone even though neither is "news". Rare by
+# construction. Title and body are treated the same — a marker anywhere counts.
+ALARM_MARKERS = ("⚠️", "🚨")
+ALARM_BODY_MARKERS = ALARM_MARKERS  # back-compat alias
 
 # If the keep-list matches nothing (prompt drift, fallback digest), push the
 # first few sections anyway. A silent brief is a worse failure than a long one.
@@ -111,10 +112,49 @@ def _title_matches(title: str, needles: tuple[str, ...]) -> bool:
 
 def is_alarm_section(section: DigestSection) -> bool:
     """True when a section must reach Telegram regardless of the keep-list."""
-    return (
-        _title_matches(section.title, ALARM_TITLE_MARKERS)
-        or any(m in section.body for m in ALARM_BODY_MARKERS)
-    )
+    return any(m in section.title or m in section.body for m in ALARM_MARKERS)
+
+
+def is_live_section(section: DigestSection) -> bool:
+    """True when a section carries something happening RIGHT NOW.
+
+    Gated on the item data, not the section title. `Happening Now` is the
+    title the pipeline has always used for conferences whether they start
+    today or next Monday, so the title says nothing about urgency —
+    `currently_running` / `days_until` (set by sources/conferences.py) do.
+
+    Depends on the filter attaching `item_urls` to the section; a section with
+    no items can never be live.
+    """
+    for item in section.items:
+        meta = item.meta or {}
+        if meta.get("currently_running"):
+            return True
+        days = meta.get("days_until")
+        if isinstance(days, int) and not isinstance(days, bool) and days <= 0:
+            return True
+    return False
+
+
+# Tokens that end in "." without ending a sentence. Split on one of these and
+# a paragraph shatters into fragments — "The U.S." / "AI Action Plan landed."
+ABBREVIATIONS = frozenset("""
+e.g i.e etc et al cf vs viz approx est fig figs no nos vol vols pp ca
+dr mr mrs ms prof sr jr st mt rev gen sen rep gov pres
+inc ltd co corp dept univ assn bros
+a.m p.m u.s u.k u.n e.u
+""".split())
+
+# "U.S." / "e.g." / "a.m." — any run of single letters each followed by a dot.
+_INITIALISM = re.compile(r"^(?:[A-Za-z]\.)+$")
+
+
+def _ends_abbreviation(buf: list[str]) -> bool:
+    """True when the '.' just consumed closes an abbreviation, not a sentence."""
+    token = "".join(buf).rsplit(" ", 1)[-1].lstrip("([{\"'\u201c\u2018")
+    if _INITIALISM.match(token):
+        return True
+    return token.lower().rstrip(".") in ABBREVIATIONS
 
 
 def _split_clauses(text: str) -> list[str]:
@@ -144,6 +184,9 @@ def _split_clauses(text: str) -> list[str]:
                 i += 2
                 continue
             if ch in ".!?":
+                if ch == "." and _ends_abbreviation(buf):
+                    i += 1
+                    continue
                 out.append("".join(buf).strip())
                 buf = []
                 i += 2
@@ -183,32 +226,67 @@ def bulletize(body: str) -> str:
 
     while len(bullets) > 1 and len(_joined(bullets)) > BUBBLE_CHAR_CAP:
         bullets.pop()
+    if len(_joined(bullets)) > BUBBLE_CHAR_CAP:
+        # One clause longer than the whole bubble budget. Trim it rather than
+        # shipping an uncapped wall — the daily note still has it in full.
+        bullets = [bullets[0][:BUBBLE_CHAR_CAP - 3].rstrip() + "…"]
     return _joined(bullets)
 
 
 def select_for_telegram(sections: list[DigestSection]) -> list[DigestSection]:
-    """The subset of sections that earns a Telegram bubble."""
-    kept = [
-        s for s in sections
-        if _title_matches(s.title, TELEGRAM_KEEP) or is_alarm_section(s)
-    ]
-    if kept:
-        return kept
-    # Nothing matched — don't go silent.
-    if sections:
+    """The subset of sections that earns a Telegram bubble.
+
+    Three independent lanes, unioned in the original section order:
+
+      1. keep-list — the titles the operator asked for
+      2. alarm     — ⚠️ / 🚨 anywhere in the title or body
+      3. live      — a conference actually running today (item data, not title)
+
+    The keep-list match is computed on its own and the miss-fallback fires on
+    *that* alone. Folding alarms into the match would switch the fallback off
+    on exactly the days it exists for: a drifted digest whose sources are also
+    failing would ship the ⚠️ and silently drop every real section.
+    """
+    if not sections:
+        return []
+
+    keep_idx = {i for i, s in enumerate(sections)
+                if _title_matches(s.title, TELEGRAM_KEEP)}
+    extra_idx = {i for i, s in enumerate(sections)
+                 if is_alarm_section(s) or is_live_section(s)}
+
+    if not keep_idx:
+        # Prompt drift, or a degraded digest whose sections are named after
+        # something else entirely. Push the first few real sections so the
+        # brief is never a label with nothing under it.
+        fallback_idx = [i for i in range(len(sections)) if i not in extra_idx]
+        keep_idx = set(fallback_idx[:KEEP_LIST_MISS_FALLBACK])
         log.warning(
-            "no section matched the Telegram keep-list (titles=%s); "
-            "falling back to the first %d",
-            [s.title for s in sections], KEEP_LIST_MISS_FALLBACK,
+            "no section title matched the Telegram keep-list %s — titles were "
+            "%s; falling back to the first %d non-alarm section(s)",
+            list(TELEGRAM_KEEP), [s.title for s in sections],
+            KEEP_LIST_MISS_FALLBACK,
         )
-    return sections[:KEEP_LIST_MISS_FALLBACK]
+
+    chosen = sorted(keep_idx | extra_idx)
+    kept = [sections[i] for i in chosen]
+
+    # Unconditional, so a partially-drifted digest (one section renamed and
+    # quietly dropped) leaves a trace instead of vanishing.
+    log.info(
+        "telegram: pushing %d/%d sections %s; note-only: %s",
+        len(kept), len(sections),
+        [s.title for s in kept],
+        [s.title for i, s in enumerate(sections) if i not in keep_idx | extra_idx],
+    )
+    return kept
 
 
 def _format_section_for_telegram(section: DigestSection, idx: int, total: int) -> str:
     title = section.title.strip()
     counter = f" ({idx}/{total})" if total > 1 else ""
     # A title that already leads with its own marker doesn't get a second one.
-    if title.startswith(ALARM_BODY_MARKERS):
+    if title.startswith(ALARM_MARKERS):
         header = f"*{title}*{counter}"
     else:
         header = f"{_emoji_for(title)} *{title}*{counter}"
@@ -218,16 +296,17 @@ def _format_section_for_telegram(section: DigestSection, idx: int, total: int) -
     return f"{header}\n\n{body}"
 
 
-def render_for_telegram(digest: Digest, *, restrict_sections: bool = True) -> list[str]:
+def render_for_telegram(digest: Digest, *, diet: bool = True) -> list[str]:
     """Produce the Telegram bubbles for a digest.
 
     Five on a normal day: the headline intro plus Today's Signal, Broad
     Tech/AI, Bubble Breaker and Quiet rest. Sections outside that set are
     note-only. Everything except Today's Signal is bullet-pointed.
 
-    `restrict_sections=False` opts out of the keep-list — the weekly review is
-    a different product (a once-a-week long read, not a daily skim) and was
-    not part of the 2026-09-04 diet, so it keeps every section it emits.
+    `diet=False` opts out of BOTH the keep-list and the bulletizer — the weekly
+    review is a different product (a once-a-week long read, not a daily skim)
+    and was not part of the 2026-09-04 diet. Bulletizing it would silently
+    truncate its content at MAX_BULLETS even though its section count survived.
     """
     messages: list[str] = []
 
@@ -235,13 +314,13 @@ def render_for_telegram(digest: Digest, *, restrict_sections: bool = True) -> li
     if digest.headline:
         messages.append(f"🌅 *{digest.date}*\n\n{digest.headline}")
 
-    sections = select_for_telegram(digest.sections) if restrict_sections else digest.sections
+    sections = select_for_telegram(digest.sections) if diet else digest.sections
     kept = [s for s in sections if s.body or s.title]
     total = len(kept)
     for idx, s in enumerate(kept, 1):
         # Alarm bodies are short and often carry their own markdown emphasis —
         # reflowing them mangles it for no gain.
-        if _title_matches(s.title, NEVER_BULLETIZE) or is_alarm_section(s):
+        if not diet or _title_matches(s.title, NEVER_BULLETIZE) or is_alarm_section(s):
             shaped = s
         else:
             shaped = replace(s, body=bulletize(s.body))

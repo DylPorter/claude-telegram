@@ -3,12 +3,14 @@
 **Branch:** `telegram-diet` · **Date:** 2026-09-04 · **Scope:** `signal-brief/` only
 (`job-sift/`, `hk-events/` untouched by instruction).
 
-## Operator instruction
+## Operator instruction (paraphrased)
 
-> "'inbox, links added, git housekeeping, patterns / logs, tomorrow' all useless.
-> 'your open threads, quick checkins' those all suck. i like the morning intro,
-> today's signal, broad tech AI, bubble breaker, quiet rest, they just need to be
-> bullet pointed esp for the 'quiet rest', current today's signal format is perf."
+Keep five morning bubbles — intro, Today's Signal, Broad Tech/AI, Bubble
+Breaker, Quiet rest — and drop the rest of the daily traffic: the evening
+sweep's inbox / links-added / git-housekeeping / patterns / tomorrow sections,
+and the morning's open-threads and quick-check-ins bubbles. Bullet-point
+everything except Today's Signal, whose current format is to stay exactly as
+it is. Quiet rest in particular must become bullets.
 
 ## Measured before / after
 
@@ -23,8 +25,7 @@ Baseline is `sent=N` from `signal-brief/.data/logs/*.log`, 14 days to 2026-09-04
 
 Daily total **~12 → ~5**. Weekly adds ~10 once a week, unchanged.
 
-Verified against today's real brief (`Daily Notes/2026-09-04.md`, the run that
-pushed `sent=7`): re-rendered through the new path it produces exactly 5
+Verified against the 2026-09-04 brief (the run that pushed `sent=7`): re-rendered through the new path it produces exactly 5
 bubbles at 165 / 677 / 472 / 283 / 461 chars.
 
 ## What still runs but no longer notifies
@@ -80,13 +81,13 @@ on both are the daily-note-preservation guards, which is the point.
 ```sh
 cd signal-brief
 find . -name __pycache__ -type d -exec rm -rf {} +
-PYTHONPATH="$PWD" SIGNAL_BRIEF_VAULT_ROOT=/home/tdporter/Documents/Obsidian \
+PYTHONPATH="$PWD" SIGNAL_BRIEF_VAULT_ROOT=<your vault> \
   .venv/bin/python -m pytest tests/ -q
 ```
 
 `--dry-run` on both orchestrators pushes nothing and writes nothing; confirmed
 by test and by a live `morning --dry-run` (real `.data/` untouched, vault
-`Daily Notes/` mtimes unchanged).
+daily-note mtimes unchanged).
 
 ## Concerns
 
@@ -122,5 +123,101 @@ by test and by a live `morning --dry-run` (real `.data/` untouched, vault
 
 6. **No systemd unit was changed** and none needed to be. Note that
    `signal-brief-agentwatch.{service,timer}` is installed under
-   `~/.config/systemd/user/` but has no unit file in this repo — pre-existing
+   the user systemd unit directory but has no unit file in this repo — pre-existing
    drift, unrelated to this change.
+
+---
+
+# Review round 2 — findings addressed
+
+Both safety nets did fail exactly when needed. Reproduced first, then fixed,
+then pinned by tests that fail on the previous commit.
+
+## CRITICAL 1 — the drift fallback disabled itself on alarm days
+
+`select_for_telegram` folded the alarm lane into `kept`, so `if kept: return
+kept` short-circuited before the fallback. Reproduced with the real August
+section titles plus one ⚠️: **2 bubbles, five sections dropped, no log line.**
+
+Rewritten as three independent lanes — keep-list, alarm, live — unioned in
+section order. The miss-fallback now fires on the *keep-list* match alone, and
+kept/dropped titles are logged unconditionally at INFO so partial drift (one
+section renamed) also leaves a trace.
+
+Confirmed: drift + alarm → **6 bubbles, all five sections present, WARNING
+logged**. Same input without the alarm still gives 4 + warning.
+
+## CRITICAL 2 — the LLM-filter fallback shipped a label over an empty page
+
+The keep-list dropped every per-source section while the ⚠️ header counted as
+a match, so the miss-fallback never fired: 8 items in, **0 delivered**. Fixed
+by the same rewrite — no keep-list title matches, so the fallback lane picks
+the per-source sections while the ⚠️ header comes through the alarm lane.
+
+Confirmed: **5 bubbles, 8/8 item titles delivered.** The old assertion (`any
+("Fallback digest" in m)`) is replaced by one that counts delivered items.
+
+## IMPORTANT 3 — the conference gate is now liveness-shaped
+
+`happening now` / `live now` are gone from the alarm markers. New
+`is_live_section()` reads `currently_running` / `days_until <= 0` off the
+section's items — set by `sources/conferences.py`, not by the title. All six
+historical conference sections were titled `Happening Now` regardless of
+urgency, so the title never carried the signal.
+
+`Happening This Week` has never been emitted by this pipeline; the tests now
+use `Happening Now` for both cases — pushed when an item is running today,
+vault-only when it is four days out.
+
+**New dependency, stated in the prompt:** liveness needs the filter to attach
+`item_urls`. A `Happening Now` section with no items can never be live, and a
+test pins that.
+
+## IMPORTANT 4 — weekly escaped the keep-list but not the bulletizer
+
+`restrict_sections=False` skipped selection but still ran `bulletize()`: 544
+chars in, 416 out, 3 of 9 clauses dropped by `MAX_BULLETS`. The flag is now
+`diet=False` and governs both.
+
+Confirmed: **467 chars in, 467 out, body verbatim, no bullets.**
+
+## IMPORTANT 5 — abbreviations
+
+`_split_clauses` now refuses to split after an initialism (`U.S.`, `e.g.`,
+`a.m.` — matched by pattern) or a known abbreviation (`Dr.`, `Mr.`, `etc.`,
+`Inc.` — matched by list). The reported sentence went from 5 fragments to 2
+correct bullets.
+
+## Minors
+
+- Unmapped titles now fall through to `📌`, not `•`, so a header can never
+  read as a bullet above a bullet list. Asserted on both the dieted and
+  long-read paths.
+- A single clause longer than the cap is truncated with `…` instead of
+  shipping uncapped: 901 chars → 600.
+
+## Tests asserting on file text
+
+All four are gone. Replaced by behaviour:
+
+- evening's vault work is asserted on the **prompt `run_vault_agent` is
+  actually called with** (all six tasks, plus the dry-run no-write directive)
+- weekly is asserted on **what it pushes** (every section, bodies verbatim,
+  unbulletized)
+- the trip-wire is asserted by **running `agent_watch.main()`** with stubbed
+  feed/config/push/email: pushes on a TIER1 hit, silent on a quiet run,
+  silent under `--dry-run`
+- morning's thread cut was already covered behaviourally
+
+## Privacy
+
+New fixtures use neutral placeholders (`Northwind`, `Contoso`, `Client B`,
+`Example Corp`). The verbatim operator message and the absolute vault path are
+out of this report. **Not fixed, pre-existing:** `tests/test_threads.py` still
+carries real client and contact names — untouched to keep this diff scoped,
+but it should be scrubbed, and this repo is public.
+
+## Test count
+
+**86 → 92** across the two rounds (39 before any change). All 17 of the
+round-2 regression tests fail against the previous commit.
