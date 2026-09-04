@@ -89,7 +89,7 @@ that.
 
 ## Task 4 — port to the standalone scraper
 
-Port the same capability into `/home/tdporter/Documents/Programming/hku-cedars-scraper`
+Port the same capability into the standalone `hku-cedars-scraper` checkout
 (a separate git repo, one commit, about to be shared with another student):
 
 - the same test-first `ensure_session()` ordering,
@@ -99,5 +99,5 @@ Port the same capability into `/home/tdporter/Documents/Programming/hku-cedars-s
   anything there — it is a library-plus-CLI, and the reader chooses.
 
 ⚠️ That repo is about to be handed over: nothing personal (no operator name, no
-`/home/tdporter` paths, no vault paths), and no real CEDARS job postings — its
+absolute home-directory paths, no vault paths), and no real CEDARS job postings — its
 fixtures deliberately keep the portal's structure and substitute the postings.

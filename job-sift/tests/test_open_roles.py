@@ -265,7 +265,7 @@ def test_render_open_roles_places_closing_roles_in_their_own_section():
     assert "PwC" in closing_block
     assert "CLSA" not in closing_block
     assert "3 days left" in closing_block
-    assert "Jane Street" in md.split("## ✅ Applied")[1]
+    assert "Northwind Capital" in md.split("## ✅ Applied")[1]
 
 
 # ---------------------------------------------------------------------------

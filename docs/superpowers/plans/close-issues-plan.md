@@ -126,11 +126,11 @@ Render the two lanes under **separate headings** in the digest and in the
 
 ## Task 3 — Close #1b (cross-source dedupe for job listings)
 
-The same bug just fixed in hk-events exists here. From #1: IMC
-"HK - 2027 - Software Engineer Intern" (`linkedin:1000000001`) and "Software
-Engineer Intern 2027" (`linkedin:1000000002`) are the same posting; the HSBC CIB
+The same bug just fixed in hk-events exists here. From #1: one employer's
+"HK - 2027 - Software Engineer Intern" (`linkedin:4400000001`) and "Software
+Engineer Intern 2027" (`linkedin:4400000002`) are the same posting; a graduate
 programme is listed once from CEDARS (`G2600001`) and once from LinkedIn
-(`1000000003`).
+(`4400000003`). Ids here are illustrative, not live postings.
 
 Port the hk-events approach — read `hk_events/schema.py::identity_key`,
 `hk_events/dedupe.py::collapse_cross_source` and `mirror_collapsed` first, and
@@ -151,8 +151,8 @@ title matching.
 
 LinkedIn roles carry `Deadline: none listed`, so the 30-day-unseen `stale` rule
 is the only ageing mechanism and closed postings sit as `open` indefinitely.
-IMC `linkedin:1000000001` is already "No longer accepting applications" while the
-register still lists it open.
+A LinkedIn row such as `linkedin:4400000001` can already be closed at the source
+while the register still lists it open.
 
 Fix: either parse a deadline from the JD body where one exists, or add a
 liveness re-check for LinkedIn entries in the open-roles register. Prefer

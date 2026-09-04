@@ -29,7 +29,7 @@ TODAY = date(2026, 9, 1)
 # Padded for the same reason `_OPEN_PAGE` is: `classify_page` rejects a body
 # too short to have been a posting BEFORE it looks for any marker.
 _CLOSED_PAGE = (
-    "<html><head><title>IMC hiring Software Engineer Intern</title></head><body>"
+    "<html><head><title>Northwind hiring Software Engineer Intern</title></head><body>"
     "<div class='top-card'>Software Engineer Intern</div>"
     "<div class='description'>" + ("This role has now closed. " * 20) + "</div>"
     "<span class='artdeco-inline-feedback__message'>No longer accepting "
@@ -51,7 +51,7 @@ _REDIRECT_TARGET_PAGE = (
 # long is an interstitial or a redirect stub, and `classify_page` calls that
 # UNKNOWN rather than guessing.
 _OPEN_PAGE = (
-    "<html><head><title>IMC hiring Software Engineer Intern</title></head><body>"
+    "<html><head><title>Northwind hiring Software Engineer Intern</title></head><body>"
     "<div class='top-card'>Software Engineer Intern</div>"
     "<div class='description'>" + ("We are looking for interns. " * 20) + "</div>"
     "<button>Apply</button></body></html>"
@@ -63,7 +63,7 @@ def _role(key="linkedin:111", *, source="linkedin", status="open", deadline=None
     return OpenRole(
         dedup_key=key,
         source=source,
-        employer="IMC",
+        employer="Northwind",
         title="Software Engineer Intern",
         apply_url="https://www.linkedin.com/jobs/view/111/",
         deadline=deadline,
@@ -134,10 +134,10 @@ class TestProbeFailsSafe:
 class TestTheMarkerSet:
     """Exactly one marker, because the other two were net-negative.
 
-    All three real closed rows (IMC 1000000001, HSBC 1000000003, BBVA
-    1000000004) match "no longer accepting applications" on its own, so the
-    broader strings contributed no true positives — and every string below is
-    ordinary LinkedIn error prose that would have retired a live role.
+    Every closed posting seen while tuning this matched "no longer accepting
+    applications" on its own, so the broader strings contributed no true
+    positives — and every string below is ordinary LinkedIn error prose that
+    would have retired a live role.
     """
 
     @pytest.mark.parametrize(
@@ -164,7 +164,7 @@ class TestIsPostingUrl:
     @pytest.mark.parametrize(
         "url,expected",
         [
-            ("https://www.linkedin.com/jobs/view/1000000001/", True),
+            ("https://www.linkedin.com/jobs/view/4400000001/", True),
             ("https://linkedin.com/jobs/view/1/", True),
             # A real LinkedIn host, so a host-only check would have passed it.
             (_REDIRECT_TARGET, False),
@@ -403,8 +403,8 @@ class TestLivenessPassInTheRun:
             "probe_linkedin",
             lambda job_id: asked.append(job_id) or liveness.OPEN,
         )
-        orchestrator._liveness_pass([_role("linkedin:1000000001")], TODAY)
-        assert asked == ["1000000001"]
+        orchestrator._liveness_pass([_role("linkedin:4400000001")], TODAY)
+        assert asked == ["4400000001"]
 
     def test_a_zero_budget_disables_the_pass_entirely(self, monkeypatch):
         from job_sift import config, orchestrator

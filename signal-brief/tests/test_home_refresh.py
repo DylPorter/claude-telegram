@@ -140,11 +140,16 @@ def test_replace_preserves_everything_outside_this_week():
 def test_replace_against_real_home_preserves_rest_byte_for_byte():
     """Run the replacement against the LIVE Home.md and prove only the This Week
     block changed — everything from the next heading onward is identical."""
-    real_home = Path(
-        "/home/tdporter/Documents/Obsidian/Home.md"
-    )
+    # Resolved from config (DEFAULT_CWD / SIGNAL_BRIEF_VAULT_ROOT), not a literal
+    # path: this asserts against whatever vault the checkout is configured for,
+    # and skips cleanly on a machine that has none.
+    from signal_brief.config import HOME_NOTE
+
+    if HOME_NOTE is None:
+        pytest.skip("no vault configured — set SIGNAL_BRIEF_VAULT_ROOT or DEFAULT_CWD")
+    real_home = Path(HOME_NOTE)
     if not real_home.exists():
-        pytest.skip("real Home.md not present")
+        pytest.skip(f"configured Home note not present: {real_home}")
     original = real_home.read_text()
 
     new_block = render_this_week_block(

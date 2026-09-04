@@ -42,7 +42,12 @@ SEEN_CACHE = CACHE_DIR / "agent_watch_seen.json"
 # Email is the second delivery leg. Telegram is fast but gets buried in the
 # same chat as the digest; email survives being missed for a week and is
 # searchable months later, which matters for a watcher that fires once.
-EMAIL_TO = os.environ.get("AGENT_WATCH_EMAIL_TO", "you@example.com")
+#
+# NO DEFAULT, deliberately. A hardcoded address is both a personal detail in a
+# public repo and a silent-failure mode: an operator who never sets the env var
+# would get a watcher that reports "email sent" to somebody else's inbox, or to
+# nobody. Unset means the email leg is OFF and says so.
+EMAIL_TO = os.environ.get("AGENT_WATCH_EMAIL_TO") or ""
 
 # Nothing older than this can trip the wire — stops a feed re-serving history
 # on first run or after a cache wipe.
@@ -154,11 +159,22 @@ def _render(hits: list[tuple[str, dict]]) -> list[str]:
 
 
 def _send_email(hits: list[tuple[str, dict]]) -> None:
-    """Send via the gws CLI (already authenticated for Dylan's Gmail).
+    """Send via the gws CLI (already authenticated for the operator's Gmail).
 
     Never raises — email is the backup leg, and a gws auth expiry (which
     happens roughly weekly) must not take the Telegram push down with it.
+
+    Requires `AGENT_WATCH_EMAIL_TO`. Unset is not silently "send to nobody":
+    it logs an error naming the variable, because a backup leg that has been
+    quietly off is the failure this leg exists to prevent.
     """
+    if not EMAIL_TO:
+        log.error(
+            "AGENT_WATCH_EMAIL_TO is not set — the email leg is OFF and %d hit(s) "
+            "went out over Telegram only. Set it to enable email.",
+            len(hits),
+        )
+        return
     tier1 = [h for h in hits if h[0] == "TIER1"]
     subject = (
         "🚨 AGENT-IDENTITY TRIP-WIRE — the switch may have flipped"

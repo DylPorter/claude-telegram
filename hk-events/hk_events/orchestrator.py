@@ -410,7 +410,11 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             result = RelevanceResult(tag=cached_tag, reason="cached verdict from discovery run")
         else:
             result = classify(event)
-            log_classification(event, result)
+            # A dry run writes no state, and this log IS state: it is the
+            # dataset the relevance filter is tuned against. Same guard
+            # job-sift needed on `classifier_log.jsonl`.
+            if not dry_run:
+                log_classification(event, result)
         record_verdict(seen_by_source, event, result.tag)
         if result.surface:
             surfaced.append((event, result, stage))

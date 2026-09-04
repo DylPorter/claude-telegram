@@ -26,7 +26,7 @@ ScopeVerdict = Literal["in_scope", "out_of_scope"]
 Lane = Literal["prestige", "floor", "broad"]
 
 # Everything that is not a letter or a digit becomes a single space, so
-# "IMC Trading." and "IMC  trading" key the same. Deliberately nothing more
+# "Northwind Trading." and "Northwind  trading" key the same. Deliberately nothing more
 # clever than that — see `JobListing.identity_key`.
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
@@ -76,9 +76,9 @@ class JobListing:
 
         The cost of guessing wrong is asymmetric and that is what settles it. A
         missed collapse shows one job twice; a wrong merge DROPS a real job and
-        logs nothing. So the key stays exact, and `source` stays in it: the HSBC
-        pair from issue #1b (`cedars:G2600001` / `linkedin:1000000003`) is
-        knowingly left as two rows rather than merged on "HSBC" + a title.
+        logs nothing. So the key stays exact, and `source` stays in it: the Contoso Bank
+        pair from issue #1b (`cedars:G2600001` / `linkedin:4400000003`) is
+        knowingly left as two rows rather than merged on "Contoso Bank" + a title.
 
         Within one source the same-prose match is safe enough to act on, because
         a source does not list two genuinely different jobs under an identical

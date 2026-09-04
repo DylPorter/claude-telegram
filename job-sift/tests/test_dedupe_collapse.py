@@ -47,8 +47,8 @@ def _listing(source, ext_id, employer, title, location="Hong Kong", deadline=Non
 
 class TestIdentityKey:
     def test_punctuation_and_case_do_not_split_one_posting(self):
-        a = _listing("linkedin", "1", "IMC Trading", "Software Engineer Intern")
-        b = _listing("linkedin", "2", "IMC  trading.", "software engineer intern")
+        a = _listing("linkedin", "1", "Northwind Trading", "Software Engineer Intern")
+        b = _listing("linkedin", "2", "Northwind  trading.", "software engineer intern")
         assert a.identity_key == b.identity_key
 
     def test_two_sources_never_share_an_identity(self):
@@ -57,13 +57,13 @@ class TestIdentityKey:
         A false merge silently DROPS a real job, which is strictly worse than
         the duplicate it would fix, and CEDARS and LinkedIn share no id.
         """
-        a = _listing("cedars", "G2600001", "HSBC", "Global Banking Programme")
-        b = _listing("linkedin", "1000000003", "HSBC", "Global Banking Programme")
+        a = _listing("cedars", "G2600001", "Contoso Bank", "Global Banking Programme")
+        b = _listing("linkedin", "4400000003", "Contoso Bank", "Global Banking Programme")
         assert a.identity_key != b.identity_key
 
     def test_a_different_location_is_a_different_posting(self):
-        a = _listing("linkedin", "1", "HSBC", "Graduate Programme", location="Hong Kong")
-        b = _listing("linkedin", "2", "HSBC", "Graduate Programme", location="Singapore")
+        a = _listing("linkedin", "1", "Contoso Bank", "Graduate Programme", location="Hong Kong")
+        b = _listing("linkedin", "2", "Contoso Bank", "Graduate Programme", location="Singapore")
         assert a.identity_key != b.identity_key
 
     def test_an_unusable_key_falls_back_to_the_per_source_id(self):
@@ -81,29 +81,29 @@ class TestIdentityKey:
 
 class TestCollapseDuplicates:
     def test_a_repost_collapses_to_one_listing(self):
-        old = _listing("linkedin", "1000000001", "IMC", "Software Engineer Intern 2027")
-        new = _listing("linkedin", "1000000002", "IMC", "software engineer intern 2027")
+        old = _listing("linkedin", "4400000001", "Northwind", "Software Engineer Intern 2027")
+        new = _listing("linkedin", "4400000002", "Northwind", "software engineer intern 2027")
         kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: set())
         assert len(kept) == 1
         assert len(collapsed) == 1
 
     def test_the_already_seen_row_wins_so_nothing_re_notifies(self):
-        old = _listing("linkedin", "111", "IMC", "SWE Intern")
-        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        old = _listing("linkedin", "111", "Northwind", "SWE Intern")
+        new = _listing("linkedin", "222", "Northwind", "SWE Intern")
         kept, _ = collapse_duplicates([new, old], seen_lookup=lambda s: {"111"})
         assert [l.external_id for l in kept] == ["111"]
 
     def test_cross_source_duplicates_are_left_alone(self):
-        a = _listing("cedars", "G2600001", "HSBC", "CIB Programme")
-        b = _listing("linkedin", "1000000003", "HSBC", "CIB Programme")
+        a = _listing("cedars", "G2600001", "Contoso Bank", "CIB Programme")
+        b = _listing("linkedin", "4400000003", "Contoso Bank", "CIB Programme")
         kept, collapsed = collapse_duplicates([a, b], seen_lookup=lambda s: set())
         assert len(kept) == 2
         assert collapsed == []
 
     def test_the_dropped_id_is_mirrored_into_the_seen_set(self):
         """Without this the next hand-off between ids re-pushes the role."""
-        old = _listing("linkedin", "111", "IMC", "SWE Intern")
-        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        old = _listing("linkedin", "111", "Northwind", "SWE Intern")
+        new = _listing("linkedin", "222", "Northwind", "SWE Intern")
         _kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: {"111"})
         seen_by_source = {"linkedin": {"111"}}
         mirror_collapsed(seen_by_source, collapsed, seen_lookup=lambda s: set())
@@ -111,8 +111,8 @@ class TestCollapseDuplicates:
 
     def test_mirroring_never_invents_a_source_bucket_it_cannot_fill(self):
         """A collapse whose winner was not recorded must not fabricate state."""
-        old = _listing("linkedin", "111", "IMC", "SWE Intern")
-        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        old = _listing("linkedin", "111", "Northwind", "SWE Intern")
+        new = _listing("linkedin", "222", "Northwind", "SWE Intern")
         _kept, collapsed = collapse_duplicates([old, new], seen_lookup=lambda s: set())
         seen_by_source: dict[str, set[str]] = {}
         mirror_collapsed(seen_by_source, collapsed, seen_lookup=lambda s: set())
@@ -132,7 +132,7 @@ class TestCollapseDuplicates:
 # --------------------------------------------------------------------------
 
 
-def _role(key, *, employer="IMC", title="SWE Intern", source="linkedin",
+def _role(key, *, employer="Northwind", title="SWE Intern", source="linkedin",
           status="open", first_seen="2026-08-01", last_seen="2026-08-01",
           location="Hong Kong", deadline=None):
     return OpenRole(
@@ -152,9 +152,9 @@ def _role(key, *, employer="IMC", title="SWE Intern", source="linkedin",
 
 class TestCollapseRegister:
     def test_two_rows_for_one_posting_become_one(self):
-        """The reported symptom: both IMC ids sit in the register as `open`."""
-        a = _role("linkedin:1000000001", title="Software Engineer Intern 2027")
-        b = _role("linkedin:1000000002", title="software engineer intern 2027",
+        """The reported symptom: both Northwind ids sit in the register as `open`."""
+        a = _role("linkedin:4400000001", title="Software Engineer Intern 2027")
+        b = _role("linkedin:4400000002", title="software engineer intern 2027",
                   last_seen="2026-08-20")
         out = collapse_register([a, b])
         assert len(out) == 1
@@ -182,8 +182,8 @@ class TestCollapseRegister:
         assert out[0].status == sticky
 
     def test_cross_source_register_rows_are_never_merged(self):
-        a = _role("cedars:G2600001", source="cedars", employer="HSBC", title="CIB")
-        b = _role("linkedin:1000000003", employer="HSBC", title="CIB")
+        a = _role("cedars:G2600001", source="cedars", employer="Contoso Bank", title="CIB")
+        b = _role("linkedin:4400000003", employer="Contoso Bank", title="CIB")
         assert len(collapse_register([a, b])) == 2
 
     def test_a_deadline_is_not_lost_when_the_undated_row_wins(self):
@@ -256,21 +256,21 @@ class TestOrchestratorWiring:
     def test_the_duplicate_is_gone_before_the_seen_set_ever_sees_it(
         self, monkeypatch, tmp_path
     ):
-        old = _listing("linkedin", "111", "IMC", "SWE Intern")
-        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        old = _listing("linkedin", "111", "Northwind", "SWE Intern")
+        new = _listing("linkedin", "222", "Northwind", "SWE Intern")
         handed, _saved = self._run(monkeypatch, tmp_path, [old, new])
         assert [l.external_id for l in handed] == ["111"]
 
     def test_the_dropped_id_is_persisted_by_the_run(self, monkeypatch, tmp_path):
         """Otherwise the next run hands over to the other id and re-pushes."""
-        old = _listing("linkedin", "111", "IMC", "SWE Intern")
-        new = _listing("linkedin", "222", "IMC", "SWE Intern")
+        old = _listing("linkedin", "111", "Northwind", "SWE Intern")
+        new = _listing("linkedin", "222", "Northwind", "SWE Intern")
         _handed, saved = self._run(monkeypatch, tmp_path, [old, new])
         assert saved["linkedin"] == {"111", "222"}
 
     def test_two_sources_still_both_reach_the_classifier(self, monkeypatch, tmp_path):
-        a = _listing("cedars", "G2600001", "HSBC", "CIB Programme")
-        b = _listing("linkedin", "1000000003", "HSBC", "CIB Programme")
+        a = _listing("cedars", "G2600001", "Contoso Bank", "CIB Programme")
+        b = _listing("linkedin", "4400000003", "Contoso Bank", "CIB Programme")
         handed, _saved = self._run(monkeypatch, tmp_path, [a, b])
         assert len(handed) == 2
 
@@ -332,15 +332,15 @@ class TestWithholdUnclassified:
         winner is then unclassified, pulling only the winner would leave the
         loser marked delivered for a posting that was never judged OR pushed.
         The same collapse recurs next run, so dropping both is idempotent."""
-        winner = _listing("linkedin", "100", "IMC", "Software Engineer Intern")
-        loser = _listing("linkedin", "200", "IMC", "Software Engineer Intern")
+        winner = _listing("linkedin", "100", "Northwind", "Software Engineer Intern")
+        loser = _listing("linkedin", "200", "Northwind", "Software Engineer Intern")
         seen = {"linkedin": {"100", "200"}}
         assert withhold_unclassified(seen, [winner], [(winner, loser)]) == 2
         assert seen == {"linkedin": set()}
 
     def test_a_mirrored_loser_survives_a_JUDGED_winner(self):
-        winner = _listing("linkedin", "100", "IMC", "Software Engineer Intern")
-        loser = _listing("linkedin", "200", "IMC", "Software Engineer Intern")
+        winner = _listing("linkedin", "100", "Northwind", "Software Engineer Intern")
+        loser = _listing("linkedin", "200", "Northwind", "Software Engineer Intern")
         other = _listing("linkedin", "300", "X", "Engineer")
         seen = {"linkedin": {"100", "200", "300"}}
         assert withhold_unclassified(seen, [other], [(winner, loser)]) == 1

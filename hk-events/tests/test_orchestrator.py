@@ -557,3 +557,80 @@ def test_the_abandonment_log_does_not_name_a_phase(caplog):
     assert "still running after the" in msg
     assert "budget" in msg
     assert "fetch budget" not in msg
+
+
+# ---------------------------------------------------------------------------
+# `--dry-run` must write NO state. Every other writer in `run()` is already
+# behind a dry-run check — `_write_board` says so in its own comment ("--dry-run
+# writes no state, pushes nothing, and writes NO BOARD") — except
+# `log_classification`, which sat in the classify loop unguarded and appended a
+# line per event to `.data/state/relevance_log.jsonl` on every dry run.
+#
+# Same defect job-sift carried in `classifier_log.jsonl`, and the same reason it
+# matters: the log is the dataset used to tune the filter, so a dry run was
+# quietly voting in it.
+#
+# Asserted on the FILESYSTEM rather than on a call count, so removing the guard
+# fails here regardless of how the write is reached.
+# ---------------------------------------------------------------------------
+
+
+class _NoBoard:
+    path = None
+    problem = None
+
+
+class TestDryRunWritesNoState:
+    def _run(self, monkeypatch, tmp_path, *, dry_run: bool) -> int:
+        from hk_events import dedupe
+        from hk_events.schema import RelevanceResult
+
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        # `dedupe` does `from hk_events.config import STATE_DIR`, binding the
+        # path at IMPORT time, so patching `config.STATE_DIR` alone leaves
+        # `_log_path()` pointing at the REAL `.data/state/`. Patch the name the
+        # module actually reads. (job-sift resolves this at call time and has a
+        # test pinning that; hk-events still binds at import — noted, not fixed
+        # here, since this change is a dry-run guard, not a refactor.)
+        monkeypatch.setattr(dedupe, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("HK_EVENTS_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+
+        events = [_event("luma", "1"), _event("luma", "2")]
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: (events, {}, ["luma"])
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "filter_due",
+            lambda evs: (
+                [(e, orchestrator.STAGE_NEW, None) for e in evs],
+                {"luma": {e.external_id: {"stages": ["new"], "tag": None} for e in evs}},
+            ),
+        )
+        monkeypatch.setattr(
+            orchestrator, "classify", lambda e: RelevanceResult(tag="core", reason="yes")
+        )
+        monkeypatch.setattr(orchestrator, "sync_events", lambda evs, dry_run: {})
+        monkeypatch.setattr(orchestrator, "_update_event_register", lambda *a, **k: ([], 0))
+        monkeypatch.setattr(orchestrator, "_write_board", lambda *a, **k: _NoBoard())
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+        monkeypatch.setattr(orchestrator, "save_seen", lambda *a, **k: None)
+        return orchestrator.run(dry_run=dry_run)
+
+    def test_a_dry_run_leaves_the_relevance_log_unwritten(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, dry_run=True)
+        assert not (tmp_path / "relevance_log.jsonl").exists()
+
+    def test_a_dry_run_writes_nothing_at_all_into_the_state_dir(self, monkeypatch, tmp_path):
+        """The general property, so the next unguarded writer fails here too."""
+        self._run(monkeypatch, tmp_path, dry_run=True)
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    def test_a_live_run_still_logs_every_classification(self, monkeypatch, tmp_path):
+        """The guard must not silently disable the log on real runs."""
+        self._run(monkeypatch, tmp_path, dry_run=False)
+        log_file = tmp_path / "relevance_log.jsonl"
+        assert log_file.exists()
+        rows = [json.loads(l) for l in log_file.read_text().splitlines() if l.strip()]
+        assert [r["external_id"] for r in rows] == ["1", "2"]
