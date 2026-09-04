@@ -453,18 +453,13 @@ class TestLaneOverlapResolution:
         assert twice == once
 
     def test_a_listing_appears_exactly_once_across_the_rendered_lanes(self):
+        """Moved from the digest to the archive, because the digest no longer
+        renders listings at all — it is a pointer to the board. The property
+        is the same one: lanes partition, so nothing is written twice."""
         listing = _listing("AI Engineer (12-month contract)", employer="Anthropic")
         surfaced = [(listing, assign_lane(listing, ClassifierResult("prestige", "in_scope", "ok")))]
-        blob = "\n".join(
-            render(
-                surfaced=surfaced,
-                skipped=[],
-                total_new=1,
-                total_processed=1,
-                today=TODAY,
-            )
-        )
-        assert blob.count(listing.apply_url) == 1
+        md = render_vault_archive(surfaced=surfaced, skipped=[], today=TODAY)
+        assert md.count(listing.apply_url) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -478,36 +473,33 @@ def _pair(title, employer, prestige):
 
 
 class TestLanesRenderSeparately:
-    def test_the_digest_puts_the_floor_lane_under_its_own_header(self):
+    def test_the_archive_puts_the_floor_lane_under_its_own_header(self):
         prestige = _pair("AI Research Intern", "Anthropic", "prestige")
         floor = _pair("Data Scientist, 6-12 month contract", "Aster Recruiting", "skip")
         assert floor[1].lane == "floor"
 
+        md = render_vault_archive(
+            surfaced=[prestige, floor], skipped=[], today=TODAY
+        )
+        assert md.index("Anthropic") < md.index("floor lane") < md.index("Aster Recruiting")
+        assert md.count(floor[0].apply_url) == 1
+
+    def test_the_digest_renders_no_listings_at_all(self):
+        """Telegram is a pointer now. Whatever the lanes did, the push is one
+        summary bubble — the reading happens on the board."""
         messages = render(
-            surfaced=[prestige, floor],
+            surfaced=[
+                _pair("AI Research Intern", "Anthropic", "prestige"),
+                _pair("Data Scientist, 6-12 month contract", "Aster Recruiting", "skip"),
+            ],
             skipped=[],
             total_new=2,
             total_processed=2,
             today=TODAY,
         )
-        blob = "\n".join(messages)
-        header_idx = next(i for i, m in enumerate(messages) if "Floor lane" in m)
-        prestige_idx = next(i for i, m in enumerate(messages) if "Anthropic" in m)
-        floor_idx = next(i for i, m in enumerate(messages) if "Aster Recruiting" in m)
-        assert prestige_idx < header_idx < floor_idx, "the floor header must separate the lanes"
-        assert blob.count(floor[0].apply_url) == 1
-
-    def test_no_floor_header_when_nothing_took_that_lane(self):
-        """An empty lane must not cost a bubble — the digest is chunked and
-        every bubble is a notification."""
-        messages = render(
-            surfaced=[_pair("AI Research Intern", "Anthropic", "prestige")],
-            skipped=[],
-            total_new=1,
-            total_processed=1,
-            today=TODAY,
-        )
-        assert not any("Floor lane" in m for m in messages)
+        assert len(messages) == 1
+        assert "Anthropic" not in messages[0]
+        assert "2 new" in messages[0]
 
     def test_the_archive_splits_the_lanes_and_says_none_explicitly(self):
         md = render_vault_archive(
@@ -614,9 +606,17 @@ class TestRegisterBackCompat:
         )
         assert role.lane == "prestige"
 
-    def test_a_garbage_lane_falls_back_rather_than_propagating(self):
+    def test_a_garbage_lane_falls_back_to_the_weakest_claim(self):
+        """An unrecognised lane resolves to "broad", not "prestige".
+
+        A MISSING lane still resolves to "prestige" (the test above) because
+        every row written before the field existed genuinely was surfaced by
+        the only lane there was. An unrecognised one is a hand-edit or a
+        newer vocabulary, and resolving it to "prestige" would upgrade
+        garbage into the strongest claim the field can make — a claim about
+        the employer that nothing checked."""
         role = OpenRole.from_dict({"dedup_key": "cedars:1", "lane": "banana"})
-        assert role.lane == "prestige"
+        assert role.lane == "broad"
 
     def test_upsert_still_accepts_two_tuples(self):
         """The lane is optional: a caller that does not know about lanes gets
@@ -632,7 +632,18 @@ class TestSurfaceSemantics:
 
     def test_the_floor_lane_surfaces_without_prestige(self):
         assert ClassifierResult("skip", "in_scope", "", lane="floor").surface
-        assert not ClassifierResult("skip", "in_scope", "").surface
+
+    def test_prestige_is_no_longer_a_gate(self):
+        """The capture inversion: an in-scope role at a no-name employer that
+        no lane claims is CAPTURED, and tagged `broad`. It used to be dropped
+        at classification time and lost forever, which is the whole reason
+        prestige became a tag."""
+        assert ClassifierResult("skip", "in_scope", "").surface
+        assert ClassifierResult("marginal", "in_scope", "", lane="broad").surface
+
+    def test_scope_is_still_a_gate(self):
+        for lane in ("prestige", "floor", "broad"):
+            assert not ClassifierResult("skip", "out_of_scope", "", lane=lane).surface
 
     def test_positional_construction_keeps_its_old_meaning(self):
         assert ClassifierResult("skip", "out_of_scope", "nope").lane == "prestige"
@@ -795,15 +806,19 @@ class TestFloorLaneIsBrandAgnostic:
         assert surfaced.surface is True
 
     def test_the_prestige_lane_verdict_is_unchanged_for_these_employers(self):
-        """The instruction was explicit: fix the floor lane, do not change
-        what the prestige lane does with hard-skip/hard-marginal employers.
-        `result.surface` under the OLD `lane` default (never stamped floor)
-        must still be False — i.e. these never surface in the prestige lane,
-        exactly as before this fix."""
+        """The PRESTIGE VERDICT is unchanged for hard-skip/hard-marginal
+        employers — that was the original instruction and it still holds.
+
+        What changed underneath it is that the verdict is no longer a gate.
+        These listings now reach the board tagged `prestige="skip"`, where a
+        reader can filter them out by hand, instead of being deleted at
+        capture. So the assertion is on the tag, not on `surface`: the old
+        version asserted `surface is False`, which today would be asserting
+        that a captured role is thrown away."""
         listing = _listing("AI Platform Engineer, Contract", employer="Hermes International")
         result, _ = _route(listing)
-        assert result.prestige != "prestige"
-        assert ClassifierResult(result.prestige, result.scope, result.reason).surface is False
+        assert result.prestige == "skip"
+        assert ClassifierResult(result.prestige, result.scope, result.reason).lane == "prestige"
 
     def test_a_hard_skip_employer_with_a_negative_title_is_still_rejected_outright(self):
         """The floor lane is looser, not blind: a genuinely non-technical

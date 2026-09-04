@@ -166,6 +166,61 @@ JOB_SIFT_ARCHIVE_DIR = _vault_path("JOB_SIFT_ARCHIVE_DIR", "Inbox/Job Sift")
 # Rolling "still open" register — one note, rewritten every run (see open_roles.py).
 OPEN_ROLES_PATH = _vault_path("JOB_SIFT_OPEN_ROLES_PATH", "Areas/Work/Open Roles.md")
 
+# ---------------------------------------------------------------------------
+# The board — ONE self-contained HTML file, rewritten every run.
+#
+# It defaults into the vault next to the register note, but it is deliberately
+# a plain path rather than a vault-relative one: the file has no dependencies
+# at all (no CDN, no build step, no server), so it is meant to be copyable to
+# someone else's machine and opened from disk. `JOB_SIFT_BOARD_PATH` accepts
+# any absolute path, vault or not.
+BOARD_PATH = _vault_path("JOB_SIFT_BOARD_PATH", "Areas/Work/Job Board.html")
+
+
+def board_path() -> Path | None:
+    """Resolved at CALL time, so a one-off run can redirect the board with an
+    env var without re-importing the package."""
+    override = os.environ.get("JOB_SIFT_BOARD_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return BOARD_PATH
+
+
+# The events tab is fed by a small JSON file hk-events writes on its own run
+# (see job_sift/board.py for why it is a file handoff and not an import).
+# Missing → the tab says the feed is missing; it never renders a fake zero.
+def jobs_feed_path() -> Path:
+    """Where job-sift PUBLISHES its rows for hk-events' Jobs tab."""
+    override = os.environ.get("JOB_SIFT_JOBS_FEED", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return STATE_DIR / "jobs_feed.json"
+
+
+def events_feed_path() -> Path:
+    override = os.environ.get("JOB_SIFT_EVENTS_FEED", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return BOT_ROOT / "hk-events" / ".data" / "state" / "events_feed.json"
+
+
+# ---------------------------------------------------------------------------
+# The purge (see open_roles.purge). Two independent clocks, both overridable.
+PURGE_UNSEEN_ENV = "JOB_SIFT_PURGE_UNSEEN_DAYS"
+PURGE_MAX_AGE_ENV = "JOB_SIFT_PURGE_MAX_AGE_DAYS"
+
+
+def purge_unseen_after_days() -> int:
+    from job_sift.open_roles import PURGE_UNSEEN_AFTER_DAYS
+
+    return _positive_int_env(PURGE_UNSEEN_ENV, PURGE_UNSEEN_AFTER_DAYS)
+
+
+def purge_max_age_days() -> int:
+    from job_sift.open_roles import PURGE_MAX_AGE_DAYS
+
+    return _positive_int_env(PURGE_MAX_AGE_ENV, PURGE_MAX_AGE_DAYS)
+
 
 def assert_required() -> None:
     """Fail fast on critical config."""

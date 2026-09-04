@@ -281,8 +281,8 @@ class TestRenderPlacement:
             staleness_alarm=alarm,
         )
         assert messages[0] == alarm
-        # ...and the misleading line is still there, but now second.
-        assert "No new prestige matches today" in messages[1]
+        # ...and the summary it invalidates is still there, but now second.
+        assert "Job sift" in messages[1]
 
     def test_alarm_leads_a_populated_digest(self):
         alarm = "🚨 alarm"
@@ -322,7 +322,7 @@ class _Harness:
         monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "save_seen", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(
             orchestrator,
             "filter_new",

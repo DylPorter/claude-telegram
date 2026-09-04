@@ -14,3 +14,10 @@ __pycache__/
 # Operator profiles — personal, never committed (see job-sift/config/profile.yaml.example)
 config/profile.yaml
 */config/profile.yaml
+
+# Generated boards + register feeds. They are built FROM the operator's own
+# register (employers, titles, application marks), so they are personal data in
+# a public repo. `.data/` above already covers the default locations; this
+# catches a board written anywhere else in the tree.
+*.local.html
+board-sample*.html

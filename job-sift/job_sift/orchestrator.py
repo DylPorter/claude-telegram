@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 from datetime import date
 
+from job_sift import board as board_mod
 from job_sift import config, liveness, source_health
 from job_sift.classifier import classify, classify_batch, classify_scope_only
 from job_sift.concurrency import run_with_budget
@@ -34,6 +35,7 @@ from job_sift.open_roles import (
     load_open_roles,
     parse_status_overrides,
     prune,
+    purge,
     roles_due_liveness_check,
     save_open_roles,
     upsert_roles,
@@ -251,12 +253,27 @@ def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
         return roles
 
 
+def _tags_of(result: ClassifierResult) -> dict:
+    """The advisory tags a verdict carries, as the register's plain mapping.
+
+    `prestige` is in here now. It used to be a gate and is now just another
+    column the board can filter on — the classifier still forms the opinion,
+    it simply no longer gets to act on it.
+    """
+    return {
+        "prestige": result.prestige,
+        "role_type": result.role_type,
+        "industry": result.industry,
+        "is_technical": result.is_technical,
+    }
+
+
 def _update_open_roles(
     surfaced: list[tuple[JobListing, ClassifierResult]],
     today: date,
     *,
     dry_run: bool,
-) -> list[OpenRole]:
+) -> tuple[list[OpenRole], int]:
     """Fold this run's surfaced roles into the rolling register.
 
     Runs even on a zero-surfaced day: ageing and pruning are time-driven, so the
@@ -275,7 +292,9 @@ def _update_open_roles(
 
     # The lane travels with the role so the register can keep the two headings
     # apart on days a listing's source does not re-list it.
-    merged = upsert_roles(existing, [(l, r.reason, r.lane) for l, r in surfaced], today)
+    merged = upsert_roles(
+        existing, [(l, r.reason, r.lane, _tags_of(r)) for l, r in surfaced], today
+    )
     # Fold rows that are the same posting under two ids. Runs BEFORE ageing so
     # the ager judges the merged `last_seen` and deadline, not one half of a
     # split record. See open_roles.collapse_register — this is the half of #1b
@@ -292,7 +311,24 @@ def _update_open_roles(
     if not dry_run and os.environ.get("JOB_SIFT_STUB") != "1":
         merged = _liveness_pass(merged, today)
     aged = age_roles(merged, today)
-    kept = prune(aged, today)
+    # THE PURGE runs before `prune`, and the two are not the same thing.
+    # `prune` drops closed-out bookkeeping; the purge is the size control the
+    # broad capture made necessary — a role whose source stopped listing it, or
+    # that is simply older than two months, leaves entirely. Every drop is
+    # logged with the rule that fired: a register that shrank and said nothing
+    # is indistinguishable from a capture that failed.
+    kept, purged = purge(
+        aged,
+        today,
+        unseen_after_days=config.purge_unseen_after_days(),
+        max_age_days=config.purge_max_age_days(),
+    )
+    for role, why in purged:
+        log.info(
+            "purged %s (%s — %s): %s",
+            role.dedup_key, role.employer[:40], role.title[:60], why,
+        )
+    kept = prune(kept, today)
 
     if collapsed_count:
         log.info("open-roles register: collapsed %d duplicate row(s)", collapsed_count)
@@ -312,13 +348,50 @@ def _update_open_roles(
         len(closing_within(kept, today)),
     )
 
+    log.info("open-roles register: purged %d row(s)", len(purged))
+
     if dry_run:
         log.info("dry-run — NOT writing open_roles.json or the Open Roles note")
-        return kept
+        return kept, len(purged)
 
     save_open_roles(kept)
     write_open_roles(render_open_roles(kept, today))
-    return kept
+    return kept, len(purged)
+
+
+def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
+    """Write the HTML board. Returns the path, or None if nothing was written.
+
+    Wrapped whole, like the liveness pass: the board is a VIEW of state that is
+    already safely persisted, so a failure to render it must never take down a
+    run that has fetched, classified, pushed and saved. Returning None (rather
+    than a path that does not exist) is what lets the push say "not written
+    this run" instead of pointing the reader at a stale or absent file.
+    """
+    if dry_run:
+        # --dry-run writes no state, pushes nothing, and writes NO BOARD. The
+        # board is a file on disk like any other output.
+        log.info("dry-run — NOT writing the board")
+        return None
+    # The feed first, and ABOVE the board-path check: it is what the OTHER
+    # service reads for its Jobs tab, so it is not conditional on this
+    # deployment having somewhere to put an HTML file of its own.
+    try:
+        board_mod.write_feed(config.jobs_feed_path(), roles, today)
+    except Exception as exc:  # noqa: BLE001
+        log.error("jobs feed could not be written: %s", exc)
+    path = config.board_path()
+    if path is None:
+        log.info("no board path configured — skipping the board")
+        return None
+    try:
+        html = board_mod.build_board(
+            roles, today, events_feed_path=config.events_feed_path()
+        )
+        return board_mod.write_board(path, html)
+    except Exception as exc:  # noqa: BLE001 — a view must not kill the run
+        log.error("board could not be written to %s: %s", path, exc)
+        return None
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -393,9 +466,10 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     if not listings:
         log.warning("no listings fetched from any source — pushing heartbeat")
         # Ageing is time-driven, so the register still needs a pass on a dead day.
-        roles = _update_open_roles([], today, dry_run=dry_run)
+        roles, purged = _update_open_roles([], today, dry_run=dry_run)
+        board_path = _write_board(roles, today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
+            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board_path, purged=purged))
             write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -489,9 +563,15 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
 
     # 4. Roll the persistent register forward BEFORE rendering — the digest
     #    reports standing state ("11 open, 2 closing"), not just today's delta.
-    open_roles = _update_open_roles(surfaced, today, dry_run=dry_run)
+    open_roles, purged = _update_open_roles(surfaced, today, dry_run=dry_run)
 
-    # 5. Push to Telegram
+    # 4b. The board — written BEFORE the push, so the summary bubble can only
+    #     point at a file that actually exists. If the write fails the push
+    #     says so rather than naming a path that is stale or absent.
+    board_path = _write_board(open_roles, today, dry_run=dry_run)
+
+    # 5. Push to Telegram — one summary bubble pointing at the board, plus the
+    #    exempt alarm/health banners. See render.render.
     messages = render(
         surfaced=surfaced,
         skipped=skipped,
@@ -502,6 +582,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         open_roles=open_roles,
         staleness_alarm=staleness_alarm,
         drop_notice=drop_notice,
+        board_path=board_path,
+        purged=purged,
     )
 
     if dry_run:

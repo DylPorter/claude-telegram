@@ -231,7 +231,7 @@ class TestOrchestratorWiring:
         )
         monkeypatch.setattr(orchestrator, "load_seen", lambda s: set(seen.get(s, set())))
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
-        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: [])
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
         monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
         monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
         monkeypatch.setattr(

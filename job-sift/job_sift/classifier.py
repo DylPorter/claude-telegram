@@ -24,6 +24,7 @@ from job_sift.profile import (
     scope_guard_config,
 )
 from job_sift.schema import ClassifierResult, JobListing
+from job_sift.tags import clean_bool, clean_tag, derive_role_type
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +35,28 @@ CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
     You are a job-listing classifier for {_PROFILE['identity']}.
     They are looking for **{_PROFILE['seeking']}**.
 
-    For each listing, return STRICT JSON with three fields:
+    For each listing, return STRICT JSON with five fields:
 
     {{
-      "prestige": "prestige" | "marginal" | "skip",
-      "scope":    "in_scope" | "out_of_scope",
-      "reason":   "<one short sentence, max 20 words>"
+      "prestige":     "prestige" | "marginal" | "skip",
+      "scope":        "in_scope" | "out_of_scope",
+      "reason":       "<one short sentence, max 20 words>",
+      "industry":     "<1-3 words naming the EMPLOYER's industry, or null>",
+      "is_technical": true | false | null
     }}
+
+    `industry` and `is_technical` are TAGS, not filters — they never decide
+    whether a listing is kept, only how a reader can slice the board later.
+    So answer them honestly and use null when you genuinely cannot tell from
+    the employer and title. A guess is worse than a null here: null shows up
+    as "untagged" and stays visible, a wrong guess files the role under a
+    label the reader may have filtered away.
+
+    `industry` names what the EMPLOYER does (e.g. "investment banking",
+    "semiconductors", "university", "recruitment agency"), not what the role
+    does. `is_technical` is about the ROLE: true for engineering, software,
+    data, research and quantitative work; false for sales, marketing, HR,
+    admin, legal and general business functions.
 
     PRESTIGE rules:
     - "prestige": the employer is globally recognisable in **tech, software, AI, quantitative finance, or
@@ -202,10 +218,13 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
         # step deliberately, because the two entry points must not disagree
         # about what the sift admits.
         log.debug("negative-title hit (%s) for %s", negative, listing.title)
-        return ClassifierResult(
-            prestige="skip",
-            scope="out_of_scope",
-            reason=f"non-technical function in title ({negative})",
+        return assign_lane(
+            listing,
+            ClassifierResult(
+                prestige="skip",
+                scope="out_of_scope",
+                reason=f"non-technical function in title ({negative})",
+            ),
         )
 
     user_prompt = _build_user_prompt(listing)
@@ -248,6 +267,8 @@ def classify(listing: JobListing, *, timeout: float = 60.0) -> ClassifierResult:
                 prestige=data["prestige"],
                 scope=data["scope"],
                 reason=data.get("reason", ""),
+                industry=clean_tag(data.get("industry")),
+                is_technical=clean_bool(data.get("is_technical")),
             ),
         )
     except (json.JSONDecodeError, KeyError) as exc:
@@ -505,7 +526,17 @@ SCOPE_SYSTEM_PROMPT = dedent(f"""
     classify SCOPE.
 
     Return STRICT JSON:
-      {{ "scope": "in_scope" | "out_of_scope", "reason": "<one short sentence, max 20 words>" }}
+      {{
+        "scope":        "in_scope" | "out_of_scope",
+        "reason":       "<one short sentence, max 20 words>",
+        "industry":     "<1-3 words naming the EMPLOYER's industry, or null>",
+        "is_technical": true | false | null
+      }}
+
+    `industry` and `is_technical` are TAGS, not filters — they never decide
+    whether a listing is kept, only how a reader can slice the board later.
+    Use null rather than guessing; null renders as "untagged" and stays
+    visible, a wrong guess misfiles the role.
 
     ACCEPT:
 {_PROFILE['accepts']}
@@ -527,7 +558,7 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
     """
     quick = _scope_quick_classify(listing)
     if quick is not None:
-        return quick
+        return assign_lane(listing, quick)
 
     user_prompt = _build_user_prompt(listing)
     cmd = [
@@ -553,10 +584,15 @@ def classify_scope_only(listing: JobListing, *, timeout: float = 60.0) -> Classi
 
     try:
         data = json.loads(stdout)
-        return ClassifierResult(
-            prestige="prestige",  # source-curated
-            scope=data["scope"],
-            reason=data.get("reason", ""),
+        return assign_lane(
+            listing,
+            ClassifierResult(
+                prestige="prestige",  # source-curated
+                scope=data["scope"],
+                reason=data.get("reason", ""),
+                industry=clean_tag(data.get("industry")),
+                is_technical=clean_bool(data.get("is_technical")),
+            ),
         )
     except (json.JSONDecodeError, KeyError):
         return ClassifierResult(prestige="prestige", scope="out_of_scope", reason="scope parse error")
@@ -694,18 +730,54 @@ def assign_lane(
     what they claim. "Anthropic is hiring" is strictly more informative than
     "someone in Hong Kong wants a contractor", and demoting it into the floor
     section would bury the signal the digest exists to deliver.
+
+    THE THIRD LANE, "broad", is what the capture inversion added. Neither lane
+    CLAIMS most of what is now captured — an in-scope role at an unremarkable
+    employer that is not a short technical engagement is simply a role, and
+    since prestige stopped being a gate those reach the register in bulk.
+    Stamping them "prestige" would print a claim about the employer that
+    nothing checked. So `lane` still answers one question — "which lane, if
+    any, actively claimed this?" — and "broad" is the honest answer for most
+    rows.
+
+    This function is also the single place tags are stamped, because it is
+    already the single place every verdict passes through — heuristic and LLM
+    alike. Tags are stamped BEFORE the scope check so an out-of-scope verdict
+    still carries them; they cost nothing, and a caller that logs a rejection
+    can say what it rejected.
     """
+    result = stamp_tags(listing, result)
     if result.scope != "in_scope":
-        return result  # out of scope is out of scope in both lanes
+        return result  # out of scope is out of scope in every lane
     if result.prestige == "prestige":
         return result  # prestige lane already has it
-    if result.lane == "floor":
+    if result.lane in ("floor", "broad"):
         return result  # already stamped; re-stamping would duplicate the reason
     reason = floor_reason(listing, cfg)
     if reason is None:
-        return result
+        return replace(result, lane="broad")
     combined = f"{result.reason} · {reason}" if result.reason else reason
     return replace(result, lane="floor", reason=combined)
+
+
+def stamp_tags(listing: JobListing, result: ClassifierResult) -> ClassifierResult:
+    """Attach the derived `role_type` to a verdict. Idempotent.
+
+    Only `role_type` is derived here — it is a keyword lookup over the title
+    and body, so paying an LLM for it would add cost and variance to something
+    deterministic. `industry` and `is_technical` ride along on the verdict from
+    the classifier call that was already being made, and are left exactly as
+    they arrived.
+
+    A derivation that finds nothing leaves the tag None. It does NOT fall back
+    to "full-time": the commonest untyped title is a bare "Software Engineer",
+    and filing every one of those under the one role type the reader is most
+    likely to have filtered out would hide roles behind a tag nobody asserted.
+    """
+    role_type = derive_role_type(listing.title, listing.description)
+    if role_type is None or role_type == result.role_type:
+        return result
+    return replace(result, role_type=role_type)
 
 
 # ---------------------------------------------------------------------------
@@ -730,13 +802,31 @@ _AUTO_PRESTIGE_SOURCES: set[str] = {"greenhouse", "lever", "ashby"}
 _BATCH_CHUNK_SIZE = 20
 
 
-def _coerce(prestige: str, scope: str, reason: str) -> ClassifierResult:
-    """Clamp model output to valid enum values (precision-bias defaults)."""
+def _coerce(prestige: str, scope: str, reason: str, obj: dict | None = None) -> ClassifierResult:
+    """Clamp model output to valid values.
+
+    The two VERDICT fields keep their precision-biased defaults: an
+    unrecognised value there is a model that did not follow instructions, and
+    the safe direction for a gate is to reject.
+
+    The TAG fields default the other way, to None. A tag is not a gate, so
+    there is no "safe direction" to fail toward — only an honest one. `None`
+    renders as "untagged" and leaves the row visible under every filter; a
+    fabricated `false` would hide it from a reader filtering `technical = yes`
+    on the strength of a value the model never produced.
+    """
     if prestige not in ("prestige", "marginal", "skip"):
         prestige = "skip"
     if scope not in ("in_scope", "out_of_scope"):
         scope = "out_of_scope"
-    return ClassifierResult(prestige=prestige, scope=scope, reason=reason or "")
+    obj = obj or {}
+    return ClassifierResult(
+        prestige=prestige,
+        scope=scope,
+        reason=reason or "",
+        industry=clean_tag(obj.get("industry")),
+        is_technical=clean_bool(obj.get("is_technical")),
+    )
 
 
 def _route(listing: JobListing) -> tuple[ClassifierResult | None, str]:
@@ -903,7 +993,9 @@ def _batch_llm(
         if not (0 <= i < n):
             continue
         prestige = "prestige" if scope_only else str(obj.get("prestige", "skip"))
-        out[i] = _coerce(prestige, str(obj.get("scope", "out_of_scope")), str(obj.get("reason", "")))
+        out[i] = _coerce(
+            prestige, str(obj.get("scope", "out_of_scope")), str(obj.get("reason", "")), obj
+        )
     missing = sum(1 for r in out if r is None)
     if missing:
         log.error(

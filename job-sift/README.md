@@ -1,6 +1,78 @@
 # job-sift
 
-Daily job-sift digest for the operator. Pulls listings from HKU CEDARS NETJobs, LinkedIn job-alert emails and three standardised ATS boards (Greenhouse, Lever, Ashby); LLM-classifies each new listing for prestige + scope (internships / short-term contracts only); surfaces matches to Telegram via the same `/push` endpoint the signal-brief module uses. A rolling register keeps roles visible after the day they were found. Per-day archive lands in the vault under `Inbox/Job Sift/`.
+Daily job capture for the operator. Pulls listings from HKU CEDARS NETJobs, LinkedIn job-alert emails and three standardised ATS boards (Greenhouse, Lever, Ashby); keeps everything in SCOPE (a role a student could actually take) and tags the rest; writes a single self-contained HTML board you filter by hand. Telegram gets one summary bubble pointing at the board. A rolling register keeps roles visible after the day they were found, and a purge keeps it from growing without bound. Per-day archive lands in the vault under `Inbox/Job Sift/`.
+
+## Capture broadly, filter in the UI
+
+**The taste decision used to happen at capture, and whatever it rejected was
+gone.** The classifier gated on prestige — and, briefly, on technical-ness — so
+a keyword list decided what the operator was ever allowed to see. Two work
+cycles were spent arguing about that list, because a title-only test cannot
+tell "Microsoft Research Intern" (wanted) from "Fidelity Equity Research
+Associate" (not): both are just "Research".
+
+So the question was split in two:
+
+| Question | Where it is answered | Why |
+|---|---|---|
+| **Scope** — is this a role a student could take? | still at capture, still a gate | The answer does not vary by reader. A permanent senior role is irrelevant to everyone this runs for. |
+| **Prestige, technical-ness, industry, role type** | tags on the row, filtered in the UI | These DO vary by reader — the sibling deployment's reader wants design and art roles — and being wrong costs a dropdown rather than a lost opportunity. |
+
+**Tags are advisory, never gates.** A missing, malformed or unparseable tag
+leaves the role in the board UNTAGGED. It is never dropped and never hidden:
+untagged rows appear under the `—` option of every filter, the view always
+prints "showing N of M" so an over-narrow filter reads as a filter rather than
+as an empty dataset, and a missing field renders as `—` rather than being
+invented. Recreating "one value meaning both *nothing there* and *I could not
+look*" in the tagging layer would defeat the entire point of the redesign.
+
+## The board
+
+One HTML file. No CDN, no build step, no framework, no network at view time —
+it opens from `file://` on a machine that has none of this installed. Two tabs
+(Jobs, Events), dropdown filters, sorting by recency and deadline, free-text
+search. Written to `Areas/Work/Job Board.html` by default; set
+`JOB_SIFT_BOARD_PATH` to put it anywhere.
+
+The Events tab is fed by a small JSON file hk-events writes on its own run, and
+job-sift publishes the mirror-image feed for hk-events' Jobs tab. If the other
+side's feed is missing or unreadable, the tab SAYS SO rather than rendering an
+empty table — "the other service found nothing" and "I could not read the
+other service's feed" are different facts.
+
+## The purge
+
+Broad capture grows without bound, so rows leave on two clocks — either is
+sufficient:
+
+* `last_seen` older than `JOB_SIFT_PURGE_UNSEEN_DAYS` (default 30), or
+* `first_seen` older than `JOB_SIFT_PURGE_MAX_AGE_DAYS` (default 60).
+
+Three exemptions, each documented on `open_roles.purge`:
+
+* ⚠️ **`applied` and `dismissed` survive both rules.** They are the operator's
+  own marks, neither is reconstructible, and losing a dismissal means being
+  handed back a role he already refused.
+* **A deadline still in the future vetoes both clocks.** `last_seen` is a fact
+  about OUR CRAWL — the CEDARS adapter paginates greedily and stops at the
+  first all-seen page, so a listing that drifts past the walk depth stops being
+  re-sighted while remaining perfectly well listed. Measured against a live
+  59-row register, the unseen rule alone would have deleted eleven roles whose
+  deadlines were still three weeks away.
+* **An unreadable date keeps the row.** Not being able to tell is not evidence.
+
+Every drop is logged with the rule that fired. A register that shrank and said
+nothing is indistinguishable from a capture that failed.
+
+## Telegram is a pointer, not a digest
+
+One bubble: how many new, how many open, what is closing, and where the board
+is. **Two things are exempt and still push on their own** — the staleness alarm
+and the ⚠️ source-health line. They exist to be seen on a day when everything
+else is quiet, which is exactly the day the summary reads "0 new".
+
+The "near miss" digest is gone. It was a list of what the prestige gate
+rejected, and there is no prestige gate any more.
 
 ## Architecture
 
@@ -24,22 +96,29 @@ Daily job-sift digest for the operator. Pulls listings from HKU CEDARS NETJobs, 
                     │                    ▼
                     │            JSONL classifier log
                     ▼
-     surfaced (prestige lane OR floor lane)
+     captured (everything IN SCOPE), tagged with
+     role_type / industry / is_technical / lane
                     ▼
         rolling open-roles register
         · collapse duplicates across runs
         · LinkedIn liveness re-check (throttled)
-        · age → expire/stale → prune
+        · age → expire/stale → PURGE → prune
                     ▼
-   /push to claude-telegram bot   +   daily Markdown archive to vault
-   + ⚠️ health lines for any source or stage that did NOT run
+   self-contained HTML board (Jobs | Events)   +   jobs feed for hk-events
+                    ▼
+   ONE /push bubble pointing at the board   +   daily Markdown archive to vault
+   + ⚠️ health lines for any source or stage that did NOT run (exempt: still push)
 ```
 
-## Two admission lanes
+## Three lanes
 
-A listing can be surfaced by either of two independent lanes. It carries exactly
-ONE lane, and the digest, the archive and the register all render them under
-separate headings.
+`lane` used to decide whether a listing was captured at all. It is a TAG now —
+"which lane, if any, actively claimed this?" — and a third value, `broad`, was
+added for the answer "neither", which is most of what a broad capture brings in.
+Calling those rows `prestige` would print a claim about the employer that
+nothing checked. A listing carries exactly ONE lane; the archive and the
+register render them under separate headings, and the board offers `lane` as a
+filter.
 
 | Lane | Question it asks | Typical catch |
 |---|---|---|
@@ -273,6 +352,20 @@ JOB_SIFT_MODEL=haiku
 # JOB_SIFT_LIVENESS_INTERVAL_DAYS=7
 # Hard wall-clock budget for the whole liveness pass, in seconds. Default 60.
 # JOB_SIFT_LIVENESS_BUDGET_S=60
+
+# The board. Any absolute path — the file has no dependencies, so it is meant
+# to be copied to another machine and opened from disk.
+# JOB_SIFT_BOARD_PATH=Areas/Work/Job Board.html
+# Where job-sift PUBLISHES its rows for hk-events' Jobs tab.
+# JOB_SIFT_JOBS_FEED=.data/state/jobs_feed.json
+# Where it READS hk-events' rows for its own Events tab. Missing → the tab says
+# so; it never renders a fake zero.
+# JOB_SIFT_EVENTS_FEED=../hk-events/.data/state/events_feed.json
+
+# The purge (see "The purge" above). Either clock is sufficient; a future
+# deadline and a hand-set applied/dismissed status are exempt from both.
+# JOB_SIFT_PURGE_UNSEEN_DAYS=30
+# JOB_SIFT_PURGE_MAX_AGE_DAYS=60
 ```
 
 Two phases run in parallel, on the same `run_with_budget` machinery, with

@@ -256,7 +256,7 @@ class _OrderHarness:
         from hk_events.schema import RelevanceResult
 
         self.calls: list[str] = []
-        self.saved: dict[str, set] = {}
+        self.saved: dict[str, dict] = {}
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
         monkeypatch.setenv("HK_EVENTS_STUB", "0")
         monkeypatch.setattr(config, "assert_required", lambda: None)
@@ -268,7 +268,15 @@ class _OrderHarness:
         monkeypatch.setattr(
             orchestrator,
             "filter_due",
-            lambda evs: ([(e, orchestrator.STAGE_NEW, None) for e in evs], {"meetup": {"m1"}}),
+            # The REAL seen-set shape: {source: {external_id: {"stages": [...],
+            # "tag": ...}}}. It used to be faked as {"meetup": {"m1"}} — a set —
+            # which passed only because nothing downstream read inside it. The
+            # register does (it reads the cached room tag), so the fixture has
+            # to tell the truth about the shape.
+            lambda evs: (
+                [(e, orchestrator.STAGE_NEW, None) for e in evs],
+                {"meetup": {"m1": {"stages": [orchestrator.STAGE_NEW], "tag": None}}},
+            ),
         )
         monkeypatch.setattr(orchestrator, "log_classification", lambda *a, **k: None)
         monkeypatch.setattr(orchestrator, "record_verdict", lambda *a, **k: None)
@@ -297,7 +305,7 @@ def test_seen_set_is_committed_between_the_push_and_the_archive(monkeypatch, tmp
     h = _OrderHarness(monkeypatch, tmp_path)
     assert orchestrator.run() == 0
     assert h.calls == ["push", "save_seen", "write_archive"]
-    assert h.saved == {"meetup": {"m1"}}
+    assert h.saved == {"meetup": {"m1": {"stages": [orchestrator.STAGE_NEW], "tag": None}}}
 
 
 def test_an_archive_failure_can_no_longer_undeliver_the_seen_set(monkeypatch, tmp_path):
@@ -306,7 +314,7 @@ def test_an_archive_failure_can_no_longer_undeliver_the_seen_set(monkeypatch, tm
     with pytest.raises(OSError):
         orchestrator.run()
     assert h.calls == ["push", "save_seen", "write_archive"]
-    assert h.saved == {"meetup": {"m1"}}
+    assert h.saved == {"meetup": {"m1": {"stages": [orchestrator.STAGE_NEW], "tag": None}}}
 
 
 def test_a_deliberate_empty_day_silence_still_commits_the_seen_set(monkeypatch, tmp_path):
@@ -317,7 +325,7 @@ def test_a_deliberate_empty_day_silence_still_commits_the_seen_set(monkeypatch, 
     h = _OrderHarness(monkeypatch, tmp_path, surface=False)
     assert orchestrator.run() == 0
     assert h.calls == ["save_seen", "write_archive"]
-    assert h.saved == {"meetup": {"m1"}}
+    assert h.saved == {"meetup": {"m1": {"stages": [orchestrator.STAGE_NEW], "tag": None}}}
 
 
 def test_dry_run_still_writes_nothing(monkeypatch, tmp_path):
