@@ -381,7 +381,7 @@ def test_llm_filter_fallback_actually_delivers_its_items():
     assert any("Fallback digest" in m for m in msgs)
     delivered = [t for t in (f"Story {i}" for i in range(8))
                  if any(t in m for m in msgs)]
-    assert len(delivered) >= 5, f"only delivered {delivered}"
+    assert len(delivered) == 8, f"only delivered {delivered}"
 
 
 def test_partial_drift_is_logged(caplog):
@@ -476,3 +476,65 @@ def test_weekly_content_is_not_truncated_by_the_bulletizer():
     assert body in bubble
     for i in range(9):
         assert f"Clause {i} " in bubble
+
+
+# --------------------------------------------------------------------------
+# Item resolution — the liveness gate depends on it
+# --------------------------------------------------------------------------
+
+def _parsed_with_conference(url: str) -> dict:
+    return {
+        "headline": "h",
+        "sections": [
+            {"title": "Today's Signal", "body": "Something shipped.", "item_urls": []},
+            {"title": "Happening Now", "body": "Sample Conference is live.",
+             "item_urls": [url]},
+        ],
+        "rationale": "",
+    }
+
+
+def _live_conference_item() -> Item:
+    return Item(title="Sample Conference", url="https://example.test/conf",
+                source="conferences", source_kind="conference",
+                meta={"currently_running": True, "days_until": 0})
+
+
+def test_unresolvable_item_urls_are_logged_not_swallowed(caplog):
+    """An unresolvable URL demotes a live conference to vault-only. That must
+    be visible as a resolution failure, not read as 'this section had items'."""
+    from signal_brief.filter import _build_digest
+    item = _live_conference_item()
+    with caplog.at_level("WARNING"):
+        digest = _build_digest(
+            _parsed_with_conference("https://example.test/conf?utm=1"),
+            [item], "2026-09-04",
+        )
+    assert digest.sections[1].items == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Happening Now" in w and "none resolved" in w for w in warnings), warnings
+    # and the demotion itself still happens — the warning is the only trace
+    assert all("Happening Now" not in m for m in render_for_telegram(digest))
+
+
+def test_partially_unresolvable_item_urls_are_logged(caplog):
+    from signal_brief.filter import _build_digest
+    item = _live_conference_item()
+    parsed = _parsed_with_conference("https://example.test/conf")
+    parsed["sections"][1]["item_urls"].append("https://example.test/missing")
+    with caplog.at_level("WARNING"):
+        digest = _build_digest(parsed, [item], "2026-09-04")
+    assert len(digest.sections[1].items) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("did not resolve" in w for w in warnings), warnings
+    # one resolved live item is enough to keep the lane open
+    assert any("Happening Now" in m for m in render_for_telegram(digest))
+
+
+def test_a_section_that_cited_nothing_logs_nothing(caplog):
+    from signal_brief.filter import _build_digest
+    with caplog.at_level("WARNING"):
+        _build_digest({"headline": "h", "sections": [
+            {"title": "Quiet rest", "body": "The rest.", "item_urls": []}]},
+            [], "2026-09-04")
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]

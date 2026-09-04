@@ -32,7 +32,7 @@ record to the vault. Only the notification changed.
 | Filter rationale / suppressed list | yes | **no** — daily note only |
 | Evening sweep 22:00 | yes — inbox, orphan sweep, Research Log, Teaching Queue, gbrain resync | **no**, except a ⚠️ alarm if the sweep degraded |
 | Agent-identity trip-wire 13:00 | yes | yes — unchanged, fires only on a hit (0 pushes in the 14 days before the diet) |
-| Weekly review Sun 20:00 | yes | yes — unchanged, opts out via `restrict_sections=False` |
+| Weekly review Sun 20:00 | yes | yes — unchanged, opts out via `diet=False` |
 
 `Today's Signal` keeps its prose format verbatim; the other three bubbles are
 bullet-pointed. Source-health and staleness ⚠️ lines bypass the keep-list

@@ -308,8 +308,25 @@ def _build_digest(parsed: dict, items: list[Item], today: str) -> Digest:
     for s in parsed.get("sections", []):
         urls = s.get("item_urls", []) or []
         sec_items = [by_url[u] for u in urls if u in by_url]
+        title = s.get("title", "").strip()
+        # A section that cited items but resolved none is a data failure, not an
+        # itemless section — and it reads identically downstream. `is_live_section`
+        # gates the conference lane on this data, so an unresolvable URL silently
+        # demotes a live conference to vault-only. Say so.
+        if urls and not sec_items:
+            log.warning(
+                "section %r cited %d item_url(s) but none resolved against the "
+                "collected items — section will have no items (urls=%s)",
+                title, len(urls), urls[:5],
+            )
+        elif len(sec_items) < len(urls):
+            log.warning(
+                "section %r: %d of %d item_url(s) did not resolve (unresolved=%s)",
+                title, len(urls) - len(sec_items), len(urls),
+                [u for u in urls if u not in by_url][:5],
+            )
         sections.append(DigestSection(
-            title=s.get("title", "").strip(),
+            title=title,
             body=s.get("body", "").strip(),
             items=sec_items,
         ))

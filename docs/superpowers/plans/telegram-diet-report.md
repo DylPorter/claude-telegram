@@ -221,3 +221,56 @@ but it should be scrubbed, and this repo is public.
 
 **86 → 92** across the two rounds (39 before any change). All 17 of the
 round-2 regression tests fail against the previous commit.
+
+---
+
+# Review round 3 — closing notes
+
+## IMPORTANT — unresolvable `item_urls` demoted a live conference in silence
+
+`_build_digest` dropped URLs that didn't resolve against the collected items
+with no trace: `[by_url[u] for u in urls if u in by_url]`. A `Happening Now`
+section whose conference URL came back slightly rewritten (a stripped query
+string is enough) resolved to `items=[]`, `is_live_section` returned False, and
+a conference running *today* became vault-only. The only trace was the neutral
+`note-only:` INFO, which reads identically to a section that legitimately had
+no items.
+
+Same shape as the two Criticals — the gate turning itself off on exactly the
+data it needs — so it's closed with them. `_build_digest` now logs a WARNING
+when a section cites `item_urls` and none resolve, and a second WARNING naming
+the unresolved URLs when only some do (one live item still resolving is enough
+to keep the lane open, so the partial case is a warning, not a demotion).
+
+Confirmed by execution — a live KubeCon whose URL lost its `?utm=1`:
+
+```
+WARNING section 'Happening Now' cited 1 item_url(s) but none resolved against
+        the collected items — section will have no items
+        (urls=['https://example.test/kubecon'])
+INFO    telegram: pushing 1/2 sections ["Today's Signal"]; note-only: ['Happening Now']
+```
+
+The demotion still happens — the fix makes it visible, not silent. Three tests
+pin it: total failure warns, partial failure warns and stays live, and a
+section that cited nothing warns about nothing.
+
+## MINOR — stale doc
+
+`README.md` said the weekly opts out via `restrict_sections=False`. It's
+`diet=False`.
+
+## Test tightened
+
+The LLM-filter fallback delivery assertion was `>= 5` against an 8-item
+fixture, which would have passed a 3-item regression. Now `== 8`.
+
+## Left alone, as directed
+
+The two `_split_clauses` residuals (a sentence ending in an abbreviation merges
+with the next; an ellipsis splits) — both under-split, no content loss. And
+`tests/test_threads.py`'s real names, being handled separately.
+
+## Test count
+
+**92 → 95.** Both new resolution tests fail against the previous commit.
