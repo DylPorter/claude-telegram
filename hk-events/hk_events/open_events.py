@@ -85,12 +85,35 @@ class OpenEvent:
 
     @property
     def start_date(self) -> date | None:
+        """The parsed start, or None for BOTH "no start" and "unreadable".
+
+        Fine for sorting and display. Anything that DELETES must use
+        `start_state` — see its docstring.
+        """
         if not self.starts:
             return None
         try:
             return date.fromisoformat(self.starts)
         except ValueError:
             return None
+
+    @property
+    def start_state(self) -> tuple[str, date | None]:
+        """`("none"|"unreadable"|"known", date_or_None)`.
+
+        Mirrors `job_sift.open_roles.OpenRole.deadline_state`, and exists for
+        the same reason: `start_date` collapses "there is no start" and "there
+        is a start and I cannot parse it", so the future-start veto that stops
+        the purge deleting a live event silently did not apply to any row whose
+        date we failed to read. That is the one-value-two-meanings failure this
+        codebase keeps deleting, rebuilt inside the fix for it.
+        """
+        if not self.starts:
+            return ("none", None)
+        try:
+            return ("known", date.fromisoformat(self.starts))
+        except ValueError:
+            return ("unreadable", None)
 
 
 def _opt_str(value) -> str | None:
@@ -225,13 +248,27 @@ def purge(
       it must be exempted here FIRST — that is the one thing in the job
       register's purge that is not a heuristic.
 
-    A row whose dates are missing or unparseable is KEPT. Not being able to
+    A row whose dates are missing or unparseable is KEPT — `starts`,
+    `last_seen` and `first_seen` alike (see `start_state`). Not being able to
     tell is not evidence, and the safe direction for a delete is not to delete.
+    A sighting today likewise vetoes the max-age clock.
+
+    ⚠️ THIS DELETE IS IRREVERSIBLE. The seen-set has no TTL, so a purged row is
+    not re-captured the next time a feed carries it. Every drop is reported for
+    that reason.
     """
     kept: list[OpenEvent] = []
     dropped: list[tuple[OpenEvent, str]] = []
     for record in events:
-        start = record.start_date
+        state, start = record.start_state
+        if state == "unreadable":
+            log.warning(
+                "purge: %s has an unreadable start %r — KEEPING it. A date we "
+                "cannot parse is not evidence the event is over.",
+                record.dedup_key, record.starts,
+            )
+            kept.append(record)
+            continue
         if start is not None:
             if start >= today:
                 kept.append(record)
@@ -250,7 +287,14 @@ def purge(
                          f"{(today - last_seen).days} days (> {unseen_after_days})")
             )
             continue
-        if first_seen is not None and (today - first_seen).days > max_age_days:
+        if (
+            first_seen is not None
+            and (today - first_seen).days > max_age_days
+            # A sighting in THIS RUN vetoes the age clock: the source listing
+            # it today is the strongest evidence available that it is real.
+            # Same rule as job_sift.open_roles.purge.
+            and last_seen != today
+        ):
             dropped.append(
                 (record, f"undated, first seen {(today - first_seen).days} days ago "
                          f"(> {max_age_days})")

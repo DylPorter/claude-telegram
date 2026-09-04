@@ -113,6 +113,7 @@ def render(
     staleness_alarm: str | None = None,
     drop_notice: str | None = None,
     board_path=None,
+    board_problem: str | None = None,
     upcoming_count: int | None = None,
     purged: int = 0,
 ) -> list[str]:
@@ -155,9 +156,10 @@ def render(
     if board_path:
         lines.append(f"🗂 Board: `{board_path}`")
     else:
-        # Said out loud rather than omitted: a summary that points nowhere,
-        # silently, reads as a summary that had nothing to point at.
-        lines.append("🗂 Board: not written this run (no board path configured).")
+        # Said out loud rather than omitted, and with the reason that was
+        # actually observed — see job_sift/render.py for the bug this fixes.
+        why = board_problem or "reason unrecorded"
+        lines.append(f"🗂 Board: not written this run ({why}).")
 
     out = ["\n".join(lines)]
     if health:

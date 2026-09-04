@@ -25,7 +25,8 @@ from pathlib import Path
 
 from job_sift.board_html import Column, Facet, Section, Sort, render_board
 from job_sift.open_roles import OpenRole
-from job_sift.tags import derive_role_type
+from job_sift.classifier import negative_title
+from job_sift.tags import clean_function, derive_role_type
 
 log = logging.getLogger(__name__)
 
@@ -47,13 +48,17 @@ def _tri(value: bool | None) -> str | None:
 def job_row(role: OpenRole, today: date) -> dict:
     """One register row as board data. Every value is a string, a bool or None.
 
-    `role_type` falls back to deriving from the title when the stored tag is
-    absent. That is not a guess and not an invention: `derive_role_type` is the
-    same pure keyword function the capture path runs, so this computes the
-    identical answer it would have stored — it is only here because the
-    register predates the field, and without it every row written before today
-    reads "untagged" for a tag that costs nothing to compute. When the
-    derivation finds nothing the value stays None, exactly as at capture.
+    `role_type` and `function` fall back to deriving from the TITLE when the
+    stored tag is absent. Neither is a guess: both are the same pure keyword
+    functions the capture path runs, on the same input, so they compute the
+    identical answer capture would have stored. (Capture derives `role_type`
+    from the title only for exactly this reason — an earlier cut also scanned
+    the description, which both diverged from this fallback and mislabelled a
+    permanent role whose body mentioned an internship programme.) The fallback
+    exists because the register predates both fields; without it every row
+    written before today reads "untagged" for a tag that costs nothing to
+    compute. When a derivation finds nothing the value stays None, exactly as
+    at capture.
 
     `industry` and `is_technical` get NO such fallback, because there is no
     pure function that produces them — they come from a model, and inventing
@@ -67,6 +72,7 @@ def job_row(role: OpenRole, today: date) -> dict:
         "role_type": role.role_type or derive_role_type(role.title),
         "industry": role.industry,
         "technical": _tri(role.is_technical),
+        "function": role.function or clean_function(negative_title(role.title)),
         "lane": role.lane,
         "prestige": role.prestige,
         "source": role.source or None,
@@ -98,6 +104,7 @@ def jobs_section(roles: list[OpenRole], today: date) -> Section:
             Column("title", "Title", kind="link", href_key="apply_url"),
             Column("role_type", "Role type", kind="tags"),
             Column("industry", "Industry", kind="tags"),
+            Column("function", "Function", kind="tags"),
             Column("technical", "Technical"),
             Column("source", "Source"),
             Column("location", "Location"),
@@ -108,6 +115,7 @@ def jobs_section(roles: list[OpenRole], today: date) -> Section:
         facets=[
             Facet("role_type", "Role type"),
             Facet("industry", "Industry"),
+            Facet("function", "Function"),
             Facet("technical", "Technical"),
             Facet("source", "Source"),
             Facet("lane", "Lane"),
@@ -120,7 +128,9 @@ def jobs_section(roles: list[OpenRole], today: date) -> Section:
             Sort("last_seen", "Last seen", kind="date", ascending=False),
             Sort("employer", "Employer"),
         ],
-        search_keys=["employer", "title", "industry", "location", "reason", "role_type"],
+        search_keys=[
+            "employer", "title", "industry", "location", "reason", "role_type", "function",
+        ],
         empty_text="The register is empty.",
     )
 
@@ -216,8 +226,28 @@ def build_board(
 
 
 def write_board(path: Path, html: str) -> Path:
+    """Write the board ATOMICALLY, the same way `write_feed` writes the feed.
+
+    The feed was atomic and this was not, which is backwards: a half-written
+    FEED is refused by its reader and reported, while a half-written PAGE still
+    opens, showing whatever rows made it before the cut with nothing to say the
+    rest is missing. A silent partial result is the one output shape this
+    codebase refuses to produce.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(html)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     log.info("board written to %s", path)
     return path
 

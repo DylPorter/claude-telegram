@@ -163,9 +163,14 @@ class TestThePurge:
         assert kept == []
         assert len(dropped) == 1 and "not listed" in dropped[0][1]
 
-    def test_a_role_older_than_two_months_is_dropped_even_if_still_listed(self):
+    def test_a_role_older_than_two_months_is_dropped(self):
+        """...but NOT one the source listed TODAY — see
+        TestASightingTodayVetoesTheMaxAgeClock. A sighting in this very run is
+        the strongest evidence available that the role is live, so the fixture
+        here is an intermittently-sighted row: under the unseen threshold, over
+        the age one."""
         kept, dropped = purge(
-            [_role(first_seen="2026-06-01", last_seen=TODAY.isoformat())],
+            [_role(first_seen="2026-06-01", last_seen="2026-08-25")],
             TODAY,
             unseen_after_days=30,
             max_age_days=60,
@@ -357,38 +362,86 @@ class TestTelegramIsOneBubble:
 
 
 class TestDryRunWritesNoBoard:
-    def test_dry_run_writes_no_file_and_reports_no_path(self, monkeypatch, tmp_path):
+    def test_dry_run_writes_no_file_and_reports_the_reason(self, monkeypatch, tmp_path):
         """--dry-run writes no state, pushes nothing, and writes no board.
-        The board is a file on disk like any other output."""
+        The board is a file on disk like any other output — and so is the feed
+        the OTHER service reads, which is why the feed path is patched too."""
         from job_sift import config, orchestrator
 
         target = tmp_path / "board.html"
+        feed = tmp_path / "jobs_feed.json"
         monkeypatch.setattr(config, "board_path", lambda: target)
-        assert orchestrator._write_board([_role()], TODAY, dry_run=True) is None
-        assert not target.exists()
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: feed)
+        monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "events.json")
+        result = orchestrator._write_board([_role()], TODAY, dry_run=True)
+        assert result.path is None and result.problem == "dry run"
+        assert not target.exists() and not feed.exists()
 
-    def test_a_real_run_writes_it(self, monkeypatch, tmp_path):
+    def test_a_real_run_writes_the_board_and_the_feed(self, monkeypatch, tmp_path):
         from job_sift import config, orchestrator
 
         target = tmp_path / "sub" / "board.html"
+        feed = tmp_path / "jobs_feed.json"
         monkeypatch.setattr(config, "board_path", lambda: target)
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: feed)
         monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "missing.json")
-        assert orchestrator._write_board([_role()], TODAY, dry_run=False) == target
+        result = orchestrator._write_board([_role()], TODAY, dry_run=False)
+        assert result.path == target and result.problem is None
         assert "<!DOCTYPE html>" in target.read_text()
+        assert json.loads(feed.read_text())["jobs"], "the feed hk-events reads"
 
-    def test_a_board_failure_does_not_kill_the_run(self, monkeypatch, tmp_path):
-        """The board is a VIEW of state that is already safely persisted. A
-        render failure must never take down a run that has fetched, classified,
-        pushed and saved — and it must return None rather than a path that does
-        not exist, so the push says "not written" instead of pointing at it."""
+    def test_a_board_failure_reports_that_cause_and_not_a_guessed_one(
+        self, monkeypatch, tmp_path
+    ):
+        """The board is a VIEW of state that is already safely persisted, so a
+        render failure must not take down a run that has fetched, classified,
+        pushed and saved — and the push must say what actually happened. It
+        used to print "no board path configured" for this branch, which is a
+        cause the code never checked."""
         from job_sift import config, orchestrator
 
         monkeypatch.setattr(config, "board_path", lambda: tmp_path / "board.html")
-        monkeypatch.setattr(
-            orchestrator.board_mod, "build_board", lambda *a, **k: 1 / 0
-        )
-        assert orchestrator._write_board([_role()], TODAY, dry_run=False) is None
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "jobs_feed.json")
+        monkeypatch.setattr(orchestrator.board_mod, "build_board", lambda *a, **k: 1 / 0)
+        result = orchestrator._write_board([_role()], TODAY, dry_run=False)
+        assert result.path is None
+        assert "could not be written" in result.problem
         assert not (tmp_path / "board.html").exists()
+
+        bubble = render(
+            surfaced=[], skipped=[], total_new=0, total_processed=0, today=TODAY,
+            board_path=result.path, board_problem=result.problem,
+        )[0]
+        assert "could not be written" in bubble
+        assert "no board path configured" not in bubble
+
+    def test_a_missing_board_path_still_says_so(self, monkeypatch, tmp_path):
+        from job_sift import config, orchestrator
+
+        monkeypatch.setattr(config, "board_path", lambda: None)
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "jobs_feed.json")
+        result = orchestrator._write_board([_role()], TODAY, dry_run=False)
+        assert result.problem == "no board path configured"
+
+
+class TestTestsDoNotTouchRealState:
+    """IMPORTANT 3 from review: a test in this file patched `board_path` and
+    `events_feed_path` but not `jobs_feed_path`, so every `pytest` run wrote
+    `.data/state/jobs_feed.json` with a fixture row — clobbering, in a
+    production checkout, the exact file hk-events renders as its Jobs tab.
+
+    This asserts the property rather than the fix, so a future test that
+    forgets the same patch fails here.
+    """
+
+    def test_the_real_state_dir_is_untouched_by_this_suite(self):
+        from job_sift import config
+
+        feed = config.STATE_DIR / "jobs_feed.json"
+        assert not feed.exists(), (
+            f"{feed} was written by the test suite — patch config.jobs_feed_path "
+            "in whichever test calls _write_board"
+        )
 
 
 class TestAFutureDeadlineVetoesThePurge:
@@ -421,6 +474,60 @@ class TestAFutureDeadlineVetoesThePurge:
         assert kept == [] and len(dropped) == 1
 
 
+class TestAnUnreadableDeadlineAlsoVetoes:
+    """IMPORTANT 2 from review. `deadline_date` returns None for BOTH "no
+    deadline" and "I could not parse the deadline", so the veto that stops the
+    purge deleting live roles silently did not apply to any row whose date we
+    failed to read — one-value-two-meanings rebuilt inside the fix for it.
+
+    It bites hardest here because the register is documented as hand-editable:
+    typing "30 Sep 2026" into the JSON purged the row.
+    """
+
+    @pytest.mark.parametrize("bad", ["30 Sep 2026", "2026/09/30", "next Friday", "2026-13-45"])
+    def test_a_malformed_deadline_keeps_the_row(self, bad):
+        role = _role(last_seen="2026-01-01", first_seen="2026-01-01", deadline=bad)
+        kept, dropped = purge([role], TODAY, unseen_after_days=30, max_age_days=60)
+        assert dropped == [], f"{bad!r} was treated as evidence the role closed"
+        assert len(kept) == 1
+
+    def test_the_three_deadline_states_are_distinguishable(self):
+        assert _role(deadline=None).deadline_state == ("none", None)
+        assert _role(deadline="30 Sep 2026").deadline_state == ("unreadable", None)
+        assert _role(deadline="2026-09-30").deadline_state[0] == "known"
+
+    def test_an_absent_deadline_is_still_governed_by_the_clocks(self):
+        """The distinction has to cut both ways, or it is just a way of never
+        purging anything."""
+        kept, dropped = purge([_role(deadline=None, last_seen="2026-01-01")], TODAY)
+        assert kept == [] and len(dropped) == 1
+
+
+class TestASightingTodayVetoesTheMaxAgeClock:
+    """IMPORTANT 5 from review. The max-age rule deleted a role whose
+    `last_seen` was today — inverting the very argument the deadline veto is
+    built on, that the source's own statement beats our inference."""
+
+    def test_a_role_seen_today_survives_the_age_clock(self):
+        role = _role(first_seen="2026-06-01", last_seen=TODAY.isoformat())
+        kept, dropped = purge([role], TODAY, max_age_days=60)
+        assert dropped == [] and len(kept) == 1
+
+    def test_an_intermittently_sighted_old_role_is_still_purged(self):
+        """What the max-age clock still catches, and why it is kept: seen ten
+        days ago, first seen seventy — under the unseen threshold and over the
+        age one."""
+        role = _role(first_seen="2026-06-01", last_seen="2026-08-25")
+        kept, dropped = purge([role], TODAY, unseen_after_days=30, max_age_days=60)
+        assert kept == [] and "first seen" in dropped[0][1]
+
+    @pytest.mark.parametrize("status", ["applied", "dismissed"])
+    def test_a_hand_set_mark_still_outranks_everything(self, status):
+        role = _role(status=status, first_seen="2020-01-01", last_seen="2020-01-01")
+        kept, dropped = purge([role], TODAY, unseen_after_days=1, max_age_days=1)
+        assert dropped == [] and len(kept) == 1
+
+
 class TestTheViewTimeRoleTypeFallback:
     def test_a_row_written_before_the_tag_existed_still_gets_one(self):
         row = board.job_row(_role(title="2027 Summer Internship, Trading"), TODAY)
@@ -438,3 +545,97 @@ class TestTheViewTimeRoleTypeFallback:
         model. Deriving them here would be fabrication, not computation."""
         row = board.job_row(_role(title="AI Research Intern"), TODAY)
         assert row["industry"] is None and row["technical"] is None
+
+    def test_the_fallback_agrees_with_capture_exactly(self):
+        """The docstring used to claim this and it was false: capture also
+        scanned the description, so a permanent role whose body mentioned an
+        internship programme was tagged `intern` at capture and untagged on
+        the board. Capture is title-only now, so the two cannot diverge."""
+        listing = _listing(
+            "Software Engineer",
+            description="Join us! Ask about our summer internship programme.",
+        )
+        at_capture = classifier.stamp_tags(listing, ClassifierResult("skip", "in_scope", ""))
+        on_board = board.job_row(_role(title=listing.title), TODAY)
+        assert at_capture.role_type is None, "the body must not mislabel a permanent role"
+        assert on_board["role_type"] == at_capture.role_type
+
+
+class TestTheFunctionTagReplacesTheDeletedGate:
+    """CRITICAL 1 from review. The keyword list that used to stamp
+    `out_of_scope` — deleting the role permanently, with near-misses
+    terminated — is now a tag."""
+
+    @pytest.mark.parametrize(
+        "title,function",
+        [
+            ("Marketing Intern", "marketing"),
+            ("Data Analyst Intern", "analyst"),
+            ("Sales Development Representative", "sales"),
+            ("Talent Acquisition Intern", "talent acquisition"),
+        ],
+    )
+    def test_the_keywords_information_survives_as_a_tag(self, title, function):
+        tagged = classifier.stamp_tags(_listing(title), ClassifierResult("skip", "in_scope", ""))
+        assert tagged.function == function
+        assert tagged.surface, "and the role is captured, not deleted"
+
+    def test_it_reaches_the_register_and_the_board(self):
+        merged = upsert_roles(
+            [], [(_listing("Marketing Intern"), "why", "broad", {"function": "marketing"})], TODAY
+        )
+        assert merged[0].function == "marketing"
+        section = board.jobs_section(merged, TODAY)
+        assert section.rows[0]["function"] == "marketing"
+        assert "function" in {f.key for f in section.facets}
+
+    def test_an_untagged_row_is_not_hidden_by_the_new_facet(self):
+        section = board.jobs_section([_role(title="Software Engineer")], TODAY)
+        assert len(section.rows) == 1 and section.rows[0]["function"] is None
+
+
+class TestTheBoardIsWrittenAtomically:
+    def test_no_tmp_file_is_left_behind(self, tmp_path):
+        out = tmp_path / "board.html"
+        board.write_board(out, _html([_role()]))
+        assert [p.name for p in tmp_path.iterdir()] == ["board.html"]
+
+    def test_a_failed_write_leaves_the_previous_board_intact(self, tmp_path, monkeypatch):
+        """A half-written page still OPENS, showing whatever rows made it
+        before the cut with nothing to say the rest is missing — a silent
+        partial result, which is the one output shape this codebase refuses to
+        produce. The feed was already atomic; the page was not."""
+        import os
+
+        out = tmp_path / "board.html"
+        out.write_text("<!DOCTYPE html>OLD")
+        real = os.fdopen
+
+        def _boom(fd, *a, **k):
+            real(fd, *a, **k).close()
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fdopen", _boom)
+        with pytest.raises(OSError):
+            board.write_board(out, "NEW")
+        assert out.read_text() == "<!DOCTYPE html>OLD"
+        assert [p.name for p in tmp_path.iterdir()] == ["board.html"]
+
+
+class TestTheFunctionTagIsReadable:
+    def test_the_prefix_marker_never_reaches_a_dropdown(self):
+        """`negative_titles` is a MATCHER vocabulary: `business develop*` covers
+        development and developer. Printing the glob shows the reader a pattern
+        where a category should be — caught on the live register, which
+        produced a literal "business develop*" option."""
+        assert tags.clean_function("business develop*") == "business develop"
+        tagged = classifier.stamp_tags(
+            _listing("Business Development Intern"), ClassifierResult("skip", "in_scope", "")
+        )
+        assert tagged.function == "business develop"
+        assert "*" not in board.job_row(_role(title="Business Development Intern"), TODAY)["function"]
+
+    def test_a_term_without_a_marker_is_left_alone(self):
+        """The tag has to stay traceable to the list entry that produced it, so
+        nothing beyond the marker is rewritten."""
+        assert tags.clean_function("talent acquisition") == "talent acquisition"

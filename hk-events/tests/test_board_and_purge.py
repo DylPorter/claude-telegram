@@ -121,7 +121,9 @@ class TestThePurge:
         assert kept == [] and "not listed" in dropped[0][1]
 
     def test_an_undated_event_older_than_two_months_leaves(self):
-        record = _record(starts=None, first_seen="2026-06-01", last_seen=TODAY.isoformat())
+        """...unless a source listed it TODAY — see
+        TestASightingTodayVetoesTheMaxAgeClock."""
+        record = _record(starts=None, first_seen="2026-06-01", last_seen="2026-08-25")
         kept, dropped = purge([record], TODAY, unseen_after_days=30, max_age_days=60)
         assert kept == [] and "first seen" in dropped[0][1]
 
@@ -225,7 +227,9 @@ class TestDryRunWritesNoBoard:
         target = tmp_path / "board.html"
         monkeypatch.setattr(config, "board_path", lambda: target)
         monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "feed.json")
-        assert orchestrator._write_board([_record()], TODAY, dry_run=True) is None
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "missing.json")
+        result = orchestrator._write_board([_record()], TODAY, dry_run=True)
+        assert result.path is None and result.problem == "dry run"
         assert not target.exists() and not (tmp_path / "feed.json").exists()
 
     def test_a_real_run_writes_both(self, monkeypatch, tmp_path):
@@ -235,14 +239,90 @@ class TestDryRunWritesNoBoard:
         monkeypatch.setattr(config, "board_path", lambda: target)
         monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "feed.json")
         monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "missing.json")
-        assert orchestrator._write_board([_record()], TODAY, dry_run=False) == target
+        result = orchestrator._write_board([_record()], TODAY, dry_run=False)
+        assert result.path == target and result.problem is None
         assert "<!DOCTYPE html>" in target.read_text()
         assert (tmp_path / "feed.json").exists()
 
-    def test_a_board_failure_does_not_kill_the_run(self, monkeypatch, tmp_path):
+    def test_a_board_failure_reports_that_cause_and_not_a_guessed_one(
+        self, monkeypatch, tmp_path
+    ):
         from hk_events import orchestrator
 
         monkeypatch.setattr(config, "board_path", lambda: tmp_path / "board.html")
         monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "feed.json")
         monkeypatch.setattr(orchestrator.board_mod, "build_board", lambda *a, **k: 1 / 0)
-        assert orchestrator._write_board([_record()], TODAY, dry_run=False) is None
+        result = orchestrator._write_board([_record()], TODAY, dry_run=False)
+        assert result.path is None and "could not be written" in result.problem
+        bubble = render(
+            surfaced=[], total_new=0, total_processed=0, calendar_stats=None,
+            today=TODAY, board_path=result.path, board_problem=result.problem,
+        )[0]
+        assert "could not be written" in bubble
+        assert "no board path configured" not in bubble
+
+
+class TestTestsDoNotTouchRealState:
+    """Mirror of job-sift's guard: a test that patches only SOME of the write
+    paths silently clobbers real state on every `pytest` run."""
+
+    def test_the_real_state_dir_is_untouched_by_this_suite(self):
+        feed = config.STATE_DIR / "events_feed.json"
+        register = config.STATE_DIR / "open_events.json"
+        assert not feed.exists() and not register.exists(), (
+            "the test suite wrote real state — patch config.events_feed_path "
+            "(and STATE_DIR) in whichever test calls _write_board"
+        )
+
+
+class TestAnUnreadableStartAlsoVetoes:
+    """IMPORTANT 2 from review, applied here too. `start_date` returned None
+    for both "no start" and "I could not parse the start", so the future-start
+    veto silently did not apply to a row whose date we failed to read."""
+
+    @pytest.mark.parametrize("bad", ["20 Sep 2026", "2026/09/20", "soon", "2026-13-45"])
+    def test_a_malformed_start_keeps_the_row(self, bad):
+        record = _record(starts=bad, first_seen="2026-01-01", last_seen="2026-01-01")
+        kept, dropped = purge([record], TODAY, unseen_after_days=30, max_age_days=60)
+        assert dropped == [], f"{bad!r} was treated as evidence the event is over"
+        assert len(kept) == 1
+
+    def test_the_three_start_states_are_distinguishable(self):
+        assert _record(starts=None).start_state == ("none", None)
+        assert _record(starts="20 Sep 2026").start_state == ("unreadable", None)
+        assert _record(starts="2026-09-20").start_state[0] == "known"
+
+
+class TestASightingTodayVetoesTheMaxAgeClock:
+    def test_an_undated_event_seen_today_survives_the_age_clock(self):
+        record = _record(starts=None, first_seen="2026-06-01", last_seen=TODAY.isoformat())
+        kept, dropped = purge([record], TODAY, max_age_days=60)
+        assert dropped == [] and len(kept) == 1
+
+    def test_an_intermittently_sighted_old_undated_event_is_still_purged(self):
+        record = _record(starts=None, first_seen="2026-06-01", last_seen="2026-08-25")
+        kept, dropped = purge([record], TODAY, unseen_after_days=30, max_age_days=60)
+        assert kept == [] and "first seen" in dropped[0][1]
+
+
+class TestTheBoardIsWrittenAtomically:
+    def test_no_tmp_file_is_left_behind(self, tmp_path):
+        out = tmp_path / "board.html"
+        board.write_board(out, board.build_board([_record()], TODAY))
+        assert [p.name for p in tmp_path.iterdir()] == ["board.html"]
+
+    def test_a_failed_write_leaves_the_previous_board_intact(self, tmp_path, monkeypatch):
+        import os
+
+        out = tmp_path / "board.html"
+        out.write_text("<!DOCTYPE html>OLD")
+        real = os.fdopen
+
+        def _boom(fd, *a, **k):
+            real(fd, *a, **k).close()
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fdopen", _boom)
+        with pytest.raises(OSError):
+            board.write_board(out, "NEW")
+        assert out.read_text() == "<!DOCTYPE html>OLD"

@@ -129,6 +129,12 @@ class ClassifierResult:
     role_type: str | None = None
     industry: str | None = None
     is_technical: bool | None = None
+    # The non-technical business function named in the title ("sales",
+    # "analyst", "talent acquisition"), or None. THIS FIELD IS THE FORMER
+    # TECHNICAL GATE. The same keyword list used to stamp `out_of_scope` and
+    # delete the role; it now stamps a tag and the board filters on it. See
+    # classifier._route for the full account.
+    function: str | None = None
 
     @property
     def surface(self) -> bool:

@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import date
+from typing import NamedTuple
 
 from job_sift import board as board_mod
 from job_sift import config, liveness, source_health
@@ -188,6 +189,10 @@ def _probe_for(dedup_key: str):
 def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
     """Re-check a bounded slice of the undated LinkedIn rows. Issue #1c.
 
+    Returns a `_BoardWrite`: the path when a file was written, otherwise the
+    reason there is none, so the push can report the cause it actually
+    observed rather than guessing at one.
+
     Wrapped whole in a try/except for the same reason every source adapter is:
     an ageing convenience must never be able to take down a run that has already
     fetched, classified and is about to push. A failure here leaves the register
@@ -265,6 +270,7 @@ def _tags_of(result: ClassifierResult) -> dict:
         "role_type": result.role_type,
         "industry": result.industry,
         "is_technical": result.is_technical,
+        "function": result.function,
     }
 
 
@@ -359,8 +365,30 @@ def _update_open_roles(
     return kept, len(purged)
 
 
+class _BoardWrite(NamedTuple):
+    """What happened to the board this run.
+
+    A bare `Path | None` was not enough, and the gap showed up in the push:
+    `None` meant three different things — dry run, no path configured, and a
+    render that raised — while the summary bubble printed only one of them,
+    "no board path configured". That is a cause the code never checked,
+    reported to the one reader who could act on it. Same shape as every other
+    bug this codebase keeps deleting: one value standing in for several facts.
+
+    `path` is truthy exactly when a file was written, so `if result.path:`
+    still reads naturally at the call sites.
+    """
+
+    path: object
+    problem: str | None = None
+
+
 def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
     """Write the HTML board. Returns the path, or None if nothing was written.
+
+    Returns a `_BoardWrite`: the path when a file was written, otherwise the
+    reason there is none, so the push can report the cause it actually
+    observed rather than guessing at one.
 
     Wrapped whole, like the liveness pass: the board is a VIEW of state that is
     already safely persisted, so a failure to render it must never take down a
@@ -372,7 +400,7 @@ def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
         # --dry-run writes no state, pushes nothing, and writes NO BOARD. The
         # board is a file on disk like any other output.
         log.info("dry-run — NOT writing the board")
-        return None
+        return _BoardWrite(None, "dry run")
     # The feed first, and ABOVE the board-path check: it is what the OTHER
     # service reads for its Jobs tab, so it is not conditional on this
     # deployment having somewhere to put an HTML file of its own.
@@ -383,15 +411,15 @@ def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
     path = config.board_path()
     if path is None:
         log.info("no board path configured — skipping the board")
-        return None
+        return _BoardWrite(None, "no board path configured")
     try:
         html = board_mod.build_board(
             roles, today, events_feed_path=config.events_feed_path()
         )
-        return board_mod.write_board(path, html)
+        return _BoardWrite(board_mod.write_board(path, html))
     except Exception as exc:  # noqa: BLE001 — a view must not kill the run
         log.error("board could not be written to %s: %s", path, exc)
-        return None
+        return _BoardWrite(None, f"could not be written to {path}")
 
 
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
@@ -467,9 +495,9 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         log.warning("no listings fetched from any source — pushing heartbeat")
         # Ageing is time-driven, so the register still needs a pass on a dead day.
         roles, purged = _update_open_roles([], today, dry_run=dry_run)
-        board_path = _write_board(roles, today, dry_run=dry_run)
+        board = _write_board(roles, today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board_path, purged=purged))
+            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, purged=purged))
             write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -568,7 +596,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
     # 4b. The board — written BEFORE the push, so the summary bubble can only
     #     point at a file that actually exists. If the write fails the push
     #     says so rather than naming a path that is stale or absent.
-    board_path = _write_board(open_roles, today, dry_run=dry_run)
+    board = _write_board(open_roles, today, dry_run=dry_run)
 
     # 5. Push to Telegram — one summary bubble pointing at the board, plus the
     #    exempt alarm/health banners. See render.render.
@@ -582,7 +610,8 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         open_roles=open_roles,
         staleness_alarm=staleness_alarm,
         drop_notice=drop_notice,
-        board_path=board_path,
+        board_path=board.path,
+        board_problem=board.problem,
         purged=purged,
     )
 

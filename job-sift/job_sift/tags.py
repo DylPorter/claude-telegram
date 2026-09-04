@@ -142,3 +142,21 @@ def clean_role_type(value) -> str | None:
     }
     low = aliases.get(low.replace("-", ""), aliases.get(low, low))
     return low if low in ROLE_TYPES else None
+
+
+def clean_function(term: str | None) -> str | None:
+    """Normalise a `negative_titles` term into a readable facet value.
+
+    The term list is a MATCHER vocabulary, not a display one: entries carry the
+    `*` prefix marker (`business develop*` covers development / developer), and
+    printing that in a dropdown shows the reader a glob where a category should
+    be. Verified against the live register, which produced a `business develop*`
+    option.
+
+    Only the marker is stripped — the term is not otherwise rewritten, because
+    the tag has to stay traceable to the list entry that produced it.
+    """
+    if not isinstance(term, str):
+        return None
+    text = term.strip().rstrip("*").strip()
+    return text or None

@@ -45,8 +45,11 @@ Rows leave the register on three clocks (`hk_events/open_events.py`):
 ⚠️ **A start still in the future vetoes all of them.** `last_seen` is a fact
 about our crawl, not about the world: the `luma_discover` city page shows about
 a dozen events at a time, so anything further out silently stops being
-re-sighted long before it occurs. Unparseable dates keep the row — not being
-able to tell is not evidence. Every drop is logged with the rule that fired.
+re-sighted long before it occurs. An unparseable `starts` counts as a veto too
+(`start_state` splits "no start" from "I could not read the start" — collapsing
+them is how the veto silently stopped applying), and a sighting today vetoes the
+max-age clock. Every drop is logged with the rule that fired, and the delete is
+irreversible: the seen-set has no TTL, so a purged row is not re-captured.
 
 hk-events has **no operator marks** (nothing writes `applied`/`dismissed` here),
 so there is no sticky-status exemption to honour — unlike job-sift, where that

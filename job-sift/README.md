@@ -16,7 +16,13 @@ So the question was split in two:
 | Question | Where it is answered | Why |
 |---|---|---|
 | **Scope** — is this a role a student could take? | still at capture, still a gate | The answer does not vary by reader. A permanent senior role is irrelevant to everyone this runs for. |
-| **Prestige, technical-ness, industry, role type** | tags on the row, filtered in the UI | These DO vary by reader — the sibling deployment's reader wants design and art roles — and being wrong costs a dropdown rather than a lost opportunity. |
+| **Prestige, technical-ness, industry, role type, business function** | tags on the row, filtered in the UI | These DO vary by reader — the sibling deployment's reader wants design and art roles — and being wrong costs a dropdown rather than a lost opportunity. |
+
+⚠️ **"Scope" means scope, not taste wearing its badge.** The one way to
+reintroduce the bug this redesign removed is to record a taste judgment as an
+`out_of_scope` verdict, which is exactly what the old `negative_title` guard
+did — see "The scope guard" below. Only two things may resolve scope for free:
+a seniority marker, and nothing else.
 
 **Tags are advisory, never gates.** A missing, malformed or unparseable tag
 leaves the role in the board UNTAGGED. It is never dropped and never hidden:
@@ -52,14 +58,24 @@ Three exemptions, each documented on `open_roles.purge`:
 
 * ⚠️ **`applied` and `dismissed` survive both rules.** They are the operator's
   own marks, neither is reconstructible, and losing a dismissal means being
-  handed back a role he already refused.
+  handed back a role he already refused. Note the purge is an IRREVERSIBLE
+  delete: `dedupe.filter_new` skips any id already in the seen-set and the
+  seen-set has no TTL, so a purged row is never re-captured.
 * **A deadline still in the future vetoes both clocks.** `last_seen` is a fact
   about OUR CRAWL — the CEDARS adapter paginates greedily and stops at the
   first all-seen page, so a listing that drifts past the walk depth stops being
   re-sighted while remaining perfectly well listed. Measured against a live
   59-row register, the unseen rule alone would have deleted eleven roles whose
   deadlines were still three weeks away.
-* **An unreadable date keeps the row.** Not being able to tell is not evidence.
+* **An unreadable date keeps the row** — `last_seen`, `first_seen` AND
+  `deadline` alike. `deadline_date` used to return `None` for both "no
+  deadline" and "I could not parse the deadline", so the veto above silently
+  did not apply to a malformed date; `deadline_state` splits the three cases.
+  Not being able to tell is not evidence.
+* **A sighting today vetoes the max-age clock.** The "past two months, kill it"
+  rule stays, but a source listing the role in this very run is the strongest
+  evidence available that it is live. What the clock still catches is the
+  intermittently-sighted row: seen ten days ago, first seen seventy.
 
 Every drop is logged with the rule that fired. A register that shrank and said
 nothing is indistinguishable from a capture that failed.
@@ -158,16 +174,45 @@ Issue #2 asked for "regardless of employer brand"; that now includes the
 employers the prestige lane actively excludes, not just the ones it's merely
 silent on.
 
-## The scope guard, and why the keyword path does not admit
+## The scope guard, and why the keyword path neither admits nor rejects
 
-`_scope_quick_classify` resolves obvious titles without an LLM call. The two
-directions are deliberately **not** symmetric:
+`_scope_quick_classify` resolves obvious titles without an LLM call. What it is
+allowed to resolve got narrower once prestige stopped gating, and the narrowing
+is the important part:
 
-- **Rejecting for free is safe.** Seniority markers (senior/staff/principal/…)
-  and non-technical business functions (sales, BD, talent acquisition, an
-  unqualified "Analyst") resolve `out_of_scope` with no LLM call.
-- **Admitting for free is not.** An intern/summer/contract keyword is a
-  *candidate*: it still has to pass the scope classifier.
+- **Seniority still resolves for free.** Senior / staff / principal / director
+  markers resolve `out_of_scope` with no LLM call, because that is a genuine
+  scope judgment: a permanent senior role is not one a student can take, and
+  the answer does not vary by reader.
+- **A BUSINESS FUNCTION NO LONGER RESOLVES ANYTHING.** Sales, BD, talent
+  acquisition and an unqualified "Analyst" used to resolve `out_of_scope` here
+  and in `_route`. That was a technical-ness judgment recorded as a **scope**
+  verdict — the exact laundering the capture inversion exists to end — and it
+  deleted the role. Executed against the real term lists it dropped "Marketing
+  Intern", "Data Analyst Intern", "Graduate Trainee Programme", "Sales
+  Development Representative" and every "Trading" or "Risk" title.
+
+  Two of those refute the rule outright. "Graduate Trainee Programme" died on
+  `trainee` while `rotational` is in the accepted scope definition and is what
+  the tag vocabulary maps "graduate trainee" to. "Data Analyst Intern" died on
+  `analyst`, the same family as the worked example the redesign was argued
+  from.
+
+  It was survivable while a rejection cost a digest line and the near-miss
+  section still printed it. Terminating near-misses removed the last place such
+  a deletion was visible, and the seen-set has no TTL, so a free rejection now
+  costs the role permanently and silently.
+
+  The keyword list is still useful, so it is kept — as the **`function` tag**,
+  which the board filters on. Nothing is lost except the deletion.
+- **Admitting for free is still not allowed.** An intern/summer/contract
+  keyword is a *candidate*: it still has to pass the scope classifier.
+
+**This costs LLM calls and that is the accepted trade.** Those titles now reach
+the batched classifier instead of resolving for free. Batching is ~1 CLI call
+per 20 listings, so the marginal cost is a fraction of a call per title; the
+alternative is a keyword list silently deleting every marketing internship the
+operator will ever be offered.
 
 That asymmetry is the fix for a real defect. The keyword match used to be an
 admission, so any title containing "Summer" at a boosted employer was surfaced

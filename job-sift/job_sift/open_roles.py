@@ -70,6 +70,9 @@ class OpenRole:
     role_type: str | None = None
     industry: str | None = None
     is_technical: bool | None = None
+    # The non-technical business function the title names. This is the former
+    # technical GATE, kept as a tag — see classifier._route.
+    function: str | None = None
     # Part of `identity_key`. A register written before this field existed loads
     # with None, which simply means those rows key on employer+title alone and
     # will not collapse against a freshly-written row carrying a location — a
@@ -111,6 +114,7 @@ class OpenRole:
             prestige=_opt_str(d.get("prestige")),
             role_type=_opt_str(d.get("role_type")),
             industry=_opt_str(d.get("industry")),
+            function=_opt_str(d.get("function")),
             is_technical=d.get("is_technical") if isinstance(d.get("is_technical"), bool) else None,
         )
 
@@ -132,12 +136,43 @@ class OpenRole:
 
     @property
     def deadline_date(self) -> date | None:
+        """The parsed deadline, or None for BOTH "no deadline" and "I could not
+        read the deadline".
+
+        Callers that only need to sort or display may use this. Anything that
+        DELETES must use `deadline_state` instead — see its docstring for the
+        bug that distinction exists to prevent.
+        """
         if not self.deadline:
             return None
         try:
             return date.fromisoformat(self.deadline)
         except ValueError:
             return None
+
+    @property
+    def deadline_state(self) -> tuple[str, date | None]:
+        """`("none"|"unreadable"|"known", date_or_None)`.
+
+        THE THIRD STATE IS THE POINT, and its absence was a bug rebuilt inside
+        the fix for the same bug. `deadline_date` returns None for "there is no
+        deadline" and for "there is a deadline and I cannot parse it", so the
+        purge's future-deadline veto — the guard that stops us deleting live
+        roles — silently did not apply to any row whose date we failed to read.
+        `last_seen` and `first_seen` already had an unreadable-date exemption;
+        `deadline` did not, which is the field the exemption matters most for.
+
+        It matters most HERE because the register is documented as
+        hand-editable: an operator who types "30 Sep 2026" into the JSON gets a
+        row that is not merely mis-sorted but PURGED, and nothing in the
+        deletion log distinguishes it from a role the source really dropped.
+        """
+        if not self.deadline:
+            return ("none", None)
+        try:
+            return ("known", date.fromisoformat(self.deadline))
+        except ValueError:
+            return ("unreadable", None)
 
     def days_left(self, today: date) -> int | None:
         d = self.deadline_date
@@ -233,6 +268,7 @@ def upsert_roles(
                 prestige=_opt_str(tags.get("prestige")),
                 role_type=_opt_str(tags.get("role_type")),
                 industry=_opt_str(tags.get("industry")),
+                function=_opt_str(tags.get("function")),
                 is_technical=(
                     tags["is_technical"] if isinstance(tags.get("is_technical"), bool) else None
                 ),
@@ -249,7 +285,7 @@ def upsert_roles(
         current.reason = reason or current.reason
         current.lane = lane
         current.location = listing.location or current.location
-        for field_name in ("prestige", "role_type", "industry"):
+        for field_name in ("prestige", "role_type", "industry", "function"):
             value = _opt_str(tags.get(field_name))
             if value is not None:
                 setattr(current, field_name, value)
@@ -535,12 +571,16 @@ def prune(roles: list[OpenRole], today: date, keep_days: int = 60) -> list[OpenR
     """Drop closed-out records older than `keep_days` past `last_seen`.
 
     EVERY sticky record is kept forever, `dismissed` included — not only
-    `applied`, which is all this used to keep. A dismissal that ages out of the
-    register is worse than clutter: the id leaves the register while remaining
-    in the seen-set only until the source re-lists it, at which point the role
-    is re-captured as `open` and the operator is shown something he already
-    said no to, with no way to tell that he did. Both marks are decisions he
-    made by hand and neither is reconstructible.
+    `applied`, which is all this used to keep.
+
+    THE ORIGINAL REASON GIVEN HERE WAS WRONG AND IS CORRECTED. It claimed a
+    dropped `dismissed` row would be "re-captured as open when the source
+    re-lists it". It would not: `dedupe.filter_new` skips any id already in the
+    seen-set and the seen-set has no TTL, so a dropped row simply ceases to
+    exist and is never seen again. That makes the case for keeping both marks
+    STRONGER, not weaker — the loss is silent and total rather than merely
+    annoying. Both are decisions the operator made by hand and neither is
+    reconstructible from anything else on disk.
 
     Anything still `open` is kept by definition.
     """
@@ -604,19 +644,35 @@ def purge(
     `last_seen` is an inference about OUR CRAWL, not a fact about the source:
     the CEDARS adapter paginates greedily and stops at the first all-seen page,
     so a listing that drifts past the walk depth stops being re-sighted while
-    remaining perfectly well listed on the portal. Measured against the live
-    register on 2026-09-04, the unseen rule alone dropped eleven roles whose
-    deadlines were three weeks away — eight Jane Street 2027 summer
-    internships, Squarepoint, Blackstone and HSBC — because the crawl had
-    moved on, not because the postings had. A published deadline is the
+    remaining perfectly well listed on the portal. Measured against a live 59-row
+    register, the unseen rule alone dropped ELEVEN roles whose deadlines were
+    still three weeks away — every one of them a CEDARS row the walk had simply
+    stopped reaching, not a posting that had closed. A published deadline is the
     source's own statement that the role is open; when we have that fact we do
     not act on the weaker inference. Once the deadline passes, `age_roles`
     marks the row `expired` and both clocks resume against it.
 
-    A row whose dates are missing or unparseable is KEPT. An unreadable
-    `last_seen` is not evidence that the source stopped listing the role — it
-    is evidence that we cannot tell, and the safe direction for a delete is to
-    not delete.
+    ⚠️ A SIGHTING TODAY VETOES THE MAX-AGE CLOCK, for the same reason. The
+    operator did ask for "past two months, kill it", and that rule stays — but
+    a source listing the role in THIS RUN is the strongest evidence available
+    that it is live, and deleting it anyway inverts the argument the deadline
+    veto is built on (the source's statement beats our inference). What the
+    max-age clock still catches is the intermittently-sighted row: seen ten
+    days ago, first seen seventy, under the unseen threshold and over the age
+    one.
+
+    A row whose dates are missing or unparseable is KEPT — `last_seen`,
+    `first_seen` AND `deadline` alike (see `deadline_state`). An unreadable
+    date is not evidence that the source stopped listing the role; it is
+    evidence that we cannot tell, and the safe direction for a delete is to not
+    delete.
+
+    ⚠️ THIS DELETE IS IRREVERSIBLE AND THE ROW DOES NOT COME BACK. The
+    seen-set (`dedupe.filter_new`) has no TTL, so once an id has been recorded
+    as seen it is never called new again — a purged row is not re-captured the
+    next time its source lists it. That is the whole reason the exemptions
+    above are written as absolutes rather than as heuristics, and the reason
+    every drop is reported.
     """
     kept: list[OpenRole] = []
     dropped: list[tuple[OpenRole, str]] = []
@@ -624,7 +680,15 @@ def purge(
         if role.status in STICKY_STATUSES:
             kept.append(role)
             continue
-        deadline = role.deadline_date
+        state, deadline = role.deadline_state
+        if state == "unreadable":
+            log.warning(
+                "purge: %s has an unreadable deadline %r — KEEPING it. A date we "
+                "cannot parse is not evidence the role closed.",
+                role.dedup_key, role.deadline,
+            )
+            kept.append(role)
+            continue
         if deadline is not None and deadline >= today:
             kept.append(role)
             continue
@@ -636,7 +700,14 @@ def purge(
                        f"(> {unseen_after_days})")
             )
             continue
-        if first_seen is not None and (today - first_seen).days > max_age_days:
+        if (
+            first_seen is not None
+            and (today - first_seen).days > max_age_days
+            # `last_seen` is a date here, not the ISO string — comparing it to
+            # `today.isoformat()` would never be equal and the veto would be
+            # dead code that reads as if it worked.
+            and last_seen != today
+        ):
             dropped.append(
                 (role, f"first seen {(today - first_seen).days} days ago "
                        f"(> {max_age_days})")

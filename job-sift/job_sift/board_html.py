@@ -246,6 +246,16 @@ _JS = r"""
     });
   }
 
+  // Only these schemes may become a clickable href. Leading control
+  // characters and whitespace are stripped first, because a browser ignores
+  // them when resolving the URL and "\u0001javascript:x" would otherwise pass
+  // a naive prefix test. A relative or scheme-less value is refused too: on a
+  // file:// page it resolves against the local filesystem, not a job board.
+  function safeHref(value) {
+    var v = value.replace(/[\u0000-\u0020]/g, "").toLowerCase();
+    return v.indexOf("http://") === 0 || v.indexOf("https://") === 0 || v.indexOf("mailto:") === 0;
+  }
+
   function cell(row, col) {
     var td = el("td", "t-" + col.key);
     var raw = row[col.key];
@@ -258,7 +268,17 @@ _JS = r"""
     if (missing(raw)) { td.appendChild(el("span", "muted", UNTAGGED)); return td; }
     if (col.kind === "link") {
       var href = col.hrefKey ? row[col.hrefKey] : raw;
-      if (missing(href)) { td.appendChild(document.createTextNode(txt(raw))); return td; }
+      // SCHEME WHITELIST. Everything else on this page is textContent and the
+      // JSON is escaped so it cannot close its own <script>, but an href is
+      // the one place a value from the data becomes executable: a scraped
+      // "javascript:..." apply_url would be a click away from running in a
+      // file:// page, which is the most privileged context this file is ever
+      // opened in. Anything not http/https/mailto renders as plain text, so
+      // the row is still visible and still says what it says.
+      if (missing(href) || !safeHref(txt(href))) {
+        td.appendChild(document.createTextNode(txt(raw)));
+        return td;
+      }
       var a = el("a", null, txt(raw));
       a.href = txt(href); a.target = "_blank"; a.rel = "noopener noreferrer";
       td.appendChild(a);

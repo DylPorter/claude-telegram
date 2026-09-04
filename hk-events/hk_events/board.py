@@ -98,6 +98,7 @@ _JOB_COLUMNS = [
     Column("title", "Title", kind="link", href_key="apply_url"),
     Column("role_type", "Role type", kind="tags"),
     Column("industry", "Industry", kind="tags"),
+    Column("function", "Function", kind="tags"),
     Column("technical", "Technical"),
     Column("source", "Source"),
     Column("location", "Location"),
@@ -108,6 +109,7 @@ _JOB_COLUMNS = [
 _JOB_FACETS = [
     Facet("role_type", "Role type"),
     Facet("industry", "Industry"),
+    Facet("function", "Function"),
     Facet("technical", "Technical"),
     Facet("source", "Source"),
     Facet("status", "Status"),
@@ -117,7 +119,9 @@ _JOB_SORTS = [
     Sort("deadline", "Deadline", kind="date", ascending=True),
     Sort("employer", "Employer"),
 ]
-_JOB_SEARCH = ["employer", "title", "industry", "location", "reason", "role_type"]
+_JOB_SEARCH = [
+    "employer", "title", "industry", "location", "reason", "role_type", "function",
+]
 
 
 def read_jobs_feed(path: Path | None) -> tuple[list[dict] | None, str | None]:
@@ -178,8 +182,28 @@ def build_board(
 
 
 def write_board(path: Path, html: str) -> Path:
+    """Write the board ATOMICALLY, the same way `write_feed` writes the feed.
+
+    The feed was atomic and this was not, which is backwards: a half-written
+    FEED is refused by its reader and reported, while a half-written PAGE still
+    opens, showing whatever rows made it before the cut with nothing to say the
+    rest is missing. A silent partial result is the one output shape this
+    codebase refuses to produce.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(html)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     log.info("board written to %s", path)
     return path
 
