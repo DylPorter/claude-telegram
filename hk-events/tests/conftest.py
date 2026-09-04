@@ -20,8 +20,11 @@ addition from breaking the suite again.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from hk_events import config
 from hk_events.errors import SourceNotConfiguredError
 from hk_events.sources import aitinkerers, cyberport, luma, luma_discover, meetup, startmeuphk
 
@@ -103,3 +106,128 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", _blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+# ---------------------------------------------------------------------------
+# The real-write sandbox.
+#
+# WHY THIS EXISTS, in one sentence: on 2026-09-04 and again on 2026-09-05 a full
+# suite run overwrote the operator's real vault note at
+# `<VAULT_ROOT>/Inbox/HK Events/<today>.md` with fixture rows ("luma event 1",
+# "luma event 2"), because `TestDryRunWritesNoState._run` drives a LIVE
+# `orchestrator.run(dry_run=False)` and stubbed every outbound writer EXCEPT
+# `write_archive`.
+#
+# The lesson is not "that test forgot a stub". It is that the suite's default
+# was to write to real locations and each test had to opt OUT, one writer at a
+# time, from memory. Every new writer re-opened the hole. So the default is
+# inverted here: EVERY configurable output path points into a per-test tmp dir
+# unless a test deliberately points it somewhere else.
+#
+# This composes with per-test patching rather than fighting it: monkeypatch is
+# last-write-wins and autouse fixtures run first, so a test that does its own
+# `monkeypatch.setattr(config, "STATE_DIR", tmp_path)` still gets its own path.
+#
+# Note the two shapes that have to be covered together. `config.STATE_DIR` and
+# friends are module GLOBALS read inside call-time helpers, so patching the
+# attribute redirects them. But `config.board_path()` and
+# `config.events_feed_path()` also consult ENV VARS first, so an exported
+# `HK_EVENTS_BOARD_PATH` in the developer's shell would win over the patched
+# attribute. Both surfaces are closed below.
+
+#: The genuine paths, captured at conftest import BEFORE anything is patched.
+#: `_assert_real_dirs_untouched` compares against these at the end of the
+#: session, so a leak is caught even if it escaped every per-test assertion.
+_REAL_PATHS = {
+    "STATE_DIR": config.STATE_DIR,
+    "CACHE_DIR": config.CACHE_DIR,
+    "LOG_DIR": config.LOG_DIR,
+    "ARCHIVE_DIR": config.HK_EVENTS_ARCHIVE_DIR,
+    "BOARD_PATH": config.BOARD_PATH,
+    "VAULT_ROOT": config.VAULT_ROOT,
+}
+
+#: Env vars that can steer a write target. Cleared so a patched attribute is
+#: not silently overridden by the developer's shell.
+_PATH_ENV_VARS = (
+    "HK_EVENTS_BOARD_PATH",
+    "HK_EVENTS_EVENTS_FEED",
+    "HK_EVENTS_JOBS_FEED",
+    "HK_EVENTS_ARCHIVE_DIR",
+    "HK_EVENTS_VAULT_ROOT",
+    "DEFAULT_CWD",
+)
+
+
+def _snapshot(path):
+    """(name, size, mtime_ns) for every file under `path`, or None if absent.
+
+    Content-sensitive rather than existence-sensitive on purpose: the vault
+    archive note for today ALREADY EXISTS on a real machine, so "the file is
+    not there" would have caught nothing on either day this actually fired.
+    """
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    if p.is_file():
+        st = p.stat()
+        return {p.name: (st.st_size, st.st_mtime_ns)}
+    return {
+        str(f.relative_to(p)): (f.stat().st_size, f.stat().st_mtime_ns)
+        for f in p.rglob("*")
+        if f.is_file()
+    }
+
+
+@pytest.fixture(autouse=True)
+def sandbox_real_paths(monkeypatch, tmp_path_factory):
+    """Point every configurable output path at a throwaway dir.
+
+    A test must opt IN to touching anything real, by patching the attribute back
+    to a real location itself. Nothing in this suite does, and nothing should.
+    """
+    sandbox = tmp_path_factory.mktemp("sandbox")
+    vault = sandbox / "vault"
+    state = sandbox / "state"
+    cache = sandbox / "cache"
+    logs = sandbox / "logs"
+    for d in (vault, state, cache, logs):
+        d.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(config, "DATA_DIR", sandbox, raising=False)
+    monkeypatch.setattr(config, "STATE_DIR", state)
+    monkeypatch.setattr(config, "CACHE_DIR", cache)
+    monkeypatch.setattr(config, "LOG_DIR", logs)
+    monkeypatch.setattr(config, "VAULT_ROOT", vault)
+    monkeypatch.setattr(config, "HK_EVENTS_ARCHIVE_DIR", vault / "Inbox" / "HK Events")
+    monkeypatch.setattr(config, "BOARD_PATH", vault / "Areas" / "Work" / "Events Board.html")
+
+    for name in _PATH_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    return sandbox
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _assert_real_dirs_untouched():
+    """The backstop: after the whole session, the REAL directories must be
+    byte-for-byte what they were before it.
+
+    This is the assertion that would have caught the vault overwrite on the
+    first run rather than the second. It is session-scoped so it sees leaks from
+    any test, including ones that patch their own paths and get them wrong.
+    """
+    before = {name: _snapshot(p) for name, p in _REAL_PATHS.items()}
+    yield
+    damaged = []
+    for name, path in _REAL_PATHS.items():
+        if _snapshot(path) != before[name]:
+            damaged.append(f"{name} -> {path}")
+    assert not damaged, (
+        "the test suite wrote to REAL directories: "
+        + ", ".join(damaged)
+        + " — every output path must resolve through `config` at call time so "
+        "the `sandbox_real_paths` fixture can redirect it"
+    )

@@ -588,6 +588,23 @@ class TestDryRunWritesNoState:
         # TestStateDirIsRedirectable in test_dedupe_state_paths.py), so
         # patching `config.STATE_DIR` alone is enough to redirect `_log_path()`.
         monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+
+        # THE ARCHIVE IS A REAL WRITE AND IT IS NOT STUBBED BELOW ON PURPOSE.
+        # `run(dry_run=False)` calls `write_archive`, and this class stubs every
+        # other outbound writer but deliberately leaves the archive live so the
+        # "live run" really is one. That is exactly how this test spent two days
+        # overwriting the operator's actual vault note at
+        # `<VAULT_ROOT>/Inbox/HK Events/<today>.md` with the fixture rows below:
+        # `config.VAULT_ROOT` comes from DEFAULT_CWD, which on a developer box
+        # is the real vault. Redirect it here, EXPLICITLY, rather than leaning
+        # on the `sandbox_real_paths` autouse fixture in conftest — the fixture
+        # is the backstop for writers nobody thought about, not a licence for a
+        # test that knowingly triggers a vault write to stay silent about it.
+        archive_dir = tmp_path / "vault" / "Inbox" / "HK Events"
+        monkeypatch.setattr(config, "VAULT_ROOT", tmp_path / "vault")
+        monkeypatch.setattr(config, "HK_EVENTS_ARCHIVE_DIR", archive_dir)
+        self.archive_dir = archive_dir
+
         monkeypatch.setenv("HK_EVENTS_STUB", "0")
         monkeypatch.setattr(config, "assert_required", lambda: None)
 
@@ -617,6 +634,12 @@ class TestDryRunWritesNoState:
         self._run(monkeypatch, tmp_path, dry_run=True)
         assert not (tmp_path / "relevance_log.jsonl").exists()
 
+    def test_a_dry_run_writes_no_vault_archive(self, monkeypatch, tmp_path):
+        """The archive is the one writer this class leaves live, so pin that a
+        dry run still does not produce it."""
+        self._run(monkeypatch, tmp_path, dry_run=True)
+        assert not self.archive_dir.exists()
+
     def test_a_dry_run_writes_nothing_at_all_into_the_state_dir(self, monkeypatch, tmp_path):
         """The general property, so the next unguarded writer fails here too."""
         self._run(monkeypatch, tmp_path, dry_run=True)
@@ -629,3 +652,16 @@ class TestDryRunWritesNoState:
         assert log_file.exists()
         rows = [json.loads(l) for l in log_file.read_text().splitlines() if l.strip()]
         assert [r["external_id"] for r in rows] == ["1", "2"]
+
+    def test_a_live_run_archives_into_the_redirected_vault_only(self, monkeypatch, tmp_path):
+        """The live run genuinely writes an archive — into the tmp vault.
+
+        Keeps `write_archive` un-stubbed (so the run above stays a real one)
+        while proving the write is contained. If someone drops the VAULT_ROOT
+        redirect in `_run`, the archive lands in the real vault and this
+        assertion fails.
+        """
+        self._run(monkeypatch, tmp_path, dry_run=False)
+        written = sorted(p.name for p in self.archive_dir.iterdir())
+        assert written == [f"{date.today().isoformat()}.md"]
+        assert "luma event 1" in (self.archive_dir / written[0]).read_text()

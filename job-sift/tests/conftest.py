@@ -27,8 +27,11 @@ the next source addition from breaking the suite.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from job_sift import config, refresh_cookie
 from job_sift.errors import SourceNotConfiguredError
 from job_sift.sources import ashby, cedars, greenhouse, lever, linkedin
 
@@ -117,3 +120,118 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", _blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+# ---------------------------------------------------------------------------
+# The real-write sandbox. Ported from hk-events/tests/conftest.py, which grew it
+# after `TestDryRunWritesNoState` spent two days overwriting the operator's real
+# vault note with fixture rows: it drove a LIVE `orchestrator.run(dry_run=False)`
+# and had stubbed every outbound writer EXCEPT `write_archive`.
+#
+# This suite carries the same shape and a worse blast radius. `orchestrator.run`
+# calls `write_open_roles` (line ~361), which rewrites the operator's rolling
+# Open Roles REGISTER — a hand-annotated note, not a regenerable digest — and
+# exactly one test in this suite stubs it. `vault_note` also used to bind
+# `VAULT_ROOT` / `JOB_SIFT_ARCHIVE_DIR` / `OPEN_ROLES_PATH` at import time, so
+# patching `config` did not redirect those writes at all; that is fixed, and
+# this fixture is the guard that keeps it fixed.
+#
+# The default is inverted: EVERY configurable output path points into a per-test
+# tmp dir, and a test must opt IN to touching anything real. monkeypatch is
+# last-write-wins and autouse fixtures run first, so per-test patching still
+# works exactly as before.
+
+#: Captured at conftest import, BEFORE anything is patched.
+_REAL_PATHS = {
+    "STATE_DIR": config.STATE_DIR,
+    "LOG_DIR": config.LOG_DIR,
+    "COOKIE_DIR": config.COOKIE_DIR,
+    "ARCHIVE_DIR": config.JOB_SIFT_ARCHIVE_DIR,
+    "OPEN_ROLES_PATH": config.OPEN_ROLES_PATH,
+    "BOARD_PATH": config.BOARD_PATH,
+    "VAULT_ROOT": config.VAULT_ROOT,
+}
+
+_PATH_ENV_VARS = (
+    "JOB_SIFT_BOARD_PATH",
+    "JOB_SIFT_ARCHIVE_DIR",
+    "JOB_SIFT_OPEN_ROLES_PATH",
+    "JOB_SIFT_JOBS_FEED",
+    "JOB_SIFT_EVENTS_FEED",
+    "JOB_SIFT_VAULT_ROOT",
+    "DEFAULT_CWD",
+)
+
+
+def _snapshot(path):
+    """(size, mtime_ns) per file, not mere existence — the notes this suite can
+    clobber ALREADY EXIST on a real machine, so an existence check catches
+    nothing."""
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    if p.is_file():
+        st = p.stat()
+        return {p.name: (st.st_size, st.st_mtime_ns)}
+    return {
+        str(f.relative_to(p)): (f.stat().st_size, f.stat().st_mtime_ns)
+        for f in p.rglob("*")
+        if f.is_file()
+    }
+
+
+@pytest.fixture(autouse=True)
+def sandbox_real_paths(monkeypatch, tmp_path_factory):
+    """Point every configurable output path at a throwaway dir."""
+    sandbox = tmp_path_factory.mktemp("sandbox")
+    vault = sandbox / "vault"
+    state = sandbox / "state"
+    logs = sandbox / "logs"
+    cookies = sandbox / "cookies"
+    for d in (vault, state, logs, cookies):
+        d.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(config, "DATA_DIR", sandbox, raising=False)
+    monkeypatch.setattr(config, "STATE_DIR", state)
+    monkeypatch.setattr(config, "LOG_DIR", logs)
+    monkeypatch.setattr(config, "COOKIE_DIR", cookies)
+    monkeypatch.setattr(config, "CEDARS_COOKIES_PATH", cookies / "cedars.json")
+    monkeypatch.setattr(config, "VAULT_ROOT", vault)
+    monkeypatch.setattr(config, "JOB_SIFT_ARCHIVE_DIR", vault / "Inbox" / "Job Sift")
+    monkeypatch.setattr(config, "OPEN_ROLES_PATH", vault / "Areas" / "Work" / "Open Roles.md")
+    monkeypatch.setattr(config, "BOARD_PATH", vault / "Areas" / "Work" / "Job Board.html")
+
+    # `sources.cedars` and `refresh_cookie` still bind CEDARS_COOKIES_PATH at
+    # import time. They only READ it, so this is a live-credential read rather
+    # than a clobber — but redirect the bound names anyway so a test cannot
+    # accidentally authenticate against the operator's real session.
+    monkeypatch.setattr(cedars, "CEDARS_COOKIES_PATH", cookies / "cedars.json", raising=False)
+    monkeypatch.setattr(
+        refresh_cookie, "CEDARS_COOKIES_PATH", cookies / "cedars.json", raising=False
+    )
+
+    for name in _PATH_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    return sandbox
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _assert_real_dirs_untouched():
+    """After the whole session the REAL directories must be byte-for-byte what
+    they were before it."""
+    before = {name: _snapshot(p) for name, p in _REAL_PATHS.items()}
+    yield
+    damaged = [
+        f"{name} -> {path}"
+        for name, path in _REAL_PATHS.items()
+        if _snapshot(path) != before[name]
+    ]
+    assert not damaged, (
+        "the test suite wrote to REAL directories: "
+        + ", ".join(damaged)
+        + " — every output path must resolve through `config` at call time so "
+        "the `sandbox_real_paths` fixture can redirect it"
+    )
