@@ -29,7 +29,7 @@ import logging
 import sys
 from datetime import date
 
-from signal_brief.config import LOG_DIR, assert_required
+from signal_brief.config import LOG_DIR, VAULT_ROOT, assert_required
 from signal_brief.daily_note import upsert_signal_section
 from signal_brief.render import render_alarm_for_telegram, render_for_daily_note
 from signal_brief.telegram_client import TelegramPushError, push_messages
@@ -69,7 +69,7 @@ EVENING_PROMPT = """You are running the evening vault sweep for an Obsidian-styl
 
 6. **Refresh gbrain.** After you have committed/pushed your changes (per `CLAUDE.md`),
    re-index the gbrain knowledge backend so it doesn't drift from git HEAD: call the
-   `mcp__gbrain__sync_brain` MCP tool with `no_pull: true` and `repo: "/home/tdporter/Documents/Obsidian"`.
+   `mcp__gbrain__sync_brain` MCP tool with `no_pull: true` and `repo: "__VAULT_ROOT__"`.
    The `repo` param is required — the default source has no `local_path` configured (post-2026-06-13 reinit).
    It runs inside your own `gbrain serve` (no PGLite lock contention) and syncs + embeds + extracts links for
    the changed pages. Do NOT shell out to the `gbrain` CLI — a separate process would
@@ -139,13 +139,17 @@ def main() -> int:
 
     log.info("=== evening sweep %s (dry_run=%s) ===", today, args.dry_run)
 
-    prompt = EVENING_PROMPT
+    # `__VAULT_ROOT__` rather than `.format()`: the prompt embeds a JSON block,
+    # and doubling every brace in it to survive formatting is a worse trade than
+    # one explicit substitution. `assert_required()` above has already
+    # guaranteed VAULT_ROOT is set, so the fallback is unreachable in practice.
+    prompt = EVENING_PROMPT.replace("__VAULT_ROOT__", str(VAULT_ROOT or ""))
     if args.dry_run:
         prompt = (
             "**DRY RUN MODE — DO NOT MODIFY ANY VAULT STATE.** Do not create, edit, "
             "or move any files. Do not run any tool that writes. Inspect what NEEDS "
             "doing and produce the JSON summary describing what you WOULD do.\n\n"
-        ) + EVENING_PROMPT
+        ) + prompt
 
     result = run_vault_agent(prompt)
     digest = result_to_digest(result, date=today)

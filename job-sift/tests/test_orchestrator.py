@@ -543,3 +543,78 @@ def test_the_abandonment_log_does_not_name_a_phase(caplog):
     assert "still running after the" in msg
     assert "budget" in msg
     assert "fetch budget" not in msg
+
+
+# ---------------------------------------------------------------------------
+# `--dry-run` must write NO state. `sift --dry-run` documents "no Telegram, no
+# state save", and every other writer in `run()` is already behind `if not
+# dry_run` — except `log_classification`, which sat in the classify loop with
+# no guard at all and appended one line per listing to
+# `.data/state/classifier_log.jsonl` on every dry run.
+#
+# That log is not a debug artefact: README v2 plans to derive the prestige
+# whitelist from ~30 days of it, so a dry run was silently voting in the
+# dataset that will later configure the classifier.
+#
+# These assert the property on the FILESYSTEM rather than on a call count, so
+# removing the guard fails here regardless of how the write is reached.
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunWritesNoState:
+    def _run(self, monkeypatch, tmp_path, *, dry_run: bool) -> int:
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setenv("JOB_SIFT_STUB", "0")
+        monkeypatch.setattr(config, "assert_required", lambda: None)
+
+        # Distinct titles: same employer + same title would be collapsed as a
+        # repost before the classifier ever sees the second one.
+        listings = [
+            JobListing(
+                source="greenhouse",
+                external_id=eid,
+                employer="Northwind Systems",
+                title=title,
+                apply_url=f"https://example.com/greenhouse/{eid}",
+            )
+            for eid, title in (("1", "Backend Intern"), ("2", "Frontend Intern"))
+        ]
+        monkeypatch.setattr(
+            orchestrator, "_fetch_all_sources", lambda: (listings, {}, ["greenhouse"])
+        )
+        monkeypatch.setattr(
+            orchestrator, "filter_new", lambda ls: (ls, {"greenhouse": {"1", "2"}})
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "classify_batch",
+            lambda ls: [_ClassifierResult("prestige", "in_scope", "yes") for _ in ls],
+        )
+        monkeypatch.setattr(orchestrator, "_update_open_roles", lambda *a, **k: ([], 0))
+        monkeypatch.setattr(orchestrator, "_write_board", lambda *a, **k: _NoBoard())
+        monkeypatch.setattr(orchestrator, "push_messages", lambda msgs: None)
+        monkeypatch.setattr(orchestrator, "write_archive", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "save_seen", lambda *a, **k: None)
+        return orchestrator.run(dry_run=dry_run)
+
+    def test_a_dry_run_leaves_the_classifier_log_unwritten(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, dry_run=True)
+        assert not (tmp_path / "classifier_log.jsonl").exists()
+
+    def test_a_dry_run_writes_nothing_at_all_into_the_state_dir(self, monkeypatch, tmp_path):
+        """The general property, so the next unguarded writer fails here too."""
+        self._run(monkeypatch, tmp_path, dry_run=True)
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    def test_a_live_run_still_logs_every_classification(self, monkeypatch, tmp_path):
+        """The guard must not silently disable the log on real runs."""
+        self._run(monkeypatch, tmp_path, dry_run=False)
+        log_file = tmp_path / "classifier_log.jsonl"
+        assert log_file.exists()
+        rows = [json.loads(l) for l in log_file.read_text().splitlines() if l.strip()]
+        assert [r["external_id"] for r in rows] == ["1", "2"]
+
+
+class _NoBoard:
+    path = None
+    problem = None

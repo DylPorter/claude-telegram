@@ -21,7 +21,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from signal_brief.config import LOG_DIR, REVIEWS_DIR, assert_required
+from signal_brief.config import LINK_HEALTH_SKILL, LOG_DIR, REVIEWS_DIR, assert_required
 from signal_brief.home_refresh import apply_home_refresh
 from signal_brief.render import render_for_telegram
 from signal_brief.telegram_client import TelegramPushError, push_messages
@@ -180,7 +180,7 @@ Output ONLY the JSON object. No fences. No prose around it.
 
 LINK_HEALTH_PROMPT = """You are running the weekly LINK-HEALTH sweep for the Obsidian vault (today {today}).
 
-Follow the procedure in `/home/tdporter/.claude/skills/vault-link-health/SKILL.md` EXACTLY. Mode: {mode}.
+Follow the procedure in `{skill_path}` EXACTLY. Mode: {mode}.
 
 Read that skill file first, then execute every step: precompute, fan out parallel scan
 subagents over the folder groups, synthesize + completeness-critic, apply per the mode,
@@ -264,7 +264,9 @@ def main() -> int:
         if args.dry_run
         else "APPLY mode ON — auto-apply HIGH-confidence first-mention links, then commit + push"
     )
-    lh_prompt = LINK_HEALTH_PROMPT.format(today=today_iso, mode=lh_mode)
+    lh_prompt = LINK_HEALTH_PROMPT.format(
+        today=today_iso, mode=lh_mode, skill_path=LINK_HEALTH_SKILL
+    )
     log.info("running link-health pass (mode=%s)",
              "report-only" if args.dry_run else "apply")
     lh_result = run_vault_agent(lh_prompt)

@@ -545,7 +545,10 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
                 listing.title[:40],
             )
             continue
-        log_classification(listing, result)
+        # A dry run is documented (`sift --dry-run`) as "no state save", and
+        # this log IS state: README v2 derives the prestige whitelist from it.
+        if not dry_run:
+            log_classification(listing, result)
         if result.surface:
             surfaced.append((listing, result))
         else:

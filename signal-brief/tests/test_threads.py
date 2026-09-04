@@ -51,8 +51,8 @@ def test_cap_questions_collapses_to_one_line():
 
 
 def test_cap_questions_dedupes_case_insensitive():
-    out = cap_questions(["Send Tracy?", "send tracy?", "Other?"])
-    assert out == ["Send Tracy?", "Other?"]
+    out = cap_questions(["Send Robin?", "send robin?", "Other?"])
+    assert out == ["Send Robin?", "Other?"]
 
 
 def test_cap_questions_empty_prefers_zero():
@@ -118,12 +118,12 @@ def test_extract_live_capture_pulls_log_and_journal_skips_brief():
         "### Your Open Threads\n- stale wrong thread\n"
         "<!-- signal-brief:end -->\n\n"
         "## Morning\n> prompt\n\n"
-        "## Log\n- 09:00 — submitted BOCHK deck\n\n"
+        "## Log\n- 09:00 — submitted the hackathon deck\n\n"
         "## Journal\nFelt good about shipping.\n\n"
         "## Connections Noticed Today\n- A <-> B\n"
     )
     out = _extract_live_capture(note)
-    assert "submitted BOCHK deck" in out
+    assert "submitted the hackathon deck" in out
     assert "Felt good about shipping" in out
     # must NOT leak the stale morning-brief thread back in
     assert "stale wrong thread" not in out
@@ -205,11 +205,11 @@ def test_reconcile_nonzero_exit_falls_back(monkeypatch):
 
 
 def test_reconcile_parses_valid_llm_output(monkeypatch):
-    prior = [Thread(id="bochk", title="BOCHK", status="open")]
+    prior = [Thread(id="deck", title="Hackathon deck", status="open")]
     payload = json.dumps({
-        "threads": [{"id": "bochk", "title": "BOCHK", "status": "done", "detail": "submitted"}],
+        "threads": [{"id": "deck", "title": "Hackathon deck", "status": "done", "detail": "submitted"}],
         "questions": [],
-        "rationale": "BOCHK submitted per Log.",
+        "rationale": "Deck submitted per Log.",
     })
 
     class FakeProc:
@@ -219,7 +219,7 @@ def test_reconcile_parses_valid_llm_output(monkeypatch):
 
     monkeypatch.setattr(T.subprocess, "run", lambda *a, **k: FakeProc())
     res = reconcile_threads(prior=prior, today="2026-06-14",
-                            context={"daily_notes": "submitted BOCHK", "git": ""})
+                            context={"daily_notes": "submitted the deck", "git": ""})
     assert res.llm_ran is True
     assert res.threads[0].status == "done"
     assert res.active_threads() == []  # nothing live -> no open-threads bubble

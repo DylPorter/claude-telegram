@@ -54,6 +54,14 @@ SIGNAL_BRIEF_MODEL = os.environ.get("SIGNAL_BRIEF_MODEL", "sonnet")
 # is the equivalent of the old "normal" default.
 SIGNAL_BRIEF_EFFORT = os.environ.get("SIGNAL_BRIEF_EFFORT", "medium")
 
+# Path to the vault-link-health skill the weekly job drives. Machine-specific,
+# so it is configuration rather than a literal in a prompt string; the default
+# is the conventional Claude Code skills location under the current user's home.
+LINK_HEALTH_SKILL = os.environ.get(
+    "SIGNAL_BRIEF_LINK_HEALTH_SKILL",
+    str(Path.home() / ".claude/skills/vault-link-health/SKILL.md"),
+)
+
 # Vault layout — these are conventional paths for an Obsidian-style vault.
 # Override via env if your folders are named differently.
 def _vault_path(env_key: str, default_rel: str) -> Path | None:

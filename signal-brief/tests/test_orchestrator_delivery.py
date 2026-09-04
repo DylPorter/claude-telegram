@@ -346,3 +346,56 @@ def test_trip_wire_dry_run_pushes_nothing(monkeypatch, watch_stubs):
     _watch_items(monkeypatch, agent_watch, "Example Corp enables Web Bot Auth by default")
     assert _run(agent_watch, ["agent_watch", "--dry-run"], monkeypatch) == 0
     assert sent == []
+
+
+# --------------------------------------------------------------------------- #
+# agent_watch email leg — no hardcoded recipient
+#
+# `EMAIL_TO` used to default to a real personal address checked into a public
+# repo. Removing the default creates a second hazard — an unset variable
+# silently sending to nobody — so the absence has to be LOUD, not quiet.
+# --------------------------------------------------------------------------- #
+
+def test_agent_watch_ships_no_hardcoded_recipient():
+    """Nobody's address is baked into the module."""
+    import inspect
+
+    from signal_brief.orchestrators import agent_watch
+
+    src = inspect.getsource(agent_watch)
+    assert "@gmail.com" not in src
+    assert 'os.environ.get("AGENT_WATCH_EMAIL_TO")' in src
+
+
+def test_agent_watch_email_is_off_and_loud_when_unset(monkeypatch, caplog):
+    import logging
+
+    from signal_brief.orchestrators import agent_watch
+
+    monkeypatch.setattr(agent_watch, "EMAIL_TO", "")
+
+    def _never_run(*a, **k):
+        raise AssertionError("gws was invoked with no recipient configured")
+
+    monkeypatch.setattr(agent_watch.subprocess, "run", _never_run)
+
+    hits = [("TIER1", {"title": "t", "source": "s", "url": "https://example.com/1"})]
+    with caplog.at_level(logging.ERROR):
+        agent_watch._send_email(hits)
+
+    assert "AGENT_WATCH_EMAIL_TO" in caplog.text
+
+
+def test_agent_watch_email_still_sends_when_configured(monkeypatch):
+    from signal_brief.orchestrators import agent_watch
+
+    monkeypatch.setattr(agent_watch, "EMAIL_TO", "ops@example.test")
+    calls = []
+    monkeypatch.setattr(
+        agent_watch.subprocess, "run",
+        lambda *a, **k: calls.append(a) or type("P", (), {"returncode": 0})(),
+    )
+
+    hits = [("TIER1", {"title": "t", "source": "s", "url": "https://example.com/1"})]
+    agent_watch._send_email(hits)
+    assert len(calls) == 1

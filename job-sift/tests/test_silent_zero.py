@@ -745,7 +745,7 @@ class TestAnUnclassifiedWinnerTakesItsMirroredLoserWithIt:
             JobListing(
                 source="cedars",
                 external_id=ext,
-                employer="IMC",
+                employer="Northwind",
                 title="Software Engineer Intern",
                 apply_url=f"https://example.com/{ext}",
                 location="Hong Kong",

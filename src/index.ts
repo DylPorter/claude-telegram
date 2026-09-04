@@ -65,14 +65,14 @@ bot.command("run", async (ctx) => {
   if (!raw) {
     await ctx.reply(
       "Usage: /run <abs-path> [low|medium|high|xhigh|max] <prompt>\n" +
-        "Example: /run /home/tdporter/Documents/Programming/sourcinggpt-v1-app medium fix the embedding pipeline error class",
+        "Example: /run /path/to/your/project medium fix the embedding pipeline error class",
     );
     return;
   }
   const tokens = raw.split(/\s+/);
   const cwd = tokens.shift();
   if (!cwd || !cwd.startsWith("/")) {
-    await ctx.reply("⚠️ First arg must be an absolute path (e.g. /home/tdporter/...).");
+    await ctx.reply("⚠️ First arg must be an absolute path (e.g. /path/to/your/project).");
     return;
   }
   const efforts = ["low", "medium", "high", "xhigh", "max"] as const;

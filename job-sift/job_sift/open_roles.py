@@ -349,7 +349,7 @@ def collapse_register(roles: list[OpenRole]) -> list[OpenRole]:
     """Fold register rows that are the same posting into one. Returns a NEW list.
 
     `dedupe.collapse_duplicates` handles duplicates that arrive in the SAME run.
-    This handles the ones that do not, which is the reported case: the two IMC
+    This handles the ones that do not, which is the reported case: the two Northwind
     rows in issue #1b came from alert emails days apart, so no single fetch ever
     held both and nothing upstream could have seen them together. The register
     is the only place they ever coexist.

@@ -1,9 +1,10 @@
 """Daily thread reconciliation + ask-don't-assume pass.
 
 The morning brief used to **regenerate** the Open Threads section from the last
-snapshot, so it drifted from reality (BOCHK shown as "due" after it was
-submitted, Ricci RN18 "to-send" after it was sent, Tracy a "today" action after
-it was deferred). Spec: `.claude-memory/feedback_daily_thread_reconciliation.md`.
+snapshot, so it drifted from reality: a submission still shown as "due" days
+after it went out, a newsletter "to-send" after it was sent, a deferred item
+still listed as a "today" action. Spec:
+`.claude-memory/feedback_daily_thread_reconciliation.md`.
 
 This module instead **reconciles** the prior thread snapshot against what the operator
 actually said/did — recent daily-note live-capture sections and recent vault git
@@ -81,7 +82,7 @@ TERMINAL_STATUSES = {"done", "deferred", "dropped"}
 class Thread:
     """One tracked open thread / action item."""
 
-    id: str  # stable slug, e.g. "bochk-submission"
+    id: str  # stable slug, e.g. "grant-submission"
     title: str  # short human label
     status: str = "open"  # open | in_progress | done | deferred | dropped
     detail: str = ""  # one-line current state / next action
