@@ -187,3 +187,91 @@ option.
 | hku-cedars-scraper | 212 | 251 | 274 |
 
 Purge on the live 59-row register is unchanged at **54 of 59**.
+
+---
+
+# Review round 3 — the docs were still arguing for the removed gate
+
+## IMPORTANT 1 — `README.md` vouched for the gate ~30 lines below its removal
+
+The cost section still reported free-resolution going **up** (3/8 → 6/8, 40.0%
+→ 46.7%) and credited "the new negative-title guard at the end of `_route`" for
+the gain — while `test_classifier_lanes.py` asserts `routes.count("done") == 1`
+and the guard no longer exists.
+
+This is the mechanism by which the gate survived the last review: the code was
+corrected and the prose kept vouching for the old behaviour, in the same file.
+So the section is rewritten rather than patched, it opens by naming what it
+used to claim and why that claim was wrong, and the corrected figures are
+measured through the real `_route`:
+
+**Free-resolution is 1/8, and it is one seniority marker.** The five rows that
+moved to `full` are exactly the five the guard used to resolve by deleting
+them — buying LLM calls with deleted roles is not a saving. Cost is bounded by
+batching (20 listings per CLI call), not by a keyword list. The test asserts
+that exact count, so the README figure can no longer drift from the code.
+
+## IMPORTANT 2 — `profile.yaml.example` still documented a reject list
+
+This is the only file where an operator configures `negative_titles`, and it
+told them the terms are "rejected with no LLM call at all" and "Never admitted
+by the quick path" — i.e. that populating the list deletes roles. Rewritten
+with a ⚠️ block: the list is a **tag vocabulary**, a match sets the `function`
+tag, and nothing there can remove a listing from the board. The two "traps" are
+now flagged as cosmetic — getting them wrong mislabels a tag rather than
+deleting a role, which is the whole point of the change.
+
+## IMPORTANT 3 — scope is now ring-fenced in both prompts
+
+With the gate gone from the code, the LLM is the sole scope authority, and
+`accepts`/`rejects` are interpolated verbatim from a gitignored file no test
+covers. A private `rejects` line reading "non-technical roles" would restore
+the deleted gate silently. Both `CLASSIFIER_SYSTEM_PROMPT` and
+`SCOPE_SYSTEM_PROMPT` now state:
+
+> SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY — never about function,
+> discipline, seniority of subject matter, or whether the work is technical.
+
+…plus an explicit override for a profile line that asks for more, and a comment
+at the interpolation site explaining why the fence is in the prompt rather than
+in a validator (there is no value to validate; the failure is a judgement).
+Three tests cover it, including one asserting the shipped example profile does
+not itself reject on function.
+
+## Also fixed
+
+- **The real tautological assertion.** I had fixed a different one. The
+  survivor now asserts what `assign_lane` — the only writer of the field —
+  decides for that listing: the floor lane claims it despite `prestige="skip"`,
+  which is the brand-agnostic behaviour the class is named for.
+- **Sibling real-state guard.** Added, and `conftest.clean_env` now clears
+  `CEDARS_STATE_PATH` / `CEDARS_BOARD_PATH` — write targets, so a developer
+  with either set to their own register would have had it overwritten by a test
+  run that passed no `--state`.
+- **The em-dash gap.** The harness now reports each cell with its column, and
+  the test asserts per-column across both renderer branches. Verified by
+  mutation: breaking only the scalar branch previously left all 12 green and
+  now fails.
+- **Docstring debris.** The `_BoardWrite` paragraph pasted into
+  `_liveness_pass` removed, both `_write_board` opening lines corrected,
+  `_BoardWrite.path` typed `Path | None`.
+
+## Noted, deliberately NOT fixed — `--dry-run` does write logs
+
+Confirmed independently: `orchestrator.py:548` calls `log_classification`
+outside any `dry_run` guard, appending to `.data/state/classifier_log.jsonl`;
+hk-events does the same with `relevance_log.jsonl`. `sift:6` advertises
+`--dry-run` as "no state save", so the promise is inaccurate.
+
+It predates this plan and is out of this diff's scope, so it is left alone —
+but it is a real inaccuracy in a guarantee this codebase leans on elsewhere,
+and the fix is a one-line guard at each call site plus a test. Worth a separate
+change rather than losing it here.
+
+## Numbers after round 3
+
+| | baseline | r1 | r2 | r3 |
+|---|---|---|---|---|
+| job-sift | 539 | 613 | 652 | 655 |
+| hk-events | 199 | 231 | 253 | 253 |
+| hku-cedars-scraper | 212 | 251 | 274 | 277 |

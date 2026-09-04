@@ -219,47 +219,64 @@ admission, so any title containing "Summer" at a boosted employer was surfaced
 with nothing ever asking whether the role was technical — 20 of 35 entries in a
 register snapshot were finance, BD and sales roles admitted exactly that way.
 
-A note on that "35", because a "45" appears a few paragraphs down and the two are
-not reconcilable from anything in this repo. Both are counts of the operator's
-own register, taken while diagnosing this issue, and neither is checked in — it
-is personal application data. They are reported as the separate, unreproducible
-snapshots they are; do not read either as a stable denominator, and do not try
-to derive one from the other.
+A note on that "35": it is a count of the operator's own register, taken while
+diagnosing that issue, and it is not checked in — it is personal application
+data. Read it as the single unreproducible snapshot it is, not as a stable
+denominator.
 
-No `classifier_log.jsonl` exists in a fresh checkout to replay against, so
-this was measured two ways instead — a small mixed corpus and a real
-register — and this time they agree, which they did not the first time this
-number was reported (an earlier draft measured the small corpus through
-`_scope_quick_classify` in isolation, as if every title came from a boosted
-employer; run correctly through `_route` instead, the disagreement was a
-measurement artifact, not a real one).
+### What resolves for free now, and what it costs
 
-`_scope_quick_classify` only runs at all for a boosted or already-prestige
-employer (`_route` decides that first); a listing from a non-boosted employer
-takes a completely different path (`full`, an LLM call either way, before or
-after this change) where the fix's only effect is the NEW free rejection at
-the end of `_route` (the non-technical-title guard, which this change adds
-unconditionally). That branch is where most of the saving actually comes
-from, because most of a real day's titles are NOT from a boosted employer.
+⚠️ **THIS SECTION USED TO ARGUE FOR A GATE THAT NO LONGER EXISTS, ~30 lines
+below the section that removed it.** It reported free-resolution going *up*
+(3/8 → 6/8 on the corpus below, 40.0% → 46.7% on a register snapshot) and
+credited "the new negative-title guard at the end of `_route`" for the gain.
+That guard is gone — see the section above — and the gain it measured was the
+cost of deleting roles. Leaving the prose in place is exactly how the gate
+survived a review: the code was corrected and the README kept vouching for the
+old behaviour. Corrected figures follow.
 
-- **8-title mixed corpus** (5 non-boosted, 3 boosted — `tests/test_classifier_lanes.py`,
-  run through the real `_route`): free-resolution goes **3/8 → 6/8, up**.
-- **The operator's real 45-entry register** (real employers, real titles,
-  real source split across CEDARS and LinkedIn — not reproduced here,
-  personal application data): free-resolution goes **40.0% → 46.7%, up**.
-  Most of that register is non-boosted employers that were paying for a full
-  LLM call before this change regardless; the new negative-title guard at the
-  end of `_route` now catches several of them for free.
+Measured through the real `_route` on the 8-title mixed corpus in
+`tests/test_classifier_lanes.py` (5 non-boosted, 3 boosted employers):
 
-Anthropic alone lists ~389 roles, so neither number should be read as "the"
-production figure — the real mix shifts over time as sources and boost-list
-membership change. Both measurements are committed here as evidence, not
-because either one is definitive; the honest answer is "measure against
-`classifier_log.jsonl` once one exists."
+| Title | Employer | Route |
+|---|---|---|
+| Business Development Manager | non-boosted | `full` |
+| Sales Executive | non-boosted | `full` |
+| Talent Acquisition Intern | non-boosted | `full` |
+| Marketing Analyst | non-boosted | `full` |
+| Graduate Trainee Programme | non-boosted | `full` |
+| Senior Software Engineer | boosted | **`done`** |
+| Software Engineer Intern | boosted | `scope` |
+| Data Science Summer Analyst | boosted | `scope` |
+
+**Free-resolution is 1/8, and it is one seniority marker.** That is the whole
+of what may be settled without asking: every other row pays for a scope
+judgment. `tests/test_classifier_lanes.py` asserts this exact count, so the
+number above cannot drift from the code the way the old one did.
+
+The direction is deliberately *down*. The five `full` rows are the five the
+negative-title guard used to resolve for free by deleting them, and buying
+LLM calls back with deleted roles is not a saving. What bounds the cost
+instead is **batching**: `classify_batch` sends `_BATCH_CHUNK_SIZE` (20)
+listings per CLI call, so the marginal cost of a title is a twentieth of a
+call, and the CLI cold-start — the thing that actually dominated and once blew
+the service timeout — is paid once per chunk rather than once per listing.
+
+`_scope_quick_classify` only runs for a boosted or already-prestige employer
+(`_route` decides that first). A listing from a non-boosted employer takes the
+`full` path and always has; what changed is that it is no longer intercepted on
+the way there.
+
+Anthropic alone lists ~389 roles, so none of this should be read as "the"
+production figure — the real mix shifts as sources and boost-list membership
+change. The honest answer remains "measure against `classifier_log.jsonl` once
+one exists"; no such file is in a fresh checkout.
 
 The term lists behind both features live in `config/profile.yaml` (gitignored),
 not in `classifier.py`. The matcher is the mechanism; the terms are who the
-digest is for.
+digest is for. ⚠️ `negative_titles` is a **tag** vocabulary — it names the
+`function` facet's values and can no longer reject anything. See
+`config/profile.yaml.example`.
 
 ## "I could not look" is never "there was nothing"
 

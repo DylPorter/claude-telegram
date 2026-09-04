@@ -639,3 +639,42 @@ class TestTheFunctionTagIsReadable:
         """The tag has to stay traceable to the list entry that produced it, so
         nothing beyond the marker is rewritten."""
         assert tags.clean_function("talent acquisition") == "talent acquisition"
+
+
+class TestScopeIsRingFencedInThePrompts:
+    """The residual after the technical gate came out of the code: the LLM is
+    now the SOLE authority on scope, and the text steering it is interpolated
+    verbatim from `config/profile.yaml` — gitignored, uncovered by any test.
+    The shipped example's `rejects` is permanence-only so the default is safe,
+    but a private line reading "non-technical roles" would restore the deleted
+    gate silently. Both prompts state the boundary explicitly."""
+
+    def test_both_prompts_confine_scope_to_shape_and_duration(self):
+        from job_sift.classifier import CLASSIFIER_SYSTEM_PROMPT, SCOPE_SYSTEM_PROMPT
+
+        for prompt in (CLASSIFIER_SYSTEM_PROMPT, SCOPE_SYSTEM_PROMPT):
+            flat = " ".join(prompt.split())
+            assert "SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY" in flat
+            assert "never about function, discipline" in flat
+            assert "whether the work is technical" in flat
+
+    def test_both_prompts_override_a_profile_line_that_asks_for_more(self):
+        from job_sift.classifier import CLASSIFIER_SYSTEM_PROMPT, SCOPE_SYSTEM_PROMPT
+
+        for prompt in (CLASSIFIER_SYSTEM_PROMPT, SCOPE_SYSTEM_PROMPT):
+            assert "apply the shape rule above instead" in " ".join(prompt.split())
+
+    def test_the_shipped_example_profile_does_not_reject_on_function(self):
+        """If the DEFAULT profile asked for a function-based rejection, the
+        fence would be arguing with the config in every fresh checkout."""
+        from job_sift.profile import PROFILE_EXAMPLE_PATH
+
+        import yaml
+
+        rejects = yaml.safe_load(PROFILE_EXAMPLE_PATH.read_text()).get("rejects") or []
+        blob = " ".join(str(r) for r in rejects).lower()
+        for forbidden in ("non-technical", "nontechnical", "sales", "marketing", "design"):
+            assert forbidden not in blob, (
+                f"the shipped profile rejects on {forbidden!r} — that is a function "
+                "judgment wearing a scope verdict's clothes"
+            )

@@ -95,7 +95,12 @@ _SHIM = textwrap.dedent(r"""
       report[s.key] = {
         count: (nodes.find(n => n.className === 'count') || {}).textContent || null,
         rows: Math.max(0, bodyRows - (bodyRows ? 1 : 0)),  // minus the header row
-        cells: nodes.filter(n => n.tagName === 'td').map(n => n.textContent),
+        // Cells carry their column ("t-<key>" on the td), so a test can assert
+        // PER CELL rather than "is there a dash anywhere on the page" — the
+        // scalar and tags branches render the em dash independently, and a
+        // page-wide check stays green when one of them breaks.
+        cells: nodes.filter(n => n.tagName === 'td')
+                    .map(n => ({col: n.className.replace(/^t-/, ''), text: n.textContent})),
         pills: nodes.filter(n => n.className === 'pill').map(n => n.textContent),
         links: nodes.filter(n => n.tagName === 'a').map(n => ({text: n.textContent, href: n.href})),
         options: Object.fromEntries(

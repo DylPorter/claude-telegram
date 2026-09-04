@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from typing import NamedTuple
 
 from job_sift import board as board_mod
@@ -188,10 +189,6 @@ def _probe_for(dedup_key: str):
 
 def _liveness_pass(roles: list[OpenRole], today: date) -> list[OpenRole]:
     """Re-check a bounded slice of the undated LinkedIn rows. Issue #1c.
-
-    Returns a `_BoardWrite`: the path when a file was written, otherwise the
-    reason there is none, so the push can report the cause it actually
-    observed rather than guessing at one.
 
     Wrapped whole in a try/except for the same reason every source adapter is:
     an ageing convenience must never be able to take down a run that has already
@@ -379,12 +376,12 @@ class _BoardWrite(NamedTuple):
     still reads naturally at the call sites.
     """
 
-    path: object
+    path: Path | None
     problem: str | None = None
 
 
 def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
-    """Write the HTML board. Returns the path, or None if nothing was written.
+    """Write the HTML board and the feed hk-events reads.
 
     Returns a `_BoardWrite`: the path when a file was written, otherwise the
     reason there is none, so the push can report the cause it actually

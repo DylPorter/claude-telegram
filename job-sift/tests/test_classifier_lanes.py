@@ -890,7 +890,18 @@ class TestFloorLaneIsBrandAgnostic:
         listing = _listing("AI Platform Engineer, Contract", employer="Hermes International")
         result, _ = _route(listing)
         assert result.prestige == "skip"
-        assert ClassifierResult(result.prestige, result.scope, result.reason).lane == "prestige"
+        # NOT a re-read of the dataclass default. The previous version built a
+        # fresh `ClassifierResult` with no lane and asserted it came back
+        # "prestige", which is true for every possible input and therefore
+        # asserted nothing. What matters is what `assign_lane` — the only thing
+        # that ever writes the field — decides for THIS listing: it is
+        # technical, contract and reachable, so the floor lane claims it even
+        # though the prestige tag says "skip". That is the brand-agnostic
+        # behaviour this class is named for, and it fails if the employer gate
+        # is ever allowed to veto the floor lane again.
+        stamped = assign_lane(listing, result)
+        assert stamped.lane == "floor"
+        assert stamped.prestige == "skip", "the prestige TAG is unchanged by the lane"
 
     def test_a_hard_skip_employer_with_a_negative_title_is_tagged_not_deleted(self):
         """The floor lane is looser, not blind — and capture is looser still.

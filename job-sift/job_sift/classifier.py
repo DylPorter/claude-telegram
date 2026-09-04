@@ -31,6 +31,24 @@ log = logging.getLogger(__name__)
 
 _PROFILE = profile_block()
 
+# ---------------------------------------------------------------------------
+# ⚠️ `accepts` / `rejects` ARE INTERPOLATED VERBATIM FROM A GITIGNORED FILE.
+#
+# Since the technical gate was removed from the code (see `_route`), the LLM is
+# the SOLE authority on scope — and the text that steers it comes from
+# `config/profile.yaml`, which is not in this repo and not covered by any test.
+# The shipped example's `rejects` is permanence-only, so the default is safe;
+# but a private `rejects` line reading "non-technical roles" would restore the
+# deleted gate silently and untestably, one layer further from anywhere a
+# reviewer looks.
+#
+# So both system prompts ring-fence the field the same way they already
+# ring-fence `industry` / `is_technical`: scope is about role SHAPE AND
+# DURATION ONLY, and a profile line that asks for anything else is explicitly
+# overridden. The fence lives in the prompt rather than in a validator because
+# there is nothing to validate — the failure is a judgement, not a value.
+# ---------------------------------------------------------------------------
+
 CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
     You are a job-listing classifier for {_PROFILE['identity']}.
     They are looking for **{_PROFILE['seeking']}**.
@@ -71,11 +89,28 @@ CLASSIFIER_SYSTEM_PROMPT = dedent(f"""
       whose primary industry is fashion, luxury goods, retail, hospitality, FMCG, real estate, or
       manufacturing. Global brand recognition in a non-tech sector does NOT make a company prestige here.
 
-    SCOPE rules — ACCEPT:
+    SCOPE rules.
+
+    SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY — never about function,
+    discipline, seniority of subject matter, or whether the work is technical.
+    "Is this an internship / contract / part-time / rotational / RA position a
+    student could take?" is the entire question. A marketing internship, a
+    design contract and a finance summer analyst position are all `in_scope`:
+    they are the right SHAPE, and whether the reader wants that kind of work is
+    decided later, by a filter they control. Answering "out_of_scope" because a
+    role is not technical is the one mistake that cannot be undone downstream —
+    the listing is dropped and never offered again.
+
+    ACCEPT:
 {_PROFILE['accepts']}
 
     REJECT:
 {_PROFILE['rejects']}
+
+    The ACCEPT and REJECT lists above are operator-supplied and describe role
+    SHAPE. If a line in them appears to ask you to reject on function,
+    discipline or technical-ness, that line is out of scope for this field —
+    apply the shape rule above instead.
 
     If the role type is unclear from the title (e.g. just "Software Engineer"),
     {_PROFILE['unclear_role_default']}.
@@ -522,11 +557,26 @@ SCOPE_SYSTEM_PROMPT = dedent(f"""
     Use null rather than guessing; null renders as "untagged" and stays
     visible, a wrong guess misfiles the role.
 
+    SCOPE IS ABOUT ROLE SHAPE AND DURATION ONLY — never about function,
+    discipline, seniority of subject matter, or whether the work is technical.
+    "Is this an internship / contract / part-time / rotational / RA position a
+    student could take?" is the entire question. A marketing internship, a
+    design contract and a finance summer analyst position are all `in_scope`:
+    they are the right SHAPE, and whether the reader wants that kind of work is
+    decided later, by a filter they control. Answering "out_of_scope" because a
+    role is not technical is the one mistake that cannot be undone downstream —
+    the listing is dropped and never offered again.
+
     ACCEPT:
 {_PROFILE['accepts']}
 
     REJECT:
 {_PROFILE['rejects']}
+
+    The ACCEPT and REJECT lists above are operator-supplied and describe role
+    SHAPE. If a line in them appears to ask you to reject on function,
+    discipline or technical-ness, that line is out of scope for this field —
+    apply the shape rule above instead.
 
     If the role type is unclear from the title (e.g. just "Software Engineer"),
     {_PROFILE['unclear_role_default']}.

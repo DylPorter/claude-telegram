@@ -14,6 +14,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from typing import NamedTuple
 
 from hk_events import board as board_mod
@@ -253,13 +254,12 @@ class _BoardWrite(NamedTuple):
     still reads naturally at the call sites.
     """
 
-    path: object
+    path: Path | None
     problem: str | None = None
 
 
 def _write_board(records: list[OpenEvent], today: date, *, dry_run: bool):
-    """Write the HTML board and the feed job-sift reads. Returns the board path,
-    or None if nothing was written.
+    """Write the HTML board and the feed job-sift reads.
 
     Returns a `_BoardWrite`: the path when a file was written, otherwise the
     reason there is none, so the push can report the cause it actually

@@ -27,6 +27,9 @@ FACET_VALUE = "founder_ai"
 FACET_VALUE_ROWS = 2
 UNTAGGED_ROWS = 1
 SEARCH_TERM = "cyberport"
+# One column from the scalar renderer branch, one from the tags branch — both
+# genuinely empty in the fixture below.
+EM_DASH_COLUMNS = ("organizer", "room")
 
 
 def _record(key, **kw):
@@ -51,7 +54,9 @@ def mixed_board():
         _record("luma:1", room="founder_ai", title="Founder mixer"),
         _record("luma:2", room="founder_ai", title="AI builders night", location="Wan Chai"),
         _record("luma:3", room="drop", title="Gala dinner", location="Central"),
-        _record("luma:4", title="Unclassified meetup", location="Kowloon"),
+        # Untagged room AND a missing scalar, so both renderer branches have
+        # something empty to render.
+        _record("luma:4", title="Unclassified meetup", location="Kowloon", organizer=None),
     ]
     return board.build_board(records, TODAY)
 
@@ -85,11 +90,36 @@ class TestTheRenderedBoard:
         assert out["count"] == "showing 4 of 4"
 
     def test_a_missing_value_renders_an_em_dash_and_not_a_guess(self, tmp_path, mixed_board):
+        """PER CELL, and the count matters.
+
+        Asserting `"—" in cells` is too weak: the tags branch and the scalar
+        branch render the em dash independently, so breaking one of them leaves
+        the other still putting a dash somewhere on the page and the assertion
+        green. Verified by mutating the scalar branch alone — all twelve tests
+        stayed green. So this counts the dashes against the number of empty
+        values the data actually has.
+        """
         out = render_in_node(tmp_path, mixed_board)[SECTION]
-        assert "—" in out["cells"]
-        for forbidden in ("None", "null", "undefined", "NaN", "false"):
-            assert forbidden not in out["cells"], (
-                f"a missing value leaked as {forbidden!r} — it must render as an em dash"
+        by_col: dict[str, list[str]] = {}
+        for cell in out["cells"]:
+            by_col.setdefault(cell["col"], []).append(cell["text"])
+
+        # BOTH renderer branches, asserted separately. `EM_DASH_COLUMNS` names
+        # one column rendered by the scalar branch and one by the tags branch,
+        # each of which has a genuinely empty value in the fixture.
+        for column in EM_DASH_COLUMNS:
+            assert "—" in by_col.get(column, []), (
+                f"column {column!r} has an empty value in the fixture and did not "
+                "render an em dash — that renderer branch is broken"
+            )
+
+        for cell in out["cells"]:
+            assert cell["text"] not in (
+                "None", "null", "undefined", "NaN", "false", "[object Object]"
+            ), f"{cell['col']} leaked {cell['text']!r} — it must render as an em dash"
+            assert cell["text"].strip() != "", (
+                f"{cell['col']} rendered empty — indistinguishable from a value "
+                "that is genuinely blank"
             )
 
     def test_the_untagged_option_exists_and_is_not_the_default(self, tmp_path, mixed_board):
@@ -177,4 +207,4 @@ class TestTheRenderedBoard:
 
     def test_a_hostile_title_does_not_execute(self, tmp_path, hostile_board):
         out = render_in_node(tmp_path, hostile_board)[SECTION]
-        assert any("</script>" in c for c in out["cells"]), "rendered as text, not markup"
+        assert any("</script>" in c["text"] for c in out["cells"]), "rendered as text, not markup"
