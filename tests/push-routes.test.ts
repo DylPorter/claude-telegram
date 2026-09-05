@@ -13,7 +13,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, open, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -83,13 +83,26 @@ function transportError(): Error {
 
 let boardPath: string;
 let bigBoardPath: string;
+let hugeBoardPath: string;
+let unreadablePath: string;
 
 before(async () => {
   const dir = await mkdtemp(join(tmpdir(), "push-routes-"));
   boardPath = join(dir, "Job Board.html");
   await writeFile(boardPath, "<html>board</html>");
-  bigBoardPath = join(dir, "huge.html");
+  bigBoardPath = join(dir, "big.html");
   await writeFile(bigBoardPath, "x".repeat(64 * 1024));
+  // Over Telegram's 50 MB ceiling. Sparse, so it costs no real disk: the guard
+  // reads `stat().size` and never opens the file, which is the point.
+  hugeBoardPath = join(dir, "huge.html");
+  const handle = await open(hugeBoardPath, "w");
+  await handle.truncate(51 * 1024 * 1024);
+  await handle.close();
+  // Chmod 000 to make `readFile` fail AFTER the stat guard has passed — the
+  // read-failure path whose error message is an absolute path.
+  unreadablePath = join(dir, "Secret Vault Board.html");
+  await writeFile(unreadablePath, "<html>board</html>");
+  await chmod(unreadablePath, 0o000);
 });
 
 interface Harness {
@@ -159,11 +172,16 @@ describe("auth and routing", () => {
     assert.equal(h.bot.documents.length, 0);
   });
 
-  test("auth runs BEFORE the route split — an unauthed caller cannot probe routes", async () => {
+  test("an unauthed caller cannot learn whether document delivery is configured", async () => {
+    // Deliberately NOT "cannot probe routes" — it does not prove that. The 404
+    // branch runs before the auth check, so route existence IS distinguishable
+    // unauthenticated (401 for a real route, 404 for a made-up one). What this
+    // does prove is the part that matters: the auth check runs before the
+    // handler, so CONFIG STATE stays hidden — an unset allowlist answers 401
+    // here, not the 503 it would answer once authenticated.
     const h = await harness();
-    const unauthed = await post(h, "/push-document", { board: "x" }, null);
-    // 401, not the 503 a configured-off endpoint would answer with.
-    assert.equal(unauthed.status, 401);
+    assert.equal((await post(h, "/push-document", { board: "x" }, null)).status, 401);
+    assert.equal((await post(h, "/push-document", { board: "x" })).status, 503);
   });
 
   test("an unknown route is 404", async () => {
@@ -242,13 +260,21 @@ describe("the allowlist over the wire", () => {
 });
 
 describe("the guards over the wire", () => {
-  test("an oversized board is 413 and never reaches the bot", async () => {
+  test("a board comfortably under the limit is sent, with its byte count", async () => {
     const h = await harness(`big=${bigBoardPath}`);
     const { status, body } = await post(h, "/push-document", { board: "big" });
-    // 64 KB is under Telegram's 50 MB, so this passes — the point of the pair
-    // below is that the guard is wired, which the unit tests pin numerically.
     assert.equal(status, 200);
-    assert.ok(body.bytes);
+    assert.equal(body.bytes, 64 * 1024);
+  });
+
+  test("an oversized board is 413 and never reaches the bot", async () => {
+    // A real route-level 413. The unit tests inject `maxBytes`; this one goes
+    // through the actual 50 MB default, so the wiring is covered too.
+    const h = await harness(`huge=${hugeBoardPath}`);
+    const { status, body } = await post(h, "/push-document", { board: "huge" });
+    assert.equal(status, 413);
+    assert.match(String(body.error), /document limit/);
+    assert.equal(h.bot.documents.length, 0);
   });
 
   test("a missing file is 404, not a hang or a 500", async () => {
@@ -344,6 +370,37 @@ describe("the retry sends exactly one document", () => {
     assert.equal(h.bot.documents[1]!.parseMode, undefined);
   });
 
+  for (const error_code of [429, 500, 502, 503]) {
+    test(`a Telegram error_code ${error_code} is NOT retried — it may have landed`, async () => {
+      // grammY calls res.json() without checking the HTTP status, so Telegram's
+      // own 5xx and 429 envelopes arrive as GrammyError just like a 400 does.
+      // Those can follow a backend that already accepted the upload, so
+      // retrying them re-opens the double-send through the success path.
+      const h = await harness(`job-board=${boardPath}`);
+      h.bot.documentFailures = [telegramError("upstream trouble", error_code)];
+      const { status } = await post(h, "/push-document", {
+        board: "job-board",
+        caption: "summary",
+        parseMode: "Markdown",
+      });
+      assert.equal(h.bot.documents.length, 1, `error_code ${error_code} uploaded twice`);
+      assert.equal(status, 502);
+    });
+  }
+
+  test("only a 400 is retried — the parse-entities case the retry exists for", async () => {
+    const h = await harness(`job-board=${boardPath}`);
+    h.bot.documentFailures = [telegramError("Bad Request: can't parse entities", 400)];
+    const { status, body } = await post(h, "/push-document", {
+      board: "job-board",
+      caption: "*unbalanced",
+      parseMode: "Markdown",
+    });
+    assert.equal(status, 200);
+    assert.equal(body.parseModeDropped, true);
+    assert.equal(h.bot.documents.length, 2);
+  });
+
   test("a retry that also fails is 502 after exactly two attempts", async () => {
     const h = await harness(`job-board=${boardPath}`);
     h.bot.documentFailures = [
@@ -387,6 +444,35 @@ describe("the 502 body carries no upstream detail", () => {
     const { body } = await post(h, "/push-document", { board: "other" });
     assert.doesNotMatch(String(body.error), /Job Board|\/tmp\//);
     assert.match(String(body.error), /job-board/);
+  });
+});
+
+describe("the 500 body carries no filesystem path", () => {
+  // chmod 000 does not stop root, so the EACCES these depend on would not
+  // happen. Skipping beats a false failure in a container that runs as root.
+  const asRoot = process.getuid?.() === 0;
+
+  test("a read failure after the stat guard is 500 with no path in the body", { skip: asRoot }, async () => {
+    // readBoardFile stats, then reads. A failure on the READ is not a
+    // DocumentError, so it falls through to the outer catch — where the fs
+    // error's message is the configured absolute path. EACCES here; the same
+    // hole is open for EISDIR, and for the board being swapped between the
+    // stat and the read, which the generator rewriting that file makes live.
+    const h = await harness(`secret=${unreadablePath}`);
+    const { status, body } = await post(h, "/push-document", { board: "secret" });
+    assert.equal(status, 500);
+    const text = String(body.error);
+    assert.doesNotMatch(text, /Secret Vault Board/);
+    assert.doesNotMatch(text, /\/tmp\//);
+    assert.doesNotMatch(text, /permission denied/);
+    // Still actionable: the errno constant is named, and it carries no path.
+    assert.match(text, /EACCES/);
+  });
+
+  test("the outer catch names the failure class, not its message", { skip: asRoot }, async () => {
+    const h = await harness(`secret=${unreadablePath}`);
+    const { body } = await post(h, "/push-document", { board: "secret" });
+    assert.match(String(body.error), /^request failed: /);
   });
 });
 

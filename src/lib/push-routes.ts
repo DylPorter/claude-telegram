@@ -104,6 +104,28 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
+ * Describe ANY error without quoting its message.
+ *
+ * Used by the outer catch, where the error could be almost anything — most
+ * consequentially an `fs` error from `readBoardFile`'s `readFile`. That call
+ * runs after the `stat` guard and is NOT wrapped in a `DocumentError`, so an
+ * EACCES, an EISDIR, or the board being swapped between the stat and the read
+ * (a live race: the generator rewrites that exact file) fell straight through
+ * to a body of `(err as Error).message` — which for an fs error is the
+ * configured ABSOLUTE PATH, verbatim. From there it reached the journal, and
+ * the Telegram bubble via the client's `resp.text[:200]` relay. Exactly the
+ * leak the 502 branch below was fixed to close, one catch further out.
+ *
+ * `code` is safe to name — it is a short constant like `EACCES`, never a path —
+ * and it is the only part a reader can act on.
+ */
+function describeError(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  const name = err instanceof Error ? err.constructor.name : typeof err;
+  return typeof code === "string" ? `${name} (${code})` : name;
+}
+
+/**
  * Describe a failed Telegram call WITHOUT quoting the underlying error text.
  *
  * The message on a transport failure is whatever the HTTP stack produced, and
@@ -200,12 +222,29 @@ async function handlePushDocument(
     // regression this whole shape exists to prevent, arriving through a
     // success path nobody was watching.
     //
-    // `GrammyError` is the discriminator that makes it safe: it means Telegram
-    // answered `ok: false`, so no message exists. A transport failure is NOT
-    // that, and is never retried. The retry also has to have something to
-    // change — dropping a `parse_mode` that was never set reissues a
-    // byte-identical request.
-    const retryable = err instanceof GrammyError && caption !== undefined && parseMode !== undefined;
+    // `GrammyError` alone is NOT a safe discriminator, though the first attempt
+    // at this assumed it was ("Telegram answered ok:false, so no message
+    // exists"). grammY's `callApi` calls `res.json()` unconditionally and never
+    // looks at the HTTP status (core/client.js:50), so Telegram's own 5xx and
+    // 429 responses — which arrive as `ok: false` JSON envelopes — become
+    // `GrammyError` too. Those can follow a backend that ALREADY accepted the
+    // upload, so retrying on them re-opened the double-send through the success
+    // path: error_code 500/502/429 each produced two uploads and a 200.
+    //
+    // `error_code === 400` is the discriminator that actually holds. A 400 is
+    // Telegram refusing to accept the request at all, so nothing was created.
+    // It is also exactly the case the retry exists for — "can't parse entities"
+    // is a 400 — so narrowing this costs the legitimate path nothing. A 429 is
+    // excluded on its own merits as well: dropping a parse mode cannot fix a
+    // flood-wait, and this ignores `retry_after`.
+    //
+    // The retry also has to have something to change — dropping a `parse_mode`
+    // that was never set reissues a byte-identical request.
+    const retryable =
+      err instanceof GrammyError &&
+      err.error_code === 400 &&
+      caption !== undefined &&
+      parseMode !== undefined;
     if (retryable) {
       try {
         const msg = await bot.api.sendDocument(config.chatId, new InputFile(file, filename), {
@@ -314,8 +353,12 @@ export function createPushServer(bot: PushBot, config: PushServerConfig): Server
 
       await handlePush(bot, config, req, res);
     } catch (err) {
-      console.error("[push] error", err);
-      writeJson(res, 500, { error: (err as Error).message });
+      // Classified, never echoed — and the error OBJECT is never logged either,
+      // because its `path`/`stack` carry the same absolute path the message
+      // does. See `describeError`.
+      const reason = describeError(err);
+      console.error(`[push] unhandled error on ${req.method} ${req.url}: ${reason}`);
+      writeJson(res, 500, { error: `request failed: ${reason}` });
     }
   });
 }

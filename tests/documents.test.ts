@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, open, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, describe } from "node:test";
@@ -220,14 +220,21 @@ describe("readBoardFile", () => {
     assert.equal(MAX_DOCUMENT_BYTES, 50 * 1024 * 1024);
   });
 
-  test("the guard fires before the read — an oversized file is stat'd, not loaded", async () => {
+  test("the guard fires before the read — the file is never opened", async () => {
+    // Structural, not timed: an earlier version asserted a wall-clock ceiling,
+    // which is a flake waiting for a loaded machine. A sparse 51 MB file is
+    // refused by SIZE; a `stat` sees that instantly, while a read would have to
+    // pull 51 MB. Chmod 000 removes the ambiguity entirely — if the guard did
+    // not run first, the open would fail with EACCES (a 404 from the catch)
+    // rather than the 413 the size branch produces.
     const dir = await mkdtemp(join(tmpdir(), "push-doc-"));
     const path = join(dir, "board.html");
-    await writeFile(path, "x".repeat(4 * 1024 * 1024));
-    const started = process.hrtime.bigint();
-    await caughtAsync(readBoardFile(path, 1024));
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(elapsedMs < 50, `refusal took ${elapsedMs}ms — it looks like the file was read`);
+    const handle = await open(path, "w");
+    await handle.truncate(51 * 1024 * 1024);
+    await handle.close();
+    await chmod(path, 0o000);
+    const err = await caughtAsync(readBoardFile(path));
+    assert.equal(err.status, 413, "an unreadable file was opened before its size was checked");
   });
 });
 
