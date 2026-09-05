@@ -35,6 +35,33 @@ PUSH_HOST = os.environ.get("PUSH_HOST", "127.0.0.1")
 PUSH_PORT = int(os.environ.get("PUSH_PORT", "7421"))
 PUSH_SECRET = os.environ.get("PUSH_SECRET", "")
 PUSH_URL = f"http://{PUSH_HOST}:{PUSH_PORT}/push"
+PUSH_DOCUMENT_URL = f"http://{PUSH_HOST}:{PUSH_PORT}/push-document"
+
+# ---------------------------------------------------------------------------
+# Board attachment — send the HTML board to Telegram as a document, so it is
+# readable on a phone instead of only on the machine that wrote it.
+#
+# UNSET = OFF, and that is the default on purpose: the sibling project and
+# anyone else running this fleet must be unaffected by the feature existing, and
+# the operator must be able to turn it off without editing code.
+#
+# The value is the board KEY the bot serves out of its own PUSH_DOCUMENTS
+# allowlist — NOT a path. This process never tells the bot which file to read;
+# it names a key the bot has already been configured to map to a file. That is
+# what stops the delivery endpoint being an arbitrary-file-read primitive, so
+# do not "helpfully" turn this into a path.
+BOARD_ATTACH_ENV = "JOB_SIFT_BOARD_ATTACH"
+
+
+def board_attach_key() -> str | None:
+    """The bot-side board key to attach to the digest, or None when off.
+
+    Read at CALL time, not import time, so a one-off run (or a test) can toggle
+    it with the env var without re-importing the package — same convention as
+    JOB_SIFT_BOARD_PATH.
+    """
+    key = os.environ.get(BOARD_ATTACH_ENV, "").strip()
+    return key or None
 
 # Claude CLI for classification. Same conventions as signal-brief.
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")

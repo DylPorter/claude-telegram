@@ -46,6 +46,33 @@ side's feed is missing or unreadable, the tab SAYS SO rather than rendering an
 empty table — "the other service found nothing" and "I could not read the
 other service's feed" are different facts.
 
+### Getting it onto a phone
+
+The board is a file on a Linux filesystem, which is not where it gets read.
+Setting `JOB_SIFT_BOARD_ATTACH` to a board key the bot serves makes the daily
+run deliver the board as a Telegram **document attachment**, so it opens in the
+phone's browser.
+
+It is still **one notification**. The summary bubble becomes the document's
+CAPTION rather than a message of its own — attaching the board does not add a
+bubble to a fleet that was deliberately cut to ~5 a day. Unset (the default)
+nothing changes at all.
+
+The value is a KEY, not a path. The bot holds the key → path allowlist in its
+own `PUSH_DOCUMENTS`; this side cannot ask it for an arbitrary file. Set both:
+
+```sh
+# claude-telegram/.env  — the bot's allowlist
+PUSH_DOCUMENTS=job-board=/absolute/path/to/Job Board.html
+
+# job-sift/.env         — which key this run attaches
+JOB_SIFT_BOARD_ATTACH=job-board
+```
+
+If the attachment fails — bot down, file missing, board over Telegram's 50 MB
+document limit — the summary bubble still goes, with the reason appended. A
+board that did not reach the phone must not look like a quiet day.
+
 ## The purge
 
 Broad capture grows without bound, so rows leave on two clocks — either is
@@ -418,6 +445,9 @@ JOB_SIFT_MODEL=haiku
 # The board. Any absolute path — the file has no dependencies, so it is meant
 # to be copied to another machine and opened from disk.
 # JOB_SIFT_BOARD_PATH=Areas/Work/Job Board.html
+# Attach the board to the digest as a Telegram document. UNSET = OFF. The value
+# is a board KEY out of the BOT's PUSH_DOCUMENTS allowlist, never a path.
+# JOB_SIFT_BOARD_ATTACH=job-board
 # Where job-sift PUBLISHES its rows for hk-events' Jobs tab.
 # JOB_SIFT_JOBS_FEED=.data/state/jobs_feed.json
 # Where it READS hk-events' rows for its own Events tab. Missing → the tab says

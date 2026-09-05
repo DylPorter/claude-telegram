@@ -42,10 +42,10 @@ from job_sift.open_roles import (
     save_open_roles,
     upsert_roles,
 )
-from job_sift.render import render, render_open_roles, render_vault_archive
+from job_sift.render import render, render_open_roles, render_vault_archive, summary_index
 from job_sift.schema import ClassifierResult, JobListing
 from job_sift.sources import ashby, cedars, greenhouse, lever, linkedin
-from job_sift.telegram_client import push_messages
+from job_sift.telegram_client import push_document, push_messages, push_with_board
 from job_sift.vault_note import read_open_roles_note, write_archive, write_open_roles
 
 log = logging.getLogger("job_sift")
@@ -419,6 +419,31 @@ def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
         return _BoardWrite(None, f"could not be written to {path}")
 
 
+
+def _deliver(messages: list[str], board, *, staleness_alarm, drop_notice) -> None:
+    """Push the run's messages, attaching the HTML board when it is configured.
+
+    Still ONE notification. With `JOB_SIFT_BOARD_ATTACH` set to a board key the bot
+    serves, the summary bubble is delivered as the CAPTION of the board
+    document instead of as a message of its own; unset (the default), or on a
+    run that wrote no board, this is byte-for-byte the old push.
+
+    `push_messages` / `push_document` are passed explicitly rather than
+    resolved inside `push_with_board`, so they are read out of THIS module's
+    namespace at call time — which is where the suite patches the transport.
+    """
+    push_with_board(
+        messages,
+        summary_index=summary_index(
+            staleness_alarm=staleness_alarm, drop_notice=drop_notice
+        ),
+        board_key=config.board_attach_key(),
+        board_written=board.path is not None,
+        send_text=push_messages,
+        send_document=push_document,
+    )
+
+
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
     _setup_logging()
     today = date.today()
@@ -494,7 +519,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         roles, purged = _update_open_roles([], today, dry_run=dry_run)
         board = _write_board(roles, today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, purged=purged))
+            _deliver(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, purged=purged), board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
             write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -621,7 +646,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             print(m)
             print("---")
     else:
-        push_messages(messages)
+        _deliver(messages, board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
         log.info("pushed %d messages", len(messages))
 
         # 6. Persist the seen-set IMMEDIATELY after a successful push, and

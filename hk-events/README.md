@@ -34,6 +34,31 @@ feed is missing or unreadable the tab SAYS SO rather than rendering an empty
 table — "job-sift is tracking no roles" and "I could not read job-sift's feed"
 are different facts.
 
+#### Getting it onto a phone
+
+The board is a file on a Linux filesystem, which is not where it gets read.
+Setting `HK_EVENTS_BOARD_ATTACH` to a board key the bot serves makes the daily
+run deliver the board as a Telegram **document attachment**, so it opens in the
+phone's browser.
+
+Still **one notification**: the summary bubble becomes the document's CAPTION
+rather than a message of its own. Unset (the default) nothing changes.
+
+The value is a KEY, not a path — the bot holds the key → path allowlist in its
+own `PUSH_DOCUMENTS`, so this side cannot ask it for an arbitrary file:
+
+```sh
+# claude-telegram/.env  — the bot's allowlist
+PUSH_DOCUMENTS=events-board=/absolute/path/to/Events Board.html
+
+# hk-events/.env        — which key this run attaches
+HK_EVENTS_BOARD_ATTACH=events-board
+```
+
+If the attachment fails — bot down, file missing, board over Telegram's 50 MB
+document limit — the summary bubble still goes with the reason appended. The
+silence gate is unchanged: a run that stays silent attaches nothing either.
+
 ### The purge
 
 Rows leave the register on three clocks (`hk_events/open_events.py`):
@@ -130,6 +155,9 @@ hk-events-specific knobs are in `.env.example` — notably:
 - `HK_EVENTS_BOARD_PATH` — where to write the HTML board. Any absolute path;
   the file has no dependencies, so it is meant to be copied elsewhere and
   opened from disk.
+- `HK_EVENTS_BOARD_ATTACH` — attach the board to the digest as a Telegram
+  document. UNSET = OFF. The value is a board KEY out of the BOT's
+  `PUSH_DOCUMENTS` allowlist, never a path.
 - `HK_EVENTS_EVENTS_FEED` / `HK_EVENTS_JOBS_FEED` — the two halves of the file
   handoff with job-sift. A missing jobs feed makes the Jobs tab say so; it never
   renders a fake zero.

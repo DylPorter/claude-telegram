@@ -183,6 +183,15 @@ _PATH_ENV_VARS = (
 _FEED_ENV_VARS = ("HK_EVENTS_EVENTS_FEED", "HK_EVENTS_JOBS_FEED")
 
 
+#: Not a path, but it steers DELIVERY, and it is read out of the operator's real
+#: `.env` at import like everything else here. Left set, a suite run on his
+#: machine would take the board-attachment branch and call the REAL
+#: `push_document` — which the `no_network` guard would then trip, in a test
+#: that has nothing to do with attachment. Cleared for the same reason the path
+#: vars are: a test must opt IN to the behaviour it is about.
+_DELIVERY_ENV_VARS = ("HK_EVENTS_BOARD_ATTACH",)
+
+
 def _snapshot(path):
     """(name, size, mtime_ns) for every file under `path`, or None if absent.
 
@@ -228,7 +237,7 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(config, "HK_EVENTS_ARCHIVE_DIR", vault / "Inbox" / "HK Events")
     monkeypatch.setattr(config, "BOARD_PATH", vault / "Areas" / "Work" / "Events Board.html")
 
-    for name in _PATH_ENV_VARS:
+    for name in (*_PATH_ENV_VARS, *_DELIVERY_ENV_VARS):
         monkeypatch.delenv(name, raising=False)
     for name in _FEED_ENV_VARS:
         monkeypatch.setenv(name, str(state / f"{name.lower()}.json"))

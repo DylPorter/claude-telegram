@@ -42,7 +42,7 @@ from hk_events.open_events import (
     upcoming,
     upsert_events,
 )
-from hk_events.render import render, render_vault_archive
+from hk_events.render import render, render_vault_archive, summary_index
 from hk_events.schema import Event, RelevanceResult
 from hk_events.sources import (
     aitinkerers,
@@ -52,7 +52,7 @@ from hk_events.sources import (
     meetup,
     startmeuphk,
 )
-from hk_events.telegram_client import push_messages
+from hk_events.telegram_client import push_document, push_messages, push_with_board
 from hk_events.vault_note import write_archive
 
 log = logging.getLogger("hk_events")
@@ -296,6 +296,31 @@ def _write_board(records: list[OpenEvent], today: date, *, dry_run: bool):
         return _BoardWrite(None, f"could not be written to {path}")
 
 
+
+def _deliver(messages: list[str], board, *, staleness_alarm, drop_notice) -> None:
+    """Push the run's messages, attaching the HTML board when it is configured.
+
+    Still ONE notification. With `HK_EVENTS_BOARD_ATTACH` set to a board key the bot
+    serves, the summary bubble is delivered as the CAPTION of the board
+    document instead of as a message of its own; unset (the default), or on a
+    run that wrote no board, this is byte-for-byte the old push.
+
+    `push_messages` / `push_document` are passed explicitly rather than
+    resolved inside `push_with_board`, so they are read out of THIS module's
+    namespace at call time — which is where the suite patches the transport.
+    """
+    push_with_board(
+        messages,
+        summary_index=summary_index(
+            staleness_alarm=staleness_alarm, drop_notice=drop_notice
+        ),
+        board_key=config.board_attach_key(),
+        board_written=board.path is not None,
+        send_text=push_messages,
+        send_document=push_document,
+    )
+
+
 def run(*, dry_run: bool = False, stub: bool = False) -> int:
     _setup_logging()
     today = date.today()
@@ -376,7 +401,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         records, purged = _update_event_register([], {}, today, dry_run=dry_run)
         board = _write_board(records, today, dry_run=dry_run)
         if not dry_run:
-            push_messages(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, upcoming_count=len(upcoming(records)), purged=purged))
+            _deliver(render(surfaced=[], total_new=0, total_processed=0, calendar_stats=None, today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, upcoming_count=len(upcoming(records)), purged=purged), board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
             write_archive(today, render_vault_archive(surfaced=[], dropped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -481,7 +506,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
             # a source that was carrying a live alarm has just left the counters
             # because it had no config. Staying silent about that is how a real
             # alarm gets deleted by a YAML edit that nobody meant to make.
-            push_messages(messages)
+            _deliver(messages, board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
             log.info("pushed %d messages", len(messages))
 
         # 6. Persist the seen-set as soon as delivery has settled — a push that
