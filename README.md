@@ -110,6 +110,8 @@ All env vars live in `.env`:
 | `STATE_DIR` | Where per-chat session state is stored | _(required)_ |
 | `CLAUDE_MODEL` | `sonnet`, `haiku`, `opus`, or a full model id | `sonnet` |
 | `CLAUDE_EFFORT` | Thinking budget: `low`, `medium`, `high`, `xhigh`, `max` | `low` |
+| `PUSH_PORT` / `PUSH_SECRET` | Localhost `/push` server for scheduled briefs | `7421` / _(required)_ |
+| `PUSH_DOCUMENTS` | Allowlist for `/push-document`: `key=/abs/path,…` | _(unset — endpoint disabled)_ |
 
 To bump the default model permanently, edit `.env` and `systemctl --user restart claude-telegram`.
 
@@ -135,6 +137,7 @@ To bump the default model permanently, edit `.env` and `systemctl --user restart
 - Claude runs with `--permission-mode bypassPermissions`. The bot effectively has the same filesystem + shell access as the user running the systemd service. **Don't run this on a machine where that would be unacceptable.**
 - The bot makes outbound connections to Telegram only. No inbound ports.
 - `.env` contains a long-lived bot token — keep it out of version control (already in `.gitignore`).
+- `POST /push-document` sends a file to your chat as a document attachment. A caller names a **key**, never a path: the key → path mapping lives only in `PUSH_DOCUMENTS`, so the endpoint cannot be used to read an arbitrary file even by something that already holds the push secret. `PUSH_DOCUMENTS` unset (the default) disables the endpoint entirely. Only list files you are willing to have delivered to your Telegram account.
 
 ## Architecture
 

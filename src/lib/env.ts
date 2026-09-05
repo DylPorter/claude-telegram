@@ -12,6 +12,10 @@ const envSchema = z.object({
   // Outbound /push HTTP server for scheduled briefs and external pushes.
   PUSH_PORT: z.string().regex(/^\d+$/).default("7421").transform((s) => Number(s)),
   PUSH_SECRET: z.string().min(16, "PUSH_SECRET must be at least 16 chars"),
+  // Allowlist for POST /push-document: "key=/abs/path,key2=/abs/path".
+  // UNSET = document delivery is off and the endpoint refuses. Callers name a
+  // key, never a path, so this is the only place a sendable path can come from.
+  PUSH_DOCUMENTS: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

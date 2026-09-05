@@ -190,6 +190,15 @@ _PATH_ENV_VARS = (
 _FEED_ENV_VARS = ("JOB_SIFT_JOBS_FEED", "JOB_SIFT_EVENTS_FEED")
 
 
+#: Not a path, but it steers DELIVERY, and it is read out of the operator's real
+#: `.env` at import like everything else here. Left set, a suite run on his
+#: machine would take the board-attachment branch and call the REAL
+#: `push_document` — which the `no_network` guard would then trip, in a test
+#: that has nothing to do with attachment. Cleared for the same reason the path
+#: vars are: a test must opt IN to the behaviour it is about.
+_DELIVERY_ENV_VARS = ("JOB_SIFT_BOARD_ATTACH",)
+
+
 def _snapshot(path, exclude=frozenset()):
     """(size, mtime_ns) per file, not mere existence — the notes this suite can
     clobber ALREADY EXIST on a real machine, so an existence check catches
@@ -242,7 +251,7 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
         refresh_cookie, "CEDARS_COOKIES_PATH", cookies / "cedars.json", raising=False
     )
 
-    for name in _PATH_ENV_VARS:
+    for name in (*_PATH_ENV_VARS, *_DELIVERY_ENV_VARS):
         monkeypatch.delenv(name, raising=False)
     for name in _FEED_ENV_VARS:
         monkeypatch.setenv(name, str(state / f"{name.lower()}.json"))

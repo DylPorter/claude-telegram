@@ -86,8 +86,28 @@ def _prepend_alarm(
     tracked". Both go above the digest for the same reason — a reader who stops
     after the first bubble must have seen it before they read "none today".
     """
-    banners = [b for b in (staleness_alarm, drop_notice) if b]
-    return banners + messages
+    return _banners(staleness_alarm, drop_notice) + messages
+
+
+def _banners(staleness_alarm: str | None, drop_notice: str | None) -> list[str]:
+    """The standing banners, in the order they lead the digest."""
+    return [b for b in (staleness_alarm, drop_notice) if b]
+
+
+def summary_index(
+    *,
+    staleness_alarm: str | None = None,
+    drop_notice: str | None = None,
+) -> int:
+    """Which entry of `render()`'s list is the summary bubble.
+
+    Board attachment replaces the summary bubble with a document carrying the
+    same text as its caption, so delivery has to know which entry that is. It is
+    computed from the same `_banners` the prepend uses rather than re-derived,
+    so it cannot drift from the ordering it describes — `render` puts the
+    banners first and everything else (the summary, then source health) after.
+    """
+    return len(_banners(staleness_alarm, drop_notice))
 
 
 def _closing_line(open_roles: list[OpenRole] | None, today: date) -> str:
