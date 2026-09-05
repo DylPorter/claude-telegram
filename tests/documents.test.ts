@@ -14,6 +14,7 @@ import { test, describe } from "node:test";
 import {
   DocumentError,
   DocumentConfigError,
+  loadDocumentRegistry,
   MAX_CAPTION_LEN,
   MAX_DOCUMENT_BYTES,
   assertCaptionFits,
@@ -197,7 +198,94 @@ describe("readBoardFile", () => {
     assert.equal((await caughtAsync(readBoardFile(path))).status, 422);
   });
 
-  test("the size guard is stated in bytes and matches Telegram's limit", () => {
+  test("a file over the limit is refused with 413, and is NOT read", async () => {
+    // Behaviour, not the constant restated back at itself: the limit is
+    // injected so the over-size BRANCH can run without writing 50 MB.
+    const dir = await mkdtemp(join(tmpdir(), "push-doc-"));
+    const path = join(dir, "board.html");
+    await writeFile(path, "x".repeat(1024));
+    const err = await caughtAsync(readBoardFile(path, 512));
+    assert.equal(err.status, 413);
+    assert.match(err.message, /1024 bytes/);
+  });
+
+  test("a file exactly at the limit is allowed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "push-doc-"));
+    const path = join(dir, "board.html");
+    await writeFile(path, "x".repeat(512));
+    assert.equal((await readBoardFile(path, 512)).byteLength, 512);
+  });
+
+  test("the default limit is Telegram's document ceiling", () => {
     assert.equal(MAX_DOCUMENT_BYTES, 50 * 1024 * 1024);
+  });
+
+  test("the guard fires before the read — an oversized file is stat'd, not loaded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "push-doc-"));
+    const path = join(dir, "board.html");
+    await writeFile(path, "x".repeat(4 * 1024 * 1024));
+    const started = process.hrtime.bigint();
+    await caughtAsync(readBoardFile(path, 1024));
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(elapsedMs < 50, `refusal took ${elapsedMs}ms — it looks like the file was read`);
+  });
+});
+
+describe("loadDocumentRegistry", () => {
+  test("a good allowlist parses with no problem", () => {
+    const { registry, problem } = loadDocumentRegistry("k=/srv/a.html");
+    assert.equal(registry.get("k"), "/srv/a.html");
+    assert.equal(problem, null);
+  });
+
+  test("unset is not a problem — it is the default-off state", () => {
+    const { registry, problem } = loadDocumentRegistry(undefined);
+    assert.equal(registry.size, 0);
+    assert.equal(problem, null);
+  });
+
+  test("a malformed allowlist DEGRADES rather than throwing", () => {
+    // The throw would land before bot.start() in a unit that restarts on
+    // failure with no StartLimit override — one typo in an optional feature
+    // would take the whole bot down and keep it down.
+    const { registry, problem } = loadDocumentRegistry("k=relative/path.html");
+    assert.equal(registry.size, 0);
+    assert.ok(problem);
+  });
+
+  test("the reason survives into the 503 the endpoint answers with", () => {
+    const { registry, problem } = loadDocumentRegistry("k=relative/path.html");
+    const err = caught(() => resolveBoardPath(registry, "k", problem));
+    assert.equal(err.status, 503);
+    assert.match(err.message, /document delivery disabled/);
+  });
+
+  test("an unset registry still says 'not configured', not 'disabled'", () => {
+    const { registry, problem } = loadDocumentRegistry("");
+    assert.match(caught(() => resolveBoardPath(registry, "k", problem)).message, /not configured/);
+  });
+
+  test("a config problem never echoes the offending path back", () => {
+    // It reaches the journal AND, via the 503, the operator's digest bubble.
+    const { problem } = loadDocumentRegistry("k=srv/private/vault/Job Board.html");
+    assert.ok(problem);
+    assert.doesNotMatch(problem, /vault|Job Board/);
+    assert.match(problem, /entry #1/);
+  });
+});
+
+describe("documentFilename fallback key", () => {
+  test("an untrimmed fallback key cannot reintroduce a space", () => {
+    assert.equal(documentFilename("/srv/###.html", "  job-board  "), "job-board.html");
+  });
+
+  test("a CRLF fallback key cannot break the unquoted filename header", () => {
+    const name = documentFilename("/srv/###.html", "a\r\nb");
+    assert.doesNotMatch(name, /[\r\n]/);
+    assert.match(name, /\.html$/);
+  });
+
+  test("a fallback key that slugifies to nothing still yields a valid name", () => {
+    assert.equal(documentFilename("/srv/###.html", "!!!"), "board.html");
   });
 });
