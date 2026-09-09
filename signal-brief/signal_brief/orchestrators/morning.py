@@ -3,9 +3,12 @@
 Fetch all sources → LLM filter → write daily note → push chunked Telegram.
 
 Telegram carries five bubbles: intro, Today's Signal, Broad Tech/AI, Bubble
-Breaker, Quiet rest. Thread reconciliation, the filter rationale and the
-suppressed list all still run and are still written to the daily note; none of
-them notify any more.
+Breaker, Quiet rest. The filter rationale and the suppressed list still run and
+are still written to the daily note; neither notifies any more.
+
+Thread reconciliation is gated behind `SIGNAL_BRIEF_THREADS_ENABLED` and is OFF
+by default — no agent call, no daily-note section, no snapshot write. See
+`config.threads_enabled` for why, and `--dry-run` for what it looks like on.
 
 Usage:
     .venv/bin/python -m signal_brief.orchestrators.morning            # full run
@@ -22,6 +25,7 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from signal_brief import config
 from signal_brief.config import LOG_DIR, assert_required
 from signal_brief.daily_note import upsert_signal_section, upsert_threads_section
 from signal_brief.exposure import record_digest
@@ -32,6 +36,10 @@ from signal_brief.render import (
     render_threads_for_daily_note,
 )
 from signal_brief.schema import Item
+# The module, not a `from ... import THREADS_STATE_PATH`: that path is one of
+# the names the suite's sandbox redirects, and binding it here at import time
+# would quietly escape the redirect (see signal-brief/conftest.py).
+from signal_brief import threads as threads_mod
 from signal_brief.threads import reconcile_threads, save_threads
 from signal_brief.sources import (
     fetch_conferences,
@@ -96,6 +104,19 @@ def main() -> int:
     log.info("=== morning brief %s (dry_run=%s no_cache=%s) ===",
              today, args.dry_run, args.no_cache)
 
+    # Said once, at startup, so a future reader finds a REASON where the
+    # section used to be rather than a silent absence.
+    threads_on = config.threads_enabled()
+    if not threads_on:
+        log.info(
+            "thread reconciliation DISABLED (%s unset or false) — no agent call, "
+            "no '## 🧵 Thread Reconciliation' section, no snapshot write. The "
+            "existing %s is left untouched. Set %s=1 to restore it.",
+            config.THREADS_ENABLED_ENV,
+            threads_mod.THREADS_STATE_PATH,
+            config.THREADS_ENABLED_ENV,
+        )
+
     if args.items_from:
         # Test path: pre-collected items from JSON.
         with open(args.items_from) as f:
@@ -112,18 +133,26 @@ def main() -> int:
     # Thread reconciliation: diff prior thread snapshot against what actually
     # happened (daily-note live-capture + git) instead of regenerating stale
     # state. Degrades cleanly — never crashes the brief.
-    try:
-        reconcile = reconcile_threads(today=today)
-    except Exception as e:  # belt-and-braces; reconcile_threads already degrades
-        log.exception("thread reconciliation crashed: %s — skipping threads", e)
-        reconcile = None
+    #
+    # Gated OFF by default (see config.threads_enabled). The guard is here, at
+    # the call, rather than inside `reconcile_threads`, so that switching it off
+    # skips the Sonnet subprocess entirely — the cost is the point of the
+    # switch, and a version that ran the pass and then discarded the answer
+    # would save nothing.
+    reconcile = None
+    if threads_on:
+        try:
+            reconcile = reconcile_threads(today=today)
+        except Exception as e:  # belt-and-braces; reconcile_threads already degrades
+            log.exception("thread reconciliation crashed: %s — skipping threads", e)
+            reconcile = None
 
     daily_note_md = render_for_daily_note(digest)
     threads_note_md = render_threads_for_daily_note(reconcile) if reconcile else ""
 
     # Telegram gets the five signal bubbles and nothing else. Thread
-    # reconciliation still runs and still lands in the daily note above — it
-    # just stopped notifying (operator call, 2026-09-04).
+    # reconciliation never notified even when it was on (operator call,
+    # 2026-09-04); it now does not run at all unless the flag is set.
     all_messages = render_for_telegram(digest)
 
     if args.dry_run:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BOT_ROOT = PROJECT_ROOT.parent  # claude-telegram/
@@ -53,6 +56,51 @@ SIGNAL_BRIEF_MODEL = os.environ.get("SIGNAL_BRIEF_MODEL", "sonnet")
 # to low|medium|high|xhigh|max and now warns + ignores anything else. "medium"
 # is the equivalent of the old "normal" default.
 SIGNAL_BRIEF_EFFORT = os.environ.get("SIGNAL_BRIEF_EFFORT", "medium")
+
+# ---------------------------------------------------------------------------
+# Thread reconciliation (signal_brief/threads.py) — OFF unless asked for.
+#
+# The pass costs one Sonnet call every morning, and it cannot make progress on
+# a thread older than its own evidence window: it reasons over the last
+# `threads.RECENT_DAYS` daily-note live-capture sections and the same span of
+# vault git commits, so a thread whose last update predates that window has no
+# evidence either way, forever. Left on, the run re-derived the same stuck
+# answer daily and stated it with more confidence than the evidence carried.
+#
+# Gated rather than deleted: the reconciliation logic, its renderer and its
+# snapshot format are all still here and still tested, so turning the flag back
+# on restores the feature exactly. The persisted snapshot
+# (`.data/cache/threads.json`) is NOT touched when the flag is off — turning a
+# feature off must not destroy its state.
+THREADS_ENABLED_ENV = "SIGNAL_BRIEF_THREADS_ENABLED"
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"", "0", "false", "no", "off"}
+
+
+def threads_enabled() -> bool:
+    """True only when explicitly switched on. Default OFF.
+
+    Read at CALL time through the `config` MODULE, never bound at import — the
+    same convention as `job_sift.config.board_attach_key` and
+    `job_sift.dedupe`, and for the same reason: a caller (or a test) that sets
+    the env var must actually change what the next run does, and a
+    `from ... import THREADS_ENABLED` binding silently would not.
+
+    An unrecognised value is treated as OFF and said out loud. Silently
+    guessing "on" for a typo is how a switched-off Sonnet call comes back.
+    """
+    raw = os.environ.get(THREADS_ENABLED_ENV, "").strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw not in _FALSE:
+        log.warning(
+            "%s=%r is not a boolean — treating thread reconciliation as OFF",
+            THREADS_ENABLED_ENV,
+            raw,
+        )
+    return False
+
 
 # Path to the vault-link-health skill the weekly job drives. Machine-specific,
 # so it is configuration rather than a literal in a prompt string; the default
