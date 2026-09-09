@@ -133,6 +133,45 @@ def _closing_line(open_roles: list[OpenRole] | None, today: date) -> str:
     return f"\n⏰ Closing: {'; '.join(items)}{more}"
 
 
+def _board_lines(
+    board_url: str | None,
+    board_path,
+    board_problem: str | None,
+) -> list[str]:
+    """The board line(s) of the summary bubble. One bubble, either way.
+
+    Three states, and they must stay distinguishable:
+
+      * SERVED — a URL is configured. The reader gets a tappable link, and the
+        ~50 KB file stops being re-sent daily to say the same thing. If this
+        run did not rewrite the board, the link still points at whatever was
+        served last, so the staleness is stated rather than implied: a link
+        that silently serves yesterday's rows is the failure this codebase
+        keeps deleting.
+      * WRITTEN, NOT SERVED — the old line, an on-disk path.
+      * NEITHER — the reason, which is whatever was actually observed.
+
+    Note the URL branch does not depend on `board_path`: serving is somebody
+    else's job (a web server over the file), so "was it rewritten this run" and
+    "can it be read" are separate facts and are reported separately.
+    """
+    if board_url:
+        out = [f"🗂 [Board]({board_url})"]
+        if not board_path:
+            why = board_problem or "reason unrecorded"
+            out.append(f"⚠️ Not refreshed this run ({why}) — the link may be stale.")
+        return out
+    if board_path:
+        return [f"🗂 Board: `{board_path}`"]
+    # Said out loud rather than omitted: a summary that points nowhere,
+    # silently, reads as a summary that had nothing to point at. And the
+    # REASON is whatever actually happened — this line used to hardcode
+    # "no board path configured" for a `None` that also meant a render
+    # exception, which is a cause reported without being checked.
+    why = board_problem or "reason unrecorded"
+    return [f"🗂 Board: not written this run ({why})."]
+
+
 def render(
     *,
     surfaced: list[tuple[JobListing, ClassifierResult]],
@@ -146,6 +185,7 @@ def render(
     drop_notice: str | None = None,
     board_path=None,
     board_problem: str | None = None,
+    board_url: str | None = None,
     purged: int = 0,
 ) -> list[str]:
     """Build the message list for /push. ONE summary bubble, plus exemptions.
@@ -183,16 +223,7 @@ def render(
     lines.append(
         f"_Processed {total_processed} listings, {total_new} new._"
     )
-    if board_path:
-        lines.append(f"🗂 Board: `{board_path}`")
-    else:
-        # Said out loud rather than omitted: a summary that points nowhere,
-        # silently, reads as a summary that had nothing to point at. And the
-        # REASON is whatever actually happened — this line used to hardcode
-        # "no board path configured" for a `None` that also meant a render
-        # exception, which is a cause reported without being checked.
-        why = board_problem or "reason unrecorded"
-        lines.append(f"🗂 Board: not written this run ({why}).")
+    lines.extend(_board_lines(board_url, board_path, board_problem))
 
     out = ["\n".join(lines)]
     if health:

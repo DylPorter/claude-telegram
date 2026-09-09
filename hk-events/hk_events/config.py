@@ -64,6 +64,49 @@ def board_attach_key() -> str | None:
     key = os.environ.get(BOARD_ATTACH_ENV, "").strip()
     return key or None
 
+
+# ---------------------------------------------------------------------------
+# Board URL — where the board is SERVED, when it is served at all.
+#
+# Set it and the summary bubble carries a link instead of the digest carrying a
+# ~50 KB HTML attachment. The URL is always current, so re-sending the file
+# every morning only accumulates copies of it in the chat.
+#
+# THE URL WINS OVER THE ATTACHMENT when both are configured, and that ordering
+# is deliberate: the link is the cheaper delivery of the same thing, and doing
+# both would put the board in the chat twice a day. Attachment is the FALLBACK
+# — a deployment with nowhere to serve from leaves this unset and keeps
+# today's behaviour byte for byte.
+#
+# UNSET = OFF, like every other switch here. Kept identical to job-sift's,
+# because a reader who has learned one of these two projects has learned both.
+BOARD_URL_ENV = "HK_EVENTS_BOARD_URL"
+
+
+def board_url() -> str | None:
+    """The URL the board is served at, or None when it is not served.
+
+    Read at CALL time, not import time — same convention as
+    `board_attach_key()` and `board_path()`.
+
+    Only http(s) is accepted. Anything else is refused and said out loud: the
+    value is rendered into a Markdown link that goes to the operator's phone,
+    so a `javascript:` or `file:` value is a link nobody wants to have tapped,
+    and silently rendering it would be worse than refusing it.
+    """
+    raw = os.environ.get(BOARD_URL_ENV, "").strip()
+    if not raw:
+        return None
+    if not raw.lower().startswith(("http://", "https://")):
+        log.warning(
+            "%s=%r is not an http(s) URL — ignoring it (the board link is off)",
+            BOARD_URL_ENV,
+            raw,
+        )
+        return None
+    return raw
+
+
 # Claude CLI for relevance classification. Same convention as job-sift.
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 # Haiku is plenty for per-event binary room classification.

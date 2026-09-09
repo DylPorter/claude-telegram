@@ -122,6 +122,37 @@ def _fmt_soon(soon: list) -> str:
     return f"⏰ Starting soon: {named}{more}"
 
 
+def _board_lines(
+    board_url: str | None,
+    board_path,
+    board_problem: str | None,
+) -> list[str]:
+    """The board line(s) of the summary bubble. One bubble, either way.
+
+    Kept in step with `job_sift.render._board_lines` — three states that must
+    stay distinguishable:
+
+      * SERVED — a URL is configured. The reader gets a tappable link, and the
+        ~50 KB file stops being re-sent daily to say the same thing. A run that
+        did not rewrite the board says so, because a link that silently serves
+        yesterday's rows is the failure this codebase keeps deleting.
+      * WRITTEN, NOT SERVED — the old line, an on-disk path.
+      * NEITHER — the reason that was actually observed.
+    """
+    if board_url:
+        out = [f"🗂 [Board]({board_url})"]
+        if not board_path:
+            why = board_problem or "reason unrecorded"
+            out.append(f"⚠️ Not refreshed this run ({why}) — the link may be stale.")
+        return out
+    if board_path:
+        return [f"🗂 Board: `{board_path}`"]
+    # Said out loud rather than omitted, and with the reason that was
+    # actually observed — see job_sift/render.py for the bug this fixes.
+    why = board_problem or "reason unrecorded"
+    return [f"🗂 Board: not written this run ({why})."]
+
+
 def render(
     *,
     surfaced: list[tuple[Event, RelevanceResult, str]],
@@ -134,6 +165,7 @@ def render(
     drop_notice: str | None = None,
     board_path=None,
     board_problem: str | None = None,
+    board_url: str | None = None,
     upcoming_count: int | None = None,
     purged: int = 0,
 ) -> list[str]:
@@ -173,13 +205,7 @@ def render(
     else:
         footer += "_"
     lines.append(footer)
-    if board_path:
-        lines.append(f"🗂 Board: `{board_path}`")
-    else:
-        # Said out loud rather than omitted, and with the reason that was
-        # actually observed — see job_sift/render.py for the bug this fixes.
-        why = board_problem or "reason unrecorded"
-        lines.append(f"🗂 Board: not written this run ({why}).")
+    lines.extend(_board_lines(board_url, board_path, board_problem))
 
     out = ["\n".join(lines)]
     if health:

@@ -421,23 +421,43 @@ def _write_board(roles: list[OpenRole], today: date, *, dry_run: bool):
 
 
 def _deliver(messages: list[str], board, *, staleness_alarm, drop_notice) -> None:
-    """Push the run's messages, attaching the HTML board when it is configured.
+    """Push the run's messages, delivering the board however it is configured.
 
-    Still ONE notification. With `JOB_SIFT_BOARD_ATTACH` set to a board key the bot
-    serves, the summary bubble is delivered as the CAPTION of the board
-    document instead of as a message of its own; unset (the default), or on a
-    run that wrote no board, this is byte-for-byte the old push.
+    Still ONE notification, in all three shapes:
+
+      * `JOB_SIFT_BOARD_URL` set — the summary bubble carries a Markdown link
+        (rendered upstream) and NOTHING is attached. THE URL WINS over the
+        attachment when both are set: they deliver the same board, and doing
+        both would put it in the chat twice a day.
+      * `JOB_SIFT_BOARD_ATTACH` set alone — the FALLBACK, unchanged: the
+        summary bubble is delivered as the CAPTION of the board document
+        instead of as a message of its own.
+      * neither, or a run that wrote no board — byte-for-byte the old push.
+
+    The suppression is done HERE, by withholding the key, rather than inside
+    `push_with_board`: that function's job is "attach this key or don't", and
+    routing is a decision about configuration, not about transport.
 
     `push_messages` / `push_document` are passed explicitly rather than
     resolved inside `push_with_board`, so they are read out of THIS module's
     namespace at call time — which is where the suite patches the transport.
     """
+    url = config.board_url()
+    key = config.board_attach_key()
+    if url and key:
+        log.info(
+            "both %s and %s are set — sending the link, not the file "
+            "(the URL wins; unset %s to attach instead)",
+            config.BOARD_URL_ENV,
+            config.BOARD_ATTACH_ENV,
+            config.BOARD_URL_ENV,
+        )
     push_with_board(
         messages,
         summary_index=summary_index(
             staleness_alarm=staleness_alarm, drop_notice=drop_notice
         ),
-        board_key=config.board_attach_key(),
+        board_key=None if url else key,
         board_written=board.path is not None,
         send_text=push_messages,
         send_document=push_document,
@@ -519,7 +539,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         roles, purged = _update_open_roles([], today, dry_run=dry_run)
         board = _write_board(roles, today, dry_run=dry_run)
         if not dry_run:
-            _deliver(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, purged=purged), board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
+            _deliver(render(surfaced=[], skipped=[], total_new=0, total_processed=0, today=today, source_errors=source_errors, open_roles=roles, staleness_alarm=staleness_alarm, drop_notice=drop_notice, board_path=board.path, board_problem=board.problem, board_url=config.board_url(), purged=purged), board, staleness_alarm=staleness_alarm, drop_notice=drop_notice)
             write_archive(today, render_vault_archive(surfaced=[], skipped=[], today=today, source_errors=source_errors, staleness_alarm=staleness_alarm, drop_notice=drop_notice))
         return 0
 
@@ -637,6 +657,7 @@ def run(*, dry_run: bool = False, stub: bool = False) -> int:
         drop_notice=drop_notice,
         board_path=board.path,
         board_problem=board.problem,
+        board_url=config.board_url(),
         purged=purged,
     )
 
