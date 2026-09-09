@@ -164,6 +164,22 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
     return sandbox
 
 
+#: Not a path, but it steers whether the morning run spawns an agent at all,
+#: and `config.py` calls `load_dotenv()` at import — so a value in the
+#: operator's real `.env` would otherwise decide what this suite exercises.
+#: Cleared so every test opts IN to thread reconciliation explicitly, and so
+#: the OFF-by-default tests cannot pass on a machine that happens to have it
+#: unset while failing on one that does not.
+_FEATURE_ENV_VARS = (config.THREADS_ENABLED_ENV,)
+
+
+@pytest.fixture(autouse=True)
+def neutral_feature_flags(monkeypatch):
+    """Every optional feature starts from its documented default."""
+    for name in _FEATURE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def no_agent_spawn(monkeypatch):
     """`threads.py`, `vault_agent.py` AND `filter.py` each spawn

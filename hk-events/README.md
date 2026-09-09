@@ -37,56 +37,52 @@ are different facts.
 #### Getting it onto a phone
 
 The board is a file on a Linux filesystem, which is not where it gets read.
-Setting `HK_EVENTS_BOARD_ATTACH` to a board key the bot serves makes the daily
-run deliver the board as a Telegram **document attachment**, so it opens in the
-phone's browser.
+There are two ways to close that gap, and **the URL wins when both are set**.
 
-Still **one notification**: the summary bubble becomes the document's CAPTION
-rather than a message of its own. Unset (the default) nothing changes.
+##### Preferred: serve it, and send a link
 
-The value is a KEY, not a path — the bot holds the key → path allowlist in its
-own `PUSH_DOCUMENTS`, so this side cannot ask it for an arbitrary file:
+If the board file is served over HTTP(S) anywhere the phone can reach, point
+`HK_EVENTS_BOARD_URL` at it:
+
+```sh
+# hk-events/.env
+HK_EVENTS_BOARD_URL=https://boards.example.test/events-board.html
+```
+
+The summary bubble then carries a `🗂 [Board](…)` link and **nothing is
+attached**. The URL is always current, so re-sending a ~50 KB HTML file every
+morning only accumulates copies of yesterday's board in the chat.
+
+Only `http://` and `https://` are accepted; any other scheme is refused with a
+warning and the link stays off (the value ends up as a tappable link on a
+phone). Still **one notification** — the link is a line in the summary bubble,
+never a bubble of its own. And a run that did not rewrite the board says so on
+the line below the link, because the URL keeps serving whatever was written
+last.
+
+##### Fallback: attach the file
+
+With no URL configured, setting `HK_EVENTS_BOARD_ATTACH` to a board key the bot
+serves makes the daily run deliver the board as a Telegram **document
+attachment**, so it opens in the phone's browser.
+
+It is still one notification: the summary bubble becomes the document's CAPTION
+rather than a message of its own. Unset (the default) nothing changes at all.
+
+The value is a KEY, not a path. The bot holds the key → path allowlist in its
+own `PUSH_DOCUMENTS`; this side cannot ask it for an arbitrary file. Set both:
 
 ```sh
 # claude-telegram/.env  — the bot's allowlist
 PUSH_DOCUMENTS=events-board=/absolute/path/to/Events Board.html
 
-# hk-events/.env        — which key this run attaches
+# hk-events/.env         — which key this run attaches
 HK_EVENTS_BOARD_ATTACH=events-board
 ```
 
 If the attachment fails — bot down, file missing, board over Telegram's 50 MB
-document limit — the summary bubble still goes with the reason appended. The
-silence gate is unchanged: a run that stays silent attaches nothing either.
-
-### The purge
-
-Rows leave the register on three clocks (`hk_events/open_events.py`):
-
-* the event already happened, by more than `HK_EVENTS_PURGE_PAST_DAYS` (3);
-* it is undated and `last_seen` is older than `HK_EVENTS_PURGE_UNSEEN_DAYS` (30);
-* it is undated and `first_seen` is older than `HK_EVENTS_PURGE_MAX_AGE_DAYS` (60).
-
-⚠️ **A start still in the future vetoes all of them.** `last_seen` is a fact
-about our crawl, not about the world: the `luma_discover` city page shows about
-a dozen events at a time, so anything further out silently stops being
-re-sighted long before it occurs. An unparseable `starts` counts as a veto too
-(`start_state` splits "no start" from "I could not read the start" — collapsing
-them is how the veto silently stopped applying), and a sighting today vetoes the
-max-age clock. Every drop is logged with the rule that fired, and the delete is
-irreversible: the seen-set has no TTL, so a purged row is not re-captured.
-
-hk-events has **no operator marks** (nothing writes `applied`/`dismissed` here),
-so there is no sticky-status exemption to honour — unlike job-sift, where that
-exemption is the one rule in the purge that is not a heuristic. If a hand-set
-mark is ever added here, exempt it FIRST.
-
-### Telegram is a pointer
-
-One bubble: how many new, how many upcoming, what is starting soon, where the
-board is. The staleness alarm and the ⚠️ source-health line are **exempt** and
-still push on their own — they exist to be seen on a day when everything else is
-quiet.
+document limit — the summary bubble still goes, with the reason appended. A
+board that did not reach the phone must not look like a quiet day.
 
 ## Architecture
 
@@ -155,9 +151,13 @@ hk-events-specific knobs are in `.env.example` — notably:
 - `HK_EVENTS_BOARD_PATH` — where to write the HTML board. Any absolute path;
   the file has no dependencies, so it is meant to be copied elsewhere and
   opened from disk.
-- `HK_EVENTS_BOARD_ATTACH` — attach the board to the digest as a Telegram
-  document. UNSET = OFF. The value is a board KEY out of the BOT's
-  `PUSH_DOCUMENTS` allowlist, never a path.
+- `HK_EVENTS_BOARD_URL` — where the board is SERVED. Set it and the summary
+  bubble carries a link and nothing is attached. `http(s)` only; any other
+  scheme is refused with a warning. UNSET = OFF. **Wins over**
+  `HK_EVENTS_BOARD_ATTACH` when both are set.
+- `HK_EVENTS_BOARD_ATTACH` — the FALLBACK when no URL is set: attach the
+  board to the digest as a Telegram document. UNSET = OFF. The value is a
+  board KEY out of the BOT's `PUSH_DOCUMENTS` allowlist, never a path.
 - `HK_EVENTS_EVENTS_FEED` / `HK_EVENTS_JOBS_FEED` — the two halves of the file
   handoff with job-sift. A missing jobs feed makes the Jobs tab say so; it never
   renders a fake zero.

@@ -196,7 +196,12 @@ _FEED_ENV_VARS = ("JOB_SIFT_JOBS_FEED", "JOB_SIFT_EVENTS_FEED")
 #: `push_document` — which the `no_network` guard would then trip, in a test
 #: that has nothing to do with attachment. Cleared for the same reason the path
 #: vars are: a test must opt IN to the behaviour it is about.
-_DELIVERY_ENV_VARS = ("JOB_SIFT_BOARD_ATTACH",)
+#: `JOB_SIFT_BOARD_URL` joins it for the same reason and one more: it now
+#: OUTRANKS the attach key (see `orchestrator._deliver`), so a value left in
+#: the real `.env` would silently switch every delivery test from the
+#: attachment branch to the link branch — the tests would still pass, just
+#: not on the code they name.
+_DELIVERY_ENV_VARS = ("JOB_SIFT_BOARD_ATTACH", "JOB_SIFT_BOARD_URL")
 
 
 def _snapshot(path, exclude=frozenset()):

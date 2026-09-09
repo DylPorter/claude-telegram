@@ -28,7 +28,7 @@ record to the vault. Only the notification changed.
 | Routine | Runs | Notifies |
 |---|---|---|
 | Morning brief 07:00 | yes | **5 bubbles**: intro, Today's Signal, Broad Tech/AI, Bubble Breaker, Quiet rest |
-| Thread reconciliation (inside morning) | yes | **no** — daily note only |
+| Thread reconciliation (inside morning) | **no** — off by default, see below | **no** — daily note only when on |
 | Filter rationale / suppressed list | yes | **no** — daily note only |
 | Evening sweep 22:00 | yes — inbox, orphan sweep, Research Log, Teaching Queue, gbrain resync | **no**, except a ⚠️ alarm if the sweep degraded |
 | Agent-identity trip-wire 13:00 | yes | yes — unchanged, fires only on a hit (0 pushes in the 14 days before the diet) |
@@ -37,6 +37,25 @@ record to the vault. Only the notification changed.
 `Today's Signal` keeps its prose format verbatim; the other three bubbles are
 bullet-pointed. Source-health and staleness ⚠️ lines bypass the keep-list
 everywhere — they exist to be seen on a quiet day.
+
+### Thread reconciliation is off by default
+
+```sh
+SIGNAL_BRIEF_THREADS_ENABLED=1   # unset, "0", "false", "no", "off" = OFF
+```
+
+Unset (the default) the morning run makes **no** reconciliation agent call,
+writes **no** `## 🧵 Thread Reconciliation` section, and saves **no** snapshot.
+The pass reasons over a fixed evidence window — the last few days of daily-note
+live-capture sections plus the same span of vault git commits — so a thread
+whose last update predates that window can never be resolved by it, however
+often it runs. Left on, that is one Sonnet call a morning to re-derive the same
+stuck answer.
+
+The code, its renderer and its snapshot format are all still here and still
+tested; the flag restores the feature exactly. Turning it off does **not** touch
+an existing `.data/cache/threads.json`, so flipping it back on resumes from the
+last snapshot rather than from nothing.
 
 The intelligence layer is `claude -p` running with full vault tool access. It
 reads your `MEMORY.md` and project notes on demand and uses *them* as the

@@ -122,6 +122,14 @@ def test_morning_pushes_five_bubbles_and_no_threads(monkeypatch, pushes, notes, 
 
 
 def test_morning_still_writes_both_daily_note_sections(monkeypatch, pushes, notes, morning_stubs):
+    """With thread reconciliation switched ON, both sections land in the note.
+
+    The flag defaults OFF (see tests/test_threads_flag.py); this test is about
+    the note-vs-Telegram split, so it opts the feature back in explicitly
+    rather than depending on a default.
+    """
+    from signal_brief import config
+    monkeypatch.setenv(config.THREADS_ENABLED_ENV, "1")
     from signal_brief.orchestrators import morning
     _run(morning, ["morning", "--items-from", str(morning_stubs)], monkeypatch)
 
