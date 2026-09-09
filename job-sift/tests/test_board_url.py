@@ -133,10 +133,40 @@ class TestSummaryCarriesTheLink:
         assert len(_render(board_path=_FAKE_BOARD_PATH)) == 1
 
     def test_the_on_disk_path_is_not_printed_when_a_url_is_configured(self):
-        """The path is the operator's filesystem — noise on a phone, and on a
-        PUBLIC board it would leak a home directory."""
+        """The path is the operator's filesystem — noise on a phone, and it
+        leaks a home directory into a chat."""
         messages = _render(board_path=_FAKE_BOARD_PATH, board_url=_URL)
         assert str(_FAKE_BOARD_PATH) not in messages[0]
+
+    def test_a_failed_write_reports_no_path_at_all(self, monkeypatch, tmp_path):
+        """Asserted at the SOURCE, not just at the renderer.
+
+        Fixing this in `render` alone would leave the next reason string free to
+        interpolate a path again. `_write_board` is where the path is known, so
+        it is where the path is kept — it goes to the log (which is where a
+        person debugging a failed write looks) and not into the bubble.
+        """
+        board = tmp_path / "secret-dir" / "Job Board.html"
+        board.parent.mkdir()
+        monkeypatch.setattr(config, "board_path", lambda: board)
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "jobs_feed.json")
+        monkeypatch.setattr(orchestrator.board_mod, "build_board", lambda *a, **k: 1 / 0)
+
+        result = orchestrator._write_board([], _DAY, dry_run=False)
+
+        assert result.path is None
+        assert "could not be written" in result.problem      # the cause survives
+        assert str(board) not in result.problem
+        assert str(tmp_path) not in result.problem
+        assert "secret-dir" not in result.problem
+        assert "/" not in result.problem
+
+        # ...and end to end, through the bubble the operator actually reads.
+        bubble = _render(
+            board_path=result.path, board_problem=result.problem, board_url=_URL
+        )[0]
+        assert str(board) not in bubble and "secret-dir" not in bubble
+        assert "Not refreshed this run" in bubble
 
     def test_without_a_url_the_path_line_is_exactly_as_before(self):
         messages = _render(board_path=_FAKE_BOARD_PATH)

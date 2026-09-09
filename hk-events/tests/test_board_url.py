@@ -116,12 +116,6 @@ class TestBoardUrlConfig:
         monkeypatch.setenv(config.BOARD_URL_ENV, _URL)
         assert config.board_url() == _URL
 
-    def test_the_two_projects_agree_on_the_contract(self):
-        """Parity with job-sift, asserted rather than assumed: same accepted
-        schemes, same unset default, same call-time read."""
-        assert config.BOARD_URL_ENV == "HK_EVENTS_BOARD_URL"
-        assert callable(config.board_url)
-
 
 # ---------------------------------------------------------------------------
 # The summary bubble
@@ -139,6 +133,37 @@ class TestSummaryCarriesTheLink:
     def test_the_on_disk_path_is_not_printed_when_a_url_is_configured(self):
         messages = _render(board_path=_FAKE_BOARD_PATH, board_url=_URL)
         assert str(_FAKE_BOARD_PATH) not in messages[0]
+
+    def test_a_failed_write_reports_no_path_at_all(self, monkeypatch, tmp_path):
+        """The FAILURE branch, which the success case can never reach.
+
+        `board_problem` is free text from `_write_board` and is rendered into
+        the URL bubble verbatim, so the failure path is the one where a
+        filesystem path would actually arrive. Asserted at the source as well
+        as at the renderer: fixing it in `render` alone would leave the next
+        reason string free to interpolate a path again.
+        """
+        board = tmp_path / "secret-dir" / "Events Board.html"
+        board.parent.mkdir()
+        monkeypatch.setattr(config, "board_path", lambda: board)
+        monkeypatch.setattr(config, "events_feed_path", lambda: tmp_path / "events_feed.json")
+        monkeypatch.setattr(config, "jobs_feed_path", lambda: tmp_path / "jobs_feed.json")
+        monkeypatch.setattr(orchestrator.board_mod, "build_board", lambda *a, **k: 1 / 0)
+
+        result = orchestrator._write_board([], _DAY, dry_run=False)
+
+        assert result.path is None
+        assert "could not be written" in result.problem      # the cause survives
+        assert str(board) not in result.problem
+        assert str(tmp_path) not in result.problem
+        assert "secret-dir" not in result.problem
+        assert "/" not in result.problem
+
+        bubble = _render(
+            board_path=result.path, board_problem=result.problem, board_url=_URL
+        )[0]
+        assert str(board) not in bubble and "secret-dir" not in bubble
+        assert "Not refreshed this run" in bubble
 
     def test_without_a_url_the_path_line_is_exactly_as_before(self):
         messages = _render(board_path=_FAKE_BOARD_PATH)

@@ -293,7 +293,14 @@ def _write_board(records: list[OpenEvent], today: date, *, dry_run: bool):
         return _BoardWrite(board_mod.write_board(path, html))
     except Exception as exc:  # noqa: BLE001 — a view must not kill the run
         log.error("board could not be written to %s: %s", path, exc)
-        return _BoardWrite(None, f"could not be written to {path}")
+        # The reason goes into a Telegram bubble, so it carries NO PATH. The
+        # bubble may now render a served URL instead of a local path (see
+        # `render._board_lines`), and an absolute path interpolated here would
+        # ride into that branch and print the operator's home directory to a
+        # chat — the same leak class an earlier commit was written to close.
+        # The path is already in the log line above, which is where a person
+        # debugging a failed write is looking.
+        return _BoardWrite(None, "could not be written to disk — path is in the log")
 
 
 
