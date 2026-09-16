@@ -157,7 +157,9 @@ def _build_prompt(items: list[Item], today: str) -> str:
                 "source": i.source,
                 "kind": i.source_kind,
                 "published_at": i.published_at.isoformat() if i.published_at else None,
-                "excerpt": i.excerpt[:400],
+                # Multi-story digests (WSJ) opt into a longer window via
+                # newsletters.yaml `excerpt_chars`; everything else stays at 400.
+                "excerpt": i.excerpt[:(i.meta or {}).get("excerpt_chars", 400)],
                 "domain": i.domain,
                 "meta": {k: v for k, v in (i.meta or {}).items()
                          if k in {"bubble_breaker", "priority_boost", "currently_running",

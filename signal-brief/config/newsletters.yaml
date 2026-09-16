@@ -34,3 +34,61 @@ newsletters:
     name: The AI Debrief (Drew Collins)
     query: "from:the-ai-debrief-news@mail.beehiiv.com newer_than:2d"
     domain: ai-tech
+
+  # --- WSJ ---------------------------------------------------------------------
+  # Free 6-month All Access Digital sub (EDigest x AI Tinkerers hackathon perk),
+  # activated 2026-09-14, so expect these to go quiet around mid-March 2027.
+  # Every WSJ list sends from access@interactive.wsj.com, so the display name
+  # tells them apart. `-subject:welcome` drops the signup confirmations.
+  # WSJ's text/plain part is a ~200-char stub; the parser takes the HTML body.
+  # Dailies are 10-story digests, so they get a wider excerpt window, otherwise
+  # the filter only ever sees the lead story. Weeklies stay on the default.
+  # Deliberately not ingested: "WSJ Networking Challenge" (career drip course).
+  - id: wsj-10-point
+    name: WSJ The 10-Point
+    query: 'from:"Emma Tucker, WSJ" -subject:welcome newer_than:1d'
+    domain: finance-markets
+    max_results: 1
+    excerpt_chars: 3000
+
+  - id: wsj-whats-news
+    name: WSJ What's News
+    query: 'from:"WSJ What''s News" -subject:welcome newer_than:1d'
+    domain: policy-geopolitics
+    max_results: 1
+    excerpt_chars: 3000
+
+  - id: wsj-free-expression
+    name: WSJ Free Expression (opinion)
+    query: 'from:"Free Expression, WSJ" -subject:welcome newer_than:1d'
+    domain: philosophy
+    max_results: 1
+    excerpt_chars: 1500
+
+  - id: wsj-ai-business
+    name: WSJ AI & Business
+    query: 'from:"WSJ AI & Business" -subject:welcome newer_than:2d'
+    domain: ai-tech
+    max_results: 1
+    excerpt_chars: 1500
+
+  - id: wsj-technology
+    name: WSJ Technology
+    query: 'from:"WSJ Technology" -subject:welcome newer_than:2d'
+    domain: ai-tech
+    max_results: 1
+    excerpt_chars: 1500
+
+  - id: wsj-economics
+    name: WSJ Economics (Greg Ip)
+    query: 'from:"Greg Ip, WSJ" -subject:welcome newer_than:2d'
+    domain: finance-markets
+    max_results: 1
+    excerpt_chars: 1500
+
+  - id: wsj-future-of-everything
+    name: WSJ The Future of Everything
+    query: 'from:"WSJ The Future of Everything" -subject:welcome newer_than:2d'
+    domain: other
+    max_results: 1
+    excerpt_chars: 1500

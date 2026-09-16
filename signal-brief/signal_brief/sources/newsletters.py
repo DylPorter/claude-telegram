@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 NEWSLETTERS_FILE = CONFIG_DIR / "newsletters.yaml"
 GWS_TIMEOUT = 30.0
+DEFAULT_EXCERPT_CHARS = 800
 
 
 def _html_to_text(html: str) -> str:
@@ -41,6 +42,16 @@ def _html_to_text(html: str) -> str:
     text = re.sub(r"<[^>]+>", " ", html)
     text = unescape(text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _pick_body(msg: dict) -> str:
+    """Take the longer of the plain-text and HTML bodies. Some senders (WSJ)
+    ship a ~200-char preheader stub as text/plain and the real issue only as
+    HTML, so preferring text/plain unconditionally loses the whole newsletter."""
+    text = msg.get("body_text") or ""
+    html = _html_to_text(msg.get("body_html", ""))
+    body = text if len(text) >= len(html) else html
+    return body or msg.get("body") or msg.get("snippet") or ""
 
 
 def _clean_excerpt(text: str) -> str:
@@ -149,14 +160,9 @@ def _fetch_one_newsletter(cfg: dict) -> list[Item]:
         headers = msg.get("headers", {}) if isinstance(msg.get("headers"), dict) else {}
         subject = msg.get("subject") or headers.get("subject") or ""
         date_str = msg.get("date") or headers.get("date")
-        body = (
-            msg.get("body_text")
-            or _html_to_text(msg.get("body_html", ""))
-            or msg.get("body")
-            or msg.get("snippet")
-            or ""
-        )
-        snippet = _clean_excerpt(body)[:800]
+        body = _pick_body(msg)
+        excerpt_chars = cfg.get("excerpt_chars", DEFAULT_EXCERPT_CHARS)
+        snippet = _clean_excerpt(body)[:excerpt_chars]
 
         url = f"https://mail.google.com/mail/u/0/#all/{msg_id}"
 
@@ -169,7 +175,8 @@ def _fetch_one_newsletter(cfg: dict) -> list[Item]:
                 published_at=_parse_email_date(date_str),
                 excerpt=snippet,
                 domain=domain,
-                meta={"gmail_id": msg_id, "newsletter_name": name},
+                meta={"gmail_id": msg_id, "newsletter_name": name,
+                      "excerpt_chars": excerpt_chars},
             )
         )
 
