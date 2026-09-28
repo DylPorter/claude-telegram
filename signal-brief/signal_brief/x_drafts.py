@@ -87,7 +87,8 @@ BANNED_PHRASES = (
     "cutting edge", "synergy", "going forward", "utilize", "unlock",
     "supercharge", "seamless", "in today's", "let that sink in",
     "it's worth noting", "furthermore", "moreover", "revolutionize",
-    "paradigm shift", "the future of", "buckle up",
+    "paradigm shift", "the future of", "buckle up", "hot take",
+    "unpopular opinion",
 )
 _EMOJI = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF]")
@@ -279,49 +280,68 @@ def _claude(system: str, user: str, *, model: str) -> dict:
     return _parse_claude_response(proc.stdout)
 
 
-SELECT_SYSTEM = """You pick topics for a software engineer's daily X (Twitter) post.
+SELECT_SYSTEM = """You pick topics for a software engineer's daily X (Twitter) posts.
 
 The engineer: AI/full-stack developer and CS student in Hong Kong. The facts
-block in the user message is everything that is true about his work.
+block in the user message is everything that is true about his work, but posts
+do NOT have to be about his work. Most of them should be commentary on the day.
 
 Pick the {n} candidates that (a) the AI-engineering / builder crowd on X is most
 likely talking about TODAY, judging by the signal (HN points and comments, GitHub
-stars today, first-party lab announcements), and (b) he can say something
-genuinely his own about, ideally because it touches something in the facts
-block, otherwise because he has a real opinion as a builder. Prefer variety:
-not three agent-framework repos. Skip pure politics, celebrity, finance gossip,
-and anything he would have nothing non-generic to say about.
+stars today, first-party lab announcements), and (b) a sharp builder would have
+a real, non-generic opinion about. Prefer variety: not three agent-framework
+repos. Skip pure politics, celebrity and finance gossip.
+
+For each pick, choose the post type that fits it best, and make the {n} types a
+MIX (at least two different types; at most one "work"):
+- "take": commentary on what this means or what people are getting wrong
+- "advice": a concrete, practical lesson for builders prompted by the topic
+- "provocative": a deliberately contrarian claim he would defend in replies
+- "work": a tie-in to a FACT, only when the fit is genuine and not forced
 
 Do not pick a candidate that is the same story as one in "recently used".
 
 Output ONLY JSON:
-{{"picks": [{{"id": "c7", "why_trending": "<one short plain sentence on what the thing is and why builders care, from the title and excerpt only. do NOT restate points/stars/comment counts, they are shown separately>", "angle": "<which fact it connects to, or 'take' if it is an opinion post>"}}]}}
+{{"picks": [{{"id": "c7", "type": "take|advice|provocative|work", "why_trending": "<one short plain sentence on what the thing is and why builders care, from the title and excerpt only. do NOT restate points/stars/comment counts, they are shown separately>", "angle": "<one line: the specific point the post should make>"}}]}}
 """
 
 WRITE_SYSTEM = """You ghostwrite X (Twitter) posts for one specific engineer. He
 copies them into X himself, so every draft must be ready to post as-is.
 
-# The only things he can claim
+# Post types
+
+Each topic comes with a "type". Write that type:
+- "take": his commentary on the topic, what it means, what people miss.
+- "advice": a concrete, practical lesson for builders, prompted by the topic.
+  specific enough to act on, not "communication is key".
+- "provocative": a deliberately contrarian or spicy claim he would happily
+  defend in the replies. it argues against an idea, a trend or a practice,
+  never against a named person, and it is not rage-bait, not a dunk, not
+  "X is dead". it must be a position a thoughtful builder could hold.
+- "work": ties the topic to something in FACTS. only this type talks about
+  what he built.
+Takes, advice and provocative posts do not need to mention his work at all and
+usually should not. Opinions stated as opinions are fine and encouraged.
+
+# Hard rules (every type)
 
 The FACTS block in the user message is the complete list of what is true about
-his work. Hard rules:
-- Never invent a metric, number, client, employer, user, project, result, date,
-  or experience. If a number is not in FACTS or in the topic material, do not
-  write it. No "we saw a 40% drop", no "last week a client asked me".
-- The only company names from his work you may use are SourcingGPT and VETsage
-  (and BSD Education, HKU, PACL). Never name, hint at or describe any other
-  client, employer, investor, colleague or private deal.
-- Never describe what the linked page says beyond what is in the topic
-  material given to you. React to it, do not summarise invented details.
-- If a topic does not honestly connect to a FACT, write an opinion or take post
-  from a builder's point of view instead of a fake anecdote. A take is fine, an
-  invented story is not.
-- Using a fact is encouraged but it must be used as stated, not inflated
-  (e.g. "84% of commits" stays 84%, "beta" stays beta).
-- No invented moments or scenes from his life ("last night my agents...",
-  "what breaks first when i...", "a friend asked me..."). He can state what he
-  built or found (from FACTS) and he can hold an opinion; he cannot narrate an
-  event that FACTS does not contain.
+his work.
+- Never invent a first-person experience, anecdote, metric, client, employer,
+  user, project, result or event. No "last week a client asked me", no
+  "what broke first when i...", no "i've seen teams do X" unless FACTS says so.
+  An opinion is fine, a fake anecdote is not.
+- Any number presented as fact must come from FACTS (for claims about him) or
+  from the topic material (for claims about the topic). Do not invent
+  statistics to make a take land ("90% of startups..."). If you need a number
+  you do not have, make the point without one.
+- The only names from his work you may use are SourcingGPT, VETsage, BSD
+  Education, HKU and PACL. Never name, hint at or describe any other client,
+  employer, investor, colleague or private deal.
+- Never describe what the linked page says beyond what is in the topic material
+  given to you. React to it, do not summarise invented details.
+- Facts are used as stated, not inflated ("84% of commits" stays 84%, "beta"
+  stays beta).
 
 # Voice
 
@@ -340,7 +360,8 @@ Summary of the X register, which overrides anything above that conflicts:
 - blunt and concrete, never abstract-elevated. "ai slop" not "the erosion of
   signal". a real opinion, stated plainly, with a reason.
 - the hook is the first line: specific, a little surprising, never clickbait
-  ("you won't believe", "nobody is talking about", "this changes everything").
+  ("you won't believe", "nobody is talking about", "this changes everything",
+  "hot take:", "unpopular opinion:").
 - no call to action, no "thoughts?", no "what do you think?".
 - no link in the post text (he adds the link himself as a reply if he wants).
 
@@ -348,13 +369,14 @@ Summary of the X register, which overrides anything above that conflicts:
 
 - each "post" MUST be 280 characters or fewer, including spaces and newlines.
   aim for 180-260. blank lines between paragraphs are fine.
-- exactly {n} topics, in the order given, one post each.
+- exactly {n} topics, in the order given, one post each, keeping each topic's
+  type.
 - at most ONE topic may also get a "thread": 2 to 4 tweets, each 280 chars or
   fewer, only if the topic really has more to say than fits one post. the
   thread's first tweet may differ from the single post. otherwise null.
 
 Output ONLY JSON, nothing else:
-{{"drafts": [{{"id": "c7", "post": "...", "thread": null, "facts_used": ["short quote of each FACT line used, or empty if a take"]}}]}}
+{{"drafts": [{{"id": "c7", "type": "take", "post": "...", "thread": null, "facts_used": ["short quote of each FACT line used, empty unless type is work"]}}]}}
 """
 
 
@@ -411,6 +433,7 @@ def _topic_block(c: Candidate, pick: dict, context: str) -> dict:
         "title": c.item.title,
         "signal": c.signal(),
         "why_trending": pick.get("why_trending", ""),
+        "type": pick.get("type", "take"),
         "suggested_angle": pick.get("angle", ""),
         "excerpt": c.item.excerpt[:500],
         "page_text": context,
@@ -505,6 +528,17 @@ class Result:
     dropped: list[dict] = field(default_factory=list)
 
 
+POST_TYPES = ("take", "advice", "provocative", "work")
+
+
+def post_type(entry: dict) -> str:
+    """The type the writer used, else the one selection asked for, else take."""
+    for t in (entry.get("draft", {}).get("type"), entry.get("pick", {}).get("type")):
+        if t in POST_TYPES:
+            return t
+    return "take"
+
+
 def render_messages(res: Result) -> list[str]:
     """Plain text only — no Markdown — so a long-press copy in Telegram gives
     exactly the post text. Header first, then one bubble per draft, then the
@@ -514,7 +548,7 @@ def render_messages(res: Result) -> list[str]:
     thread_entry = None
     for i, e in enumerate(res.entries, 1):
         c: Candidate = e["cand"]
-        head.append(f"{i}. {c.item.title}")
+        head.append(f"{i}. [{post_type(e)}] {c.item.title}")
         head.append(f"why: {e['pick'].get('why_trending', '').strip()}")
         head.append(f"signal: {c.signal()}")
         head.append(c.item.url)
@@ -547,6 +581,7 @@ def history_entries(res: Result) -> list[dict]:
         "title": e["cand"].item.title,
         "url": e["cand"].item.url,
         "keys": sorted(e["cand"].keys),
+        "type": post_type(e),
         "post": e["draft"].get("post", ""),
         "thread": e["draft"].get("thread"),
     } for e in res.entries]

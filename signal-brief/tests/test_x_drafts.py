@@ -177,22 +177,26 @@ def test_save_history_prunes_old_entries():
 
 # ─── render ─────────────────────────────────────────────────────────────────
 
-def _entry(cid, title, post, thread=None, issues=()):
+def _entry(cid, title, post, thread=None, issues=(), ptype="take"):
     cand = x_drafts.Candidate(cid=cid, item=_item(
         title, f"https://{cid}.com", points=300, comments=50,
         hn_url=f"https://news.ycombinator.com/item?id={cid}"))
-    return {"cand": cand, "pick": {"why_trending": f"why {cid}"},
+    return {"cand": cand, "pick": {"why_trending": f"why {cid}", "type": ptype},
             "draft": {"id": cid, "post": post, "thread": thread}, "issues": list(issues)}
 
 
 def test_render_is_header_then_one_plain_bubble_per_draft_then_thread():
     res = x_drafts.Result(date=TODAY, entries=[
-        _entry("c1", "One", "post one"),
-        _entry("c2", "Two", "post two", thread=["t1", "t2"]),
-        _entry("c3", "Three", "post three", issues=["post: contains an em/en-dash"]),
+        _entry("c1", "One", "post one", ptype="advice"),
+        _entry("c2", "Two", "post two", thread=["t1", "t2"], ptype="provocative"),
+        _entry("c3", "Three", "post three", issues=["post: contains an em/en-dash"], ptype="work"),
     ])
     msgs = x_drafts.render_messages(res)
     header = msgs[0]
+    # Each topic is labelled with its post type, in order.
+    assert "1. [advice] One" in header
+    assert "2. [provocative] Two" in header
+    assert "3. [work] Three" in header
     assert "https://c1.com" in header and "300 points" in header
     assert "check before posting: post: contains an em/en-dash" in header
     assert "thread option for #2" in header
@@ -224,9 +228,9 @@ def test_run_repairs_then_drops_a_draft_that_still_fabricates(monkeypatch, facts
     def fake_claude(system, user, *, model):
         calls.append(user)
         if "Pick exactly" in user:
-            return {"picks": [{"id": "c1", "why_trending": "a"},
-                              {"id": "c2", "why_trending": "b"},
-                              {"id": "c3", "why_trending": "c"}]}
+            return {"picks": [{"id": "c1", "type": "work", "why_trending": "a"},
+                              {"id": "c2", "type": "take", "why_trending": "b"},
+                              {"id": "c3", "type": "advice", "why_trending": "c"}]}
         return {"drafts": [
             {"id": "c1", "post": "720 commits in and review is still the job"},
             {"id": "c2", "post": "cut costs by 63% last month"},  # invented number
@@ -265,3 +269,30 @@ def test_orchestrator_pushes_plain_text_and_records_history(monkeypatch, facts_f
     assert kw["parse_mode"] is None and msgs[1] == "post one"
     saved = json.loads(x_drafts.HISTORY_FILE.read_text())
     assert saved[0]["url"] == "https://c1.com"
+
+
+def test_post_type_prefers_writer_then_selector_then_take():
+    e = _entry("c1", "One", "p", ptype="advice")
+    assert x_drafts.post_type(e) == "advice"
+    e["draft"]["type"] = "provocative"
+    assert x_drafts.post_type(e) == "provocative"
+    e["draft"]["type"] = "rant"  # not a known type → fall back to the pick
+    assert x_drafts.post_type(e) == "advice"
+    e["pick"]["type"] = None
+    assert x_drafts.post_type(e) == "take"
+
+
+def test_a_take_may_cite_source_numbers_but_not_invent_stats():
+    topics = [{"id": "c1", "type": "provocative",
+               "title": "Survey: 62% of devs distrust AI code", "signal": "HN, 500 points"}]
+    ok = [{"id": "c1", "post": "62% distrusting AI code is too low, you should distrust all code you didn't read"}]
+    bad = [{"id": "c1", "post": "90% of agent startups will be dead in a year"}]
+    assert x_drafts.lint_drafts(ok, topics, facts=FACTS, forbidden=[]) == {}
+    issues = x_drafts.lint_drafts(bad, topics, facts=FACTS, forbidden=[])
+    assert any("numbers not in FACTS" in p for p in issues["c1"])
+
+
+def test_selected_type_reaches_the_writer():
+    cand = x_drafts.Candidate(cid="c1", item=_item("T", "https://t.com"))
+    block = x_drafts._topic_block(cand, {"type": "advice", "angle": "a"}, "ctx")
+    assert block["type"] == "advice"
