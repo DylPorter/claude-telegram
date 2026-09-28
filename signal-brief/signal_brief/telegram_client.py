@@ -19,7 +19,7 @@ class TelegramPushError(RuntimeError):
 def push_messages(
     messages: list[str],
     *,
-    parse_mode: str = "Markdown",
+    parse_mode: str | None = "Markdown",
     disable_preview: bool = True,
     delay_ms: int = 350,
     timeout: float = 60.0,
@@ -27,16 +27,20 @@ def push_messages(
 ) -> dict:
     """POST a list of messages to the bot's /push endpoint. Each entry becomes
     its own Telegram message bubble. Returns the response dict on success.
+
+    `parse_mode=None` sends plain text (no parseMode key at all), for bubbles
+    meant to be copied verbatim.
     """
     if not PUSH_SECRET:
         raise TelegramPushError("PUSH_SECRET not configured")
 
     payload = {
         "messages": messages,
-        "parseMode": parse_mode,
         "disablePreview": disable_preview,
         "delayMs": delay_ms,
     }
+    if parse_mode:
+        payload["parseMode"] = parse_mode
     headers = {
         "Content-Type": "application/json",
         "X-Push-Secret": PUSH_SECRET,

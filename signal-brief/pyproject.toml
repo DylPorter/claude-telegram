@@ -19,6 +19,7 @@ dev = ["pytest"]
 signal-brief-morning = "signal_brief.orchestrators.morning:main"
 signal-brief-evening = "signal_brief.orchestrators.evening:main"
 signal-brief-weekly = "signal_brief.orchestrators.weekly:main"
+signal-brief-xdrafts = "signal_brief.orchestrators.x_drafts:main"
 
 [build-system]
 requires = ["setuptools>=68"]

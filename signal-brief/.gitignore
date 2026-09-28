@@ -6,3 +6,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# x-drafts grounding facts: personal, and names clients in the never-mention
+# list. Template: config/x_drafts_facts.md.example
+config/x_drafts_facts.md

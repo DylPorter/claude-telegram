@@ -70,8 +70,9 @@ os.environ["SIGNAL_BRIEF_MEMORY_DIR"] = str(_SANDBOX_VAULT / ".claude-memory")
 # STEP 2 — now it is safe to import.
 import pytest  # noqa: E402
 
-from signal_brief import config, daily_note, exposure, filter as sb_filter, threads, vault_agent  # noqa: E402
+from signal_brief import config, daily_note, exposure, filter as sb_filter, threads, vault_agent, x_drafts  # noqa: E402
 from signal_brief.orchestrators import agent_watch, evening, morning, weekly  # noqa: E402
+from signal_brief.orchestrators import x_drafts as x_drafts_orch  # noqa: E402
 from signal_brief.sources import rss  # noqa: E402
 
 #: The genuine directories this suite could plausibly write, captured before
@@ -158,6 +159,8 @@ def sandbox_real_paths(monkeypatch, tmp_path_factory):
         (evening, "VAULT_ROOT", vault),
         (weekly, "LOG_DIR", logs),
         (weekly, "REVIEWS_DIR", reviews),
+        (x_drafts, "HISTORY_FILE", cache / "x_drafts_history.json"),
+        (x_drafts_orch, "LOG_DIR", logs),
     ):
         monkeypatch.setattr(module, attr, value, raising=False)
 

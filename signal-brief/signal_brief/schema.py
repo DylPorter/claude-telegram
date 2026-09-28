@@ -16,6 +16,8 @@ SourceKind = Literal[
     "newsletter",
     "conference",
     "twitter",
+    "hn",
+    "github",
 ]
 
 # Coarse content domains used for anti-bubble exposure tracking.

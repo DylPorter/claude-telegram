@@ -1,0 +1,19 @@
+[Unit]
+Description=signal-brief x-drafts — daily X post drafts to Telegram (no X API, posted by hand)
+After=network-online.target claude-telegram.service
+Wants=network-online.target
+# Bot must be up for the /push endpoint to work.
+Requires=claude-telegram.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/Programming/claude-telegram/signal-brief
+ExecStart=%h/Documents/Programming/claude-telegram/signal-brief/.venv/bin/python -m signal_brief.orchestrators.x_drafts
+StandardOutput=journal
+StandardError=journal
+# Two LLM calls (sonnet select + opus write) plus at most one repair pass,
+# usually 2-4 min end to end.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

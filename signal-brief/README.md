@@ -61,6 +61,44 @@ The intelligence layer is `claude -p` running with full vault tool access. It
 reads your `MEMORY.md` and project notes on demand and uses *them* as the
 filter spec — you never maintain a separate "interests" config.
 
+## X drafts (08:30 daily)
+
+A separate job sends ready-to-post X/Twitter drafts to Telegram for manual
+posting. **It never touches X** — no API, no browser automation. It reads free
+sources and writes Telegram bubbles; you copy-paste.
+
+1. Candidates: HN front page (official Firebase API, with points/comments),
+   GitHub trending (daily, scraped), and the `ai-tech` / `platform-engineering`
+   feeds from `config/feeds.yaml` published in the last 48h (the RSS adapter is
+   reused without its seen-urls cache, so the morning brief is unaffected).
+   Anything used in the last 7 days is dropped (`.data/cache/x_drafts_history.json`).
+2. `claude -p` (sonnet) picks the 3 best topics; the linked page / repo README is
+   fetched so drafts react to what it actually says.
+3. `claude -p` (opus) writes one post per topic (≤280 chars) and optionally one
+   2–4 tweet thread, from a fixed facts block and the X-register sections of the
+   vault voice guide. Both calls run with `--safe-mode --tools ""`: no vault, no
+   auto-memory, no CLAUDE.md, so client details cannot leak in.
+4. A deterministic lint checks length, AI-tell words, dashes, hashtags, emoji,
+   links, never-mention names, and **any number not present in the facts block or
+   the source material**. One repair pass; drafts that still fabricate a number
+   or name a private party are dropped, softer issues are flagged in the header.
+5. Telegram, plain text (no Markdown, so a long-press copy is exact): one header
+   bubble listing topics, links and why each is trending, then one bubble per
+   draft, then the thread (one bubble per tweet) if there is one.
+
+Grounding lives in `config/x_drafts_facts.md` (gitignored — copy
+`config/x_drafts_facts.md.example`). It is the only source of claims; put a
+`## never mention` list at the bottom for names that must never appear.
+
+```bash
+.venv/bin/python -m signal_brief.orchestrators.x_drafts --dry-run   # print, no push, no history write
+.venv/bin/python -m signal_brief.orchestrators.x_drafts             # live
+systemctl --user start signal-brief-xdrafts.service                 # live, via systemd
+```
+
+Env overrides: `X_DRAFTS_SELECT_MODEL` (default `sonnet`), `X_DRAFTS_WRITE_MODEL`
+(default `opus`), `X_DRAFTS_FACTS_FILE`, `X_DRAFTS_VOICE_FILE`.
+
 ## Architecture
 
 ```
@@ -211,6 +249,8 @@ cd ~/Documents/Programming/claude-telegram/signal-brief
 | `logs/YYYY-MM-DD-morning.log`    | Per-run log (also journaled by systemd) |
 | `logs/YYYY-MM-DD-evening.log`    | Per-run log |
 | `logs/YYYY-MM-DD-weekly.log`     | Per-run log |
+| `cache/x_drafts_history.json`    | Topics + posts sent by x-drafts — 7-day topic dedupe |
+| `logs/YYYY-MM-DD-xdrafts.log`    | Per-run log |
 
 ## Known limitations
 

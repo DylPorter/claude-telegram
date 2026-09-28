@@ -1,0 +1,20 @@
+# facts you can claim on X
+
+Copy to `config/x_drafts_facts.md` (gitignored) and fill it in. The x-drafts
+job treats that file as the ONLY source of claims: the drafting model is told
+never to invent a number, client or experience that is not here, and any number
+in a draft that appears neither here nor in the day's source material gets the
+draft dropped. Keep every line true and public-safe.
+
+## work
+- lead engineer at ExampleCo, a <one-line description of the product>.
+- built <system> using <stack>. <verified number, if any>.
+
+## research
+- <side research and its honest result, with caveats>
+
+## agents and tooling
+- <how you actually work, tools you built>
+
+## never mention
+- <client or person name that must never appear in a public post>
