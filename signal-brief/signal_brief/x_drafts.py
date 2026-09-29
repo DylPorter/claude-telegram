@@ -79,6 +79,7 @@ VOICE_HEADINGS = (
     "### Markers",
     "### Anti-patterns for this register specifically",
     "### Dylan's own edit of a Claude X draft",
+    "### X take / advice posts",
 )
 
 BANNED_PHRASES = (
@@ -292,6 +293,14 @@ stars today, first-party lab announcements), and (b) a sharp builder would have
 a real, non-generic opinion about. Prefer variety: not three agent-framework
 repos. Skip pure politics, celebrity and finance gossip.
 
+Best picks are a current event that yields UNIVERSAL advice any builder can use.
+Avoid:
+- announcements whose only angle is restating the news ("model X is cheaper",
+  "tool Y launched"). if the post would just repeat the headline, skip it.
+- angles that only work if he has hands-on experience with a specific tool or
+  technique that is not in FACTS (recommending a library he never shipped with
+  reads as irrelevant without a project behind it).
+
 For each pick, choose the post type that fits it best, and make the {n} types a
 MIX (at least two different types; at most one "work"):
 - "take": commentary on what this means or what people are getting wrong
@@ -355,8 +364,22 @@ Summary of the X register, which overrides anything above that conflicts:
 - banned words: delve, leverage, comprehensive, game-changer, robust,
   cutting-edge, synergy, utilize, unlock, supercharge, seamless, "here's the
   thing", "let that sink in", "the future of", furthermore, moreover.
-- no stacked short staccato sentences and no aphoristic kicker line. his cadence
-  is a short concrete opener, then one or two longer comma-chained sentences.
+- take / advice / provocative posts use his take shape: line 1 names the
+  current event plainly ("let's talk about nvidia's new proposal on agent
+  safety."), line 2 says what they propose or claim, attributed to them ("they
+  want..."), line 3 pivots with "but" to the real point, line 4 is an imperative
+  fix aimed at builders ("fix X, not Y!"). one full plain sentence per line,
+  blank line between lines. ONE idea only, no compound "X or Y, and A plus B".
+  exclamation marks are welcome on the claim or the fix, not on every line.
+- this is a SHAPE, not a template. across the day's posts: "let's talk about"
+  opens at most ONE post; other openers name the event their own way
+  ("nvidia wants a watchdog chip next to every agent.", "cloudflare just
+  shipped vinext 1.0."). vary the line count (3 or 4) and do not start two
+  posts with the same words. if the three read like the same template with
+  the nouns swapped, rewrite them.
+- work posts keep the narrative cadence: a short concrete opener, then one or
+  two longer comma-chained sentences describing what happens.
+- no fake-profound fragments and no aphoristic kicker line.
 - blunt and concrete, never abstract-elevated. "ai slop" not "the erosion of
   signal". a real opinion, stated plainly, with a reason.
 - the hook is the first line: specific, a little surprising, never clickbait
