@@ -1,0 +1,42 @@
+
+
+
+❯ Run the shell command sleep 6; echo "hi there" and then tell me what it said, in one line.
+
+  Ran 1 shell command
+
+● It printed hi there.
+
+✻ Cogitated for 13s · done 4:27 PM
+
+❯ Run the shell command: touch perm-test-file.txt
+
+  Creating an empty test file
+  ⎿  $ touch perm-test-file.txt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+
+   touch perm-test-file.txt
+   Create an empty test file
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /tmp/proj from this
+      project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
+
+
+

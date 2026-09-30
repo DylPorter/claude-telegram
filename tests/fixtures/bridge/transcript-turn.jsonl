@@ -1,0 +1,12 @@
+{"type": "attachment"}
+{"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "line one\nline two with `code` and \"quotes\""}}
+{"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "hmm"}], "stop_reason": "tool_use"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Checking the logs first."}], "stop_reason": "tool_use"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}], "stop_reason": "tool_use"}}
+{"type": "assistant", "isSidechain": true, "message": {"content": [{"type": "text", "text": "SIDECHAIN NOISE"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "a b"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Found it: the session cookie."}], "stop_reason": "end_turn"}}
+{"type": "system", "subtype": "stop_hook_summary"}
+{"type": "system", "subtype": "turn_duration", "durationMs": 42}
+{"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "next turn"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "NOT PART OF OUR TURN"}], "stop_reason": "end_turn"}}

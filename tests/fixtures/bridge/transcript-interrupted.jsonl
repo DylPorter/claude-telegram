@@ -1,0 +1,3 @@
+{"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "do a long thing"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Starting."}], "stop_reason": "tool_use"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}

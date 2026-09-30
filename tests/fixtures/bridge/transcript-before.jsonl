@@ -1,0 +1,9 @@
+{"type": "last-prompt"}
+{"type": "custom-title", "customTitle": "Fix login bug"}
+{"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "why does login 500?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking."}], "stop_reason": "tool_use"}}
+{"type": "system", "subtype": "turn_duration", "durationMs": 1000}
+{"type": "ai-title", "aiTitle": "Login debugging"}
+{"type": "user", "isMeta": true, "origin": {"kind": "peer"}, "message": {"role": "user", "content": "Another Claude session sent a message"}}
+{"type": "user", "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}
+{"type": "system", "subtype": "turn_duration", "durationMs": 5}
