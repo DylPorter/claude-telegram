@@ -5,6 +5,7 @@ import type { Context } from "grammy";
 import { env } from "../lib/env.js";
 import { getSession, resetSession, updateSession } from "../lib/session.js";
 import { stopChat } from "../lib/running.js";
+import { bridgeStatusLine, stopBridged } from "./bridge.js";
 
 function expandTilde(p: string): string {
   if (p === "~") return homedir();
@@ -23,7 +24,13 @@ export async function handleStart(ctx: Context): Promise<void> {
       "• /cd <path> — change working directory\n" +
       "• /vault — switch to vault dir\n" +
       "• /deep <prompt> — one turn at opus + high effort\n" +
-      "• /run <abs-path> [low|med|high] <prompt> — one-off in another dir (opus, fresh session)\n",
+      "• /run <abs-path> [low|med|high] <prompt> — one-off in another dir (opus, fresh session)\n\n" +
+      "Live sessions (Claude open in tmux):\n" +
+      "• /sessions — list them, with pin buttons\n" +
+      "• /to <n> — pin a session; everything goes there\n" +
+      "• /unpin — back to auto-routing\n" +
+      "• /new [text] — fresh claude -p session instead (pinned)\n" +
+      "• Reply to a session's message to answer that session\n",
   );
 }
 
@@ -39,7 +46,12 @@ export async function handleStop(ctx: Context): Promise<void> {
   if (!chatId) return;
   const job = stopChat(chatId);
   if (!job) {
-    await ctx.reply("Nothing running.");
+    const panes = await stopBridged(chatId);
+    await ctx.reply(
+      panes.length
+        ? `⏹️ Sent Esc to: ${panes.join(", ")}.\nAnything already done is NOT undone.`
+        : "Nothing running.",
+    );
     return;
   }
   const secs = Math.round((Date.now() - job.startedAt) / 1000);
@@ -58,7 +70,8 @@ export async function handleStatus(ctx: Context): Promise<void> {
     `**Current state**\n` +
       `• Working dir: \`${s.cwd}\`\n` +
       `• Session: \`${s.sessionId ?? "(new)"}\`\n` +
-      `• Updated: ${s.updatedAt}`,
+      `• Updated: ${s.updatedAt}\n` +
+      bridgeStatusLine(s.pin?.kind === "pane" ? s.pin.label : s.pin?.kind === "bot" ? "bot session" : null),
     { parse_mode: "Markdown" },
   );
 }

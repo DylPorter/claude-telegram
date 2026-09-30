@@ -6,11 +6,20 @@ import { env } from "./env.js";
 // Claude Code sessions are identified by UUID (from --output-format json response);
 // we resume with --resume <uuid>.
 
+/**
+ * Where unpinned-vs-pinned text goes. `pane` = a live tmux Claude session
+ * (by tmux pane id); `bot` = this chat's own `claude -p` conversation.
+ */
+export type Pin =
+  | { kind: "pane"; paneId: string; label: string }
+  | { kind: "bot" };
+
 interface ChatSession {
   chatId: number;
   sessionId: string | null; // Claude Code session UUID
   cwd: string;              // Working dir for this chat
   updatedAt: string;
+  pin?: Pin | null;
 }
 
 interface Store {

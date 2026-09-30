@@ -17,7 +17,7 @@ const THINKING_PLACEHOLDER = "💭 _thinking…_";
  * Send a Telegram message safely; falls back to plain text if Markdown parses fail.
  * Returns the new message_id, or null if both attempts fail.
  */
-async function safeReply(
+export async function safeReply(
   ctx: Context,
   text: string,
   opts?: { markdown?: boolean },
@@ -59,7 +59,7 @@ async function safeEdit(
 }
 
 /** Split long text on paragraph/line boundaries close to the Telegram limit. */
-function chunk(text: string, size = TELEGRAM_LIMIT): string[] {
+export function chunk(text: string, size = TELEGRAM_LIMIT): string[] {
   if (text.length <= size) return [text];
   const parts: string[] = [];
   let remaining = text;

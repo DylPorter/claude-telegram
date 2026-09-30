@@ -16,6 +16,19 @@ const envSchema = z.object({
   // UNSET = document delivery is off and the endpoint refuses. Callers name a
   // key, never a path, so this is the only place a sendable path can come from.
   PUSH_DOCUMENTS: z.string().optional(),
+  // Live-session bridge: route phone messages into Claude Code sessions that
+  // are already open in tmux panes, instead of forking them with `claude -p`.
+  TMUX_BRIDGE_ENABLED: z
+    .string()
+    .default("true")
+    .transform((s) => !/^(0|false|no|off)$/i.test(s.trim())),
+  TMUX_BIN: z.string().default("tmux"),
+  // Optional `tmux -L <name>` socket. Unset = the default tmux server.
+  TMUX_SOCKET: z.string().optional(),
+  // Model for the cheap topic router that picks a session for unpinned messages.
+  ROUTER_MODEL: z.string().default("haiku"),
+  // Claude Code's config dir (where sessions/ and projects/ live).
+  CLAUDE_CONFIG_DIR: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

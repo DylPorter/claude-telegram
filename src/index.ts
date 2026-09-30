@@ -8,6 +8,15 @@ import {
   handleStop,
   handleVault,
 } from "./handlers/commands.js";
+import {
+  bridgeEnabled,
+  handleCallback,
+  handleNew,
+  handleSessions,
+  handleTo,
+  handleUnpin,
+  routeText,
+} from "./handlers/bridge.js";
 import { handlePhoto } from "./handlers/photo.js";
 import { handleText } from "./handlers/text.js";
 import { handleVoice } from "./handlers/voice.js";
@@ -36,6 +45,15 @@ bot.command("stop", handleStop);
 bot.command("reset", handleReset);
 bot.command("status", handleStatus);
 bot.command("vault", handleVault);
+
+// Live-session bridge (tmux panes running interactive Claude Code).
+bot.command("sessions", handleSessions);
+bot.command("to", (ctx) => handleTo(ctx, ctx.match?.trim() ?? ""));
+bot.command("unpin", handleUnpin);
+bot.command("new", (ctx) => handleNew(ctx, ctx.match?.trim() ?? ""));
+bot.on("callback_query:data", (ctx) => {
+  void handleCallback(ctx).catch((e) => console.error("[callback]", e));
+});
 bot.command("cd", async (ctx) => {
   const path = ctx.match?.trim();
   if (!path) {
@@ -101,15 +119,16 @@ bot.on("message:text", (ctx) => {
   if (ctx.message.text.startsWith("/")) return;
   // Fire-and-forget so the bot stays responsive mid-run — this is what lets
   // /stop (or a new message) be received while a turn is still streaming.
-  void handleText(ctx, ctx.message.text).catch((e) =>
-    console.error("[text]", e),
-  );
+  const text = ctx.message.text;
+  const run = bridgeEnabled ? routeText(ctx, text) : handleText(ctx, text);
+  void run.catch((e) => console.error("[text]", e));
 });
 
 // Startup
 console.log(`[startup] authorized user: ${env.TELEGRAM_ALLOWED_USER_ID}`);
 console.log(`[startup] default cwd: ${env.DEFAULT_CWD}`);
 console.log(`[startup] claude bin: ${env.CLAUDE_BIN}`);
+console.log(`[startup] tmux bridge: ${bridgeEnabled ? "on" : "off"} (router: ${env.ROUTER_MODEL})`);
 
 // Outbound /push HTTP server for scheduled briefs.
 startPushServer(bot);
