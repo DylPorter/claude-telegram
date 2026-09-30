@@ -10,10 +10,12 @@ export async function saveAttachmentToVault(opts: {
   buffer: Buffer;
   extension: string;
   caption?: string;
+  /** Keeps files saved in the same millisecond (an album) from overwriting each other. */
+  suffix?: string;
 }): Promise<string> {
   await mkdir(INBOX_ATTACHMENTS, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `telegram-${timestamp}.${opts.extension}`;
+  const filename = `telegram-${timestamp}${opts.suffix ? `-${opts.suffix}` : ""}.${opts.extension}`;
   const filepath = path.join(INBOX_ATTACHMENTS, filename);
   await writeFile(filepath, opts.buffer);
   return filepath;

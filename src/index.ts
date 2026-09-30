@@ -18,7 +18,7 @@ import {
   rememberBotReply,
   routeText,
 } from "./handlers/bridge.js";
-import { handlePhoto } from "./handlers/photo.js";
+import { handleMedia, settleUploads, uploads } from "./handlers/media.js";
 import { handleText } from "./handlers/text.js";
 import { handleVoice } from "./handlers/voice.js";
 import { startPushServer } from "./lib/push.js";
@@ -113,15 +113,20 @@ bot.command("run", async (ctx) => {
 });
 
 // Content handlers
-bot.on("message:photo", handlePhoto);
+bot.on(["message:photo", "message:document"], (ctx) => {
+  void handleMedia(ctx).catch((e) => console.error("[media]", e));
+});
 bot.on("message:voice", handleVoice);
 bot.on("message:text", (ctx) => {
   // Skip commands (they're handled above)
   if (ctx.message.text.startsWith("/")) return;
   // Fire-and-forget so the bot stays responsive mid-run — this is what lets
   // /stop (or a new message) be received while a turn is still streaming.
-  const text = ctx.message.text;
-  const run = bridgeEnabled ? routeText(ctx, text) : handleText(ctx, text);
+  const chatId = ctx.chat.id;
+  const run = settleUploads(chatId).then(() => {
+    const text = uploads.withHeld(chatId, ctx.message.text);
+    return bridgeEnabled ? routeText(ctx, text) : handleText(ctx, text, { onSent: rememberBotReply });
+  });
   void run.catch((e) => console.error("[text]", e));
 });
 

@@ -22,7 +22,7 @@ Responses streamed back as Telegram messages
 - **Per-cycle streaming UX.** Each Claude "thinking cycle" sends a `💭 thinking…` placeholder that gets edited *once* into its actual text. When you stop seeing `thinking…` messages, you know it's finished. No rolling edits, no overwrite races, no duplicated content.
 - **Tunable model + effort** per env var or per message. Default is `sonnet` + `low` effort (snappy capture from the phone); `/deep` upgrades a single turn to `opus + high` for harder work; `/run` lets you point one turn at a different working directory entirely.
 - **Voice notes** are saved to disk; for *dictating to* the bot, use your phone's native voice-to-text (faster than rolling your own transcription).
-- **Photos** auto-save to your configured attachments directory.
+- **Photos and files** (single or an album) save to your attachments directory and reach Claude as one prompt listing every file. Put the instruction in the caption; uploads sent without a caption are attached to your next text message (within 10 minutes).
 - **Auth-gated to a single Telegram user ID.** The bot ignores everyone else.
 
 ## Why not just use the Claude app on mobile?
@@ -177,6 +177,7 @@ src/
 │   ├── env.ts            Zod-validated env config
 │   ├── claude.ts         Spawns `claude -p` and parses stream-json events
 │   ├── session.ts        Per-chat session-id + cwd + pin state, JSON-file backed
+│   ├── uploads.ts        Groups album/multi-file uploads into one prompt
 │   ├── vault.ts          Saves photo/voice attachments
 │   └── bridge/           Live tmux-session bridge
 │       ├── discovery.ts  pane → claude PID → session → transcript
@@ -188,7 +189,7 @@ src/
     ├── commands.ts       /start, /reset, /status, /cd, /vault, /stop
     ├── bridge.ts         routing, /sessions /to /unpin /new, inline buttons
     ├── text.ts           Placeholder-per-cycle text streaming
-    ├── photo.ts          Photo capture
+    ├── media.ts          Photo + document uploads (albums batched)
     └── voice.ts          Voice-note capture (transcription is gboard's job)
 ```
 
