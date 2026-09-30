@@ -97,6 +97,31 @@ journalctl --user -u claude-telegram.service -f
 
 Anything that isn't a slash command is processed as a regular message.
 
+### Live sessions (tmux bridge)
+
+| Command | What it does |
+|---|---|
+| `/sessions` | List Claude Code sessions open in tmux panes (🟢 idle · ⏳ busy · ⏸ prompt open), with pin buttons |
+| `/to <n>` | Pin session *n*: every message goes there until `/unpin` |
+| `/unpin` | Back to auto-routing |
+| `/new [text]` | Fresh `claude -p` conversation instead (the pre-bridge behaviour), pinned until `/unpin` |
+| *reply to a message* | Replying to a session's message sends your reply to that session |
+
+## Live-session bridge
+
+If you keep interactive `claude` sessions open in tmux, the bot talks to *those* instead of starting new ones.
+
+The rule is **one process owns each session**. Running `claude -p --resume <id>` on a session that's still open in a terminal forks it into two histories that diverge. So the bot never does that. It types your message into the pane (`tmux send-keys -l`, then Enter), exactly as if you were at the keyboard, and reads the reply back from the session transcript. The terminal and the phone are two windows onto the same conversation.
+
+- **Discovery.** tmux pane → pane process tree → `claude` PID → Claude Code's per-process status file (`~/.claude/sessions/<pid>.json`: session id, cwd, idle/busy/waiting) → transcript (`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`). Titles and recent prompts come from the transcript's head and tail. These files are undocumented; the parsing is tolerant, but a Claude Code update can change them.
+- **Routing.** A message with no pin goes through a small tool-less `claude -p --model haiku` call that picks a session from their summaries. If it's confident, the reply comes back prefixed `→ project · title`. If it isn't, you get buttons for the top 3 sessions plus "New session". With no live panes at all, the bot uses `claude -p` as before.
+- **Safety gates.** Nothing is typed unless the pane's foreground command is `claude`, the session is idle (status file *and* no spinner on screen), no prompt is open, and the prompt box is empty. It never appends to a draft you left there. Otherwise the message waits in a per-pane queue, up to 2h, and is sent in order.
+- **Replies.** The bot tails the transcript from the byte offset it recorded before sending. It relays the turn's text blocks and hides tool calls, the same as the `claude -p` path. It stops at the turn-end marker.
+- **Permission prompts.** If the session stops at an approval prompt mid-turn, the prompt comes to Telegram with one button per option. A button presses that option's number key, but only after re-checking that the same prompt is still open.
+- **`/stop`** on a bridged turn sends Esc (Claude Code's interrupt) to the pane.
+
+Test it without touching your real panes: `npx tsx scripts/smoke-bridge.ts` runs everything against a throwaway `claude --model haiku` on an isolated `tmux -L bridgetest` server. It checks for forks at the end (exactly one transcript and one owning process).
+
 ## Configuration
 
 All env vars live in `.env`:
@@ -112,6 +137,10 @@ All env vars live in `.env`:
 | `CLAUDE_EFFORT` | Thinking budget: `low`, `medium`, `high`, `xhigh`, `max` | `low` |
 | `PUSH_PORT` / `PUSH_SECRET` | Localhost `/push` server for scheduled briefs | `7421` / _(required)_ |
 | `PUSH_DOCUMENTS` | Allowlist for `/push-document`: `key=/abs/path,…` | _(unset — endpoint disabled)_ |
+| `TMUX_BRIDGE_ENABLED` | Route messages into live tmux Claude sessions | `true` |
+| `TMUX_BIN` / `TMUX_SOCKET` | tmux binary / optional `-L` socket name | `tmux` / _(default server)_ |
+| `ROUTER_MODEL` | Model for the session router | `haiku` |
+| `CLAUDE_CONFIG_DIR` | Claude Code config dir (`sessions/`, `projects/`) | `~/.claude` |
 
 To bump the default model permanently, edit `.env` and `systemctl --user restart claude-telegram`.
 
@@ -147,10 +176,17 @@ src/
 ├── lib/
 │   ├── env.ts            Zod-validated env config
 │   ├── claude.ts         Spawns `claude -p` and parses stream-json events
-│   ├── session.ts        Per-chat session-id + cwd state, JSON-file backed
-│   └── vault.ts          Saves photo/voice attachments
+│   ├── session.ts        Per-chat session-id + cwd + pin state, JSON-file backed
+│   ├── vault.ts          Saves photo/voice attachments
+│   └── bridge/           Live tmux-session bridge
+│       ├── discovery.ts  pane → claude PID → session → transcript
+│       ├── transcript.ts JSONL tailing, turn tracking, summaries
+│       ├── tmux.ts       send-keys argv, capture-pane state (busy/prompt/draft)
+│       ├── bridge.ts     gated delivery, per-pane queue, reply tailing
+│       └── router.ts     haiku classifier + tolerant JSON parsing
 └── handlers/
-    ├── commands.ts       /start, /reset, /status, /cd, /vault
+    ├── commands.ts       /start, /reset, /status, /cd, /vault, /stop
+    ├── bridge.ts         routing, /sessions /to /unpin /new, inline buttons
     ├── text.ts           Placeholder-per-cycle text streaming
     ├── photo.ts          Photo capture
     └── voice.ts          Voice-note capture (transcription is gboard's job)
