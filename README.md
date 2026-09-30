@@ -114,7 +114,13 @@ If you keep interactive `claude` sessions open in tmux, the bot talks to *those*
 The rule is **one process owns each session**. Running `claude -p --resume <id>` on a session that's still open in a terminal forks it into two histories that diverge. So the bot never does that. It types your message into the pane (`tmux send-keys -l`, then Enter), exactly as if you were at the keyboard, and reads the reply back from the session transcript. The terminal and the phone are two windows onto the same conversation.
 
 - **Discovery.** tmux pane → pane process tree → `claude` PID → Claude Code's per-process status file (`~/.claude/sessions/<pid>.json`: session id, cwd, idle/busy/waiting) → transcript (`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`). Titles and recent prompts come from the transcript's head and tail. These files are undocumented; the parsing is tolerant, but a Claude Code update can change them.
-- **Routing.** A message with no pin goes through a small tool-less `claude -p --model haiku` call that picks a session from their summaries. If it's confident, the reply comes back prefixed `→ project · title`. If it isn't, you get buttons for the top 3 sessions plus "New session". With no live panes at all, the bot uses `claude -p` as before.
+- **Routing is sticky.** A message with no pin goes to the session you're already talking to. Order of precedence:
+  1. A Telegram reply to an answer goes back to that answer's session.
+  2. A pin.
+  3. The current session. Short follow-ups (under 40 characters) go straight there with no router call. Longer messages ask a small tool-less `claude -p --model haiku` classifier, and only switch (with a "↪ Switched to …" notice) when it is at least 85% sure the message belongs to a *different* session.
+  4. After 6 hours of silence, or if the pane has closed, plain routing: a confident pick goes through, otherwise you get buttons for the top 3 sessions plus "New session". With no live panes, the bot uses `claude -p` as before.
+
+  The current session is stored in the state file, so it survives restarts.
 - **Safety gates.** Nothing is typed unless the pane's foreground command is `claude`, the session is idle (status file *and* no spinner on screen), no prompt is open, and the prompt box is empty. It never appends to a draft you left there. Otherwise the message waits in a per-pane queue, up to 2h, and is sent in order.
 - **Replies.** The bot tails the transcript from the byte offset it recorded before sending. It relays the turn's text blocks and hides tool calls, the same as the `claude -p` path. It stops at the turn-end marker.
 - **Permission prompts.** If the session stops at an approval prompt mid-turn, the prompt comes to Telegram with one button per option. A button presses that option's number key, but only after re-checking that the same prompt is still open.
@@ -184,7 +190,9 @@ src/
 │       ├── transcript.ts JSONL tailing, turn tracking, summaries
 │       ├── tmux.ts       send-keys argv, capture-pane state (busy/prompt/draft)
 │       ├── bridge.ts     gated delivery, per-pane queue, reply tailing
-│       └── router.ts     haiku classifier + tolerant JSON parsing
+│       ├── router.ts     haiku classifier + tolerant JSON parsing
+│       ├── sticky.ts     stay-with-current-session routing decisions
+│       └── reply-targets.ts  message id → session for Telegram replies
 └── handlers/
     ├── commands.ts       /start, /reset, /status, /cd, /vault, /stop
     ├── bridge.ts         routing, /sessions /to /unpin /new, inline buttons

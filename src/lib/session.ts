@@ -20,6 +20,9 @@ interface ChatSession {
   cwd: string;              // Working dir for this chat
   updatedAt: string;
   pin?: Pin | null;
+  /** Where the last unpinned message went; sticky routing sends follow-ups there. */
+  last?: Pin | null;
+  lastAt?: string | null;
 }
 
 interface Store {

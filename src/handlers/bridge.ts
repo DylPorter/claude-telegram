@@ -26,6 +26,7 @@ import {
 } from "../lib/bridge/discovery.js";
 import { ReplyTargets } from "../lib/bridge/reply-targets.js";
 import { classify } from "../lib/bridge/router.js";
+import { planRoute, resolveSticky, type Target } from "../lib/bridge/sticky.js";
 import type { PanePrompt } from "../lib/bridge/tmux.js";
 import { chunk, handleText, safeReply } from "./text.js";
 
@@ -49,17 +50,27 @@ export function rememberBotReply(messageId: number): void {
   replyTargets.remember(messageId, { kind: "bot" });
 }
 
+/** Remember where this chat is talking now, for sticky routing. */
+async function markCurrent(chatId: number, target: Target): Promise<void> {
+  await updateSession(chatId, { last: target, lastAt: new Date().toISOString() });
+}
+
 /** The bot's own `claude -p` session, with its answers recorded for replies. */
-function toBot(ctx: Context, text: string): Promise<void> {
+async function toBot(ctx: Context, text: string): Promise<void> {
+  await markCurrent(ctx.chat!.id, { kind: "bot" });
   return handleText(ctx, text, { onSent: rememberBotReply });
+}
+
+/** Send to a target, using the live label for panes. */
+function goTo(ctx: Context, target: Target, sessions: LiveSession[], text: string): Promise<void> {
+  if (target.kind === "bot") return toBot(ctx, text);
+  const live = sessions.find((s) => s.paneId === target.paneId);
+  return sendToPane(ctx, target.paneId, live ? sessionLabel(live) : target.label, text);
 }
 
 // Messages waiting for the owner to pick a session from buttons.
 const pendingRoutes = new Map<string, string>();
 let routeSeq = 0;
-
-// The last pane each chat sent to — context for the router on short follow-ups.
-const lastPane = new Map<number, string>();
 
 // In-flight bridged turns per chat, for /stop.
 const active = new Map<number, Map<string, { abort: AbortController; label: string }>>();
@@ -97,7 +108,7 @@ function shortLabel(s: LiveSession, max = 28): string {
 
 async function sendToPane(ctx: Context, paneId: string, label: string, text: string): Promise<void> {
   const chatId = ctx.chat!.id;
-  lastPane.set(chatId, paneId);
+  await markCurrent(chatId, { kind: "pane", paneId, label });
   const abort = new AbortController();
   const perChat = active.get(chatId) ?? new Map();
   perChat.set(paneId, { abort, label });
@@ -173,28 +184,40 @@ export async function routeText(ctx: Context, text: string): Promise<void> {
     await ctx.reply(`📌 Pinned session (${pin.label}) is gone, so I unpinned it. Routing instead.`);
   }
 
-  // 3. Nothing live: the old `claude -p` path.
+  // 3. Sticky: stay with the session you're talking to. Short follow-ups
+  //    skip the router; longer messages switch only on a confident match.
+  const plan = planRoute(session.last, session.lastAt ? Date.parse(session.lastAt) : null, text, sessions);
+  if (plan.go === "stay") return goTo(ctx, plan.target, sessions, text);
+
+  // 4. Nothing live: the old `claude -p` path.
   if (sessions.length === 0) return toBot(ctx, text);
 
-  // 4. Classify.
+  // 5. Classify.
+  const lastPaneId = session.last?.kind === "pane" ? session.last.paneId : undefined;
   await ctx.replyWithChatAction("typing").catch(() => {});
   const decision = await classify(
     { claudeBin: env.CLAUDE_BIN, model: env.ROUTER_MODEL },
     sessions,
     text,
-    sessions.find((s) => s.paneId === lastPane.get(chatId))?.n,
+    sessions.find((s) => s.paneId === lastPaneId)?.n,
   );
+  if (plan.go === "classify") {
+    const r = resolveSticky(plan.current, decision, sessions);
+    if (r.go === "stay") return goTo(ctx, plan.current, sessions, text);
+    await ctx.reply(`↪ Switched to ${r.label}. Reply to an older message to go back.`);
+    return goTo(ctx, r.to, sessions, text);
+  }
   if (decision && decision.confidence >= ROUTE_MIN_CONFIDENCE) {
     if (decision.target === "new") return toBot(ctx, text);
     const s = sessions[decision.target - 1];
     return sendToPane(ctx, s.paneId, sessionLabel(s), text);
   }
 
-  // 5. Unsure: let the owner pick.
+  // 6. Unsure: let the owner pick.
   const ranked: LiveSession[] = [];
   const add = (s?: LiveSession) => s && !ranked.includes(s) && ranked.push(s);
   if (decision && decision.target !== "new") add(sessions[decision.target - 1]);
-  add(sessions.find((s) => s.paneId === lastPane.get(chatId)));
+  add(sessions.find((s) => s.paneId === lastPaneId));
   for (const s of [...sessions].sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0))) add(s);
 
   const id = String(++routeSeq);
