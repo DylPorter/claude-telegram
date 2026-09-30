@@ -15,6 +15,7 @@ import {
   handleSessions,
   handleTo,
   handleUnpin,
+  rememberBotReply,
   routeText,
 } from "./handlers/bridge.js";
 import { handlePhoto } from "./handlers/photo.js";
@@ -70,7 +71,7 @@ bot.command("deep", async (ctx) => {
     await ctx.reply("Usage: /deep <prompt>  (one turn at opus + high effort)");
     return;
   }
-  void handleText(ctx, prompt, { model: "opus", effort: "high" }).catch((e) =>
+  void handleText(ctx, prompt, { model: "opus", effort: "high", onSent: rememberBotReply }).catch((e) =>
     console.error("[deep]", e),
   );
 });

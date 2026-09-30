@@ -24,6 +24,7 @@ import {
   type DiscoveryConfig,
   type LiveSession,
 } from "../lib/bridge/discovery.js";
+import { ReplyTargets } from "../lib/bridge/reply-targets.js";
 import { classify } from "../lib/bridge/router.js";
 import type { PanePrompt } from "../lib/bridge/tmux.js";
 import { chunk, handleText, safeReply } from "./text.js";
@@ -37,12 +38,20 @@ const cfg: DiscoveryConfig = {
   claudeDir: env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"),
 };
 
-// Bot message id → pane, so a Telegram reply goes back to the same session.
-const replyTargets = new Map<number, { paneId: string; label: string }>();
+// Bot message id → session, so a Telegram reply goes back to the same session.
+const replyTargets = new ReplyTargets();
 function rememberReply(messageId: number | null, paneId: string, label: string) {
-  if (messageId === null) return;
-  replyTargets.set(messageId, { paneId, label });
-  if (replyTargets.size > 1000) replyTargets.delete(replyTargets.keys().next().value!);
+  replyTargets.remember(messageId, { kind: "pane", paneId, label });
+}
+
+/** Record a bot-session answer so a reply to it continues the bot session. */
+export function rememberBotReply(messageId: number): void {
+  replyTargets.remember(messageId, { kind: "bot" });
+}
+
+/** The bot's own `claude -p` session, with its answers recorded for replies. */
+function toBot(ctx: Context, text: string): Promise<void> {
+  return handleText(ctx, text, { onSent: rememberBotReply });
 }
 
 // Messages waiting for the owner to pick a session from buttons.
@@ -147,13 +156,13 @@ export async function routeText(ctx: Context, text: string): Promise<void> {
   if (!chatId) return;
 
   // 1. A Telegram reply to a bridged message goes back to that session.
-  const replyTo = ctx.message?.reply_to_message?.message_id;
-  const replied = replyTo !== undefined ? replyTargets.get(replyTo) : undefined;
+  const replied = replyTargets.get(ctx.message?.reply_to_message?.message_id);
+  if (replied?.kind === "bot") return toBot(ctx, text);
   if (replied) return sendToPane(ctx, replied.paneId, replied.label, text);
 
   // 2. A pinned target.
   const session = await getSession(chatId);
-  if (session.pin?.kind === "bot") return handleText(ctx, text);
+  if (session.pin?.kind === "bot") return toBot(ctx, text);
 
   const sessions = await listLiveSessions(cfg);
   const pin = session.pin;
@@ -165,7 +174,7 @@ export async function routeText(ctx: Context, text: string): Promise<void> {
   }
 
   // 3. Nothing live: the old `claude -p` path.
-  if (sessions.length === 0) return handleText(ctx, text);
+  if (sessions.length === 0) return toBot(ctx, text);
 
   // 4. Classify.
   await ctx.replyWithChatAction("typing").catch(() => {});
@@ -176,7 +185,7 @@ export async function routeText(ctx: Context, text: string): Promise<void> {
     sessions.find((s) => s.paneId === lastPane.get(chatId))?.n,
   );
   if (decision && decision.confidence >= ROUTE_MIN_CONFIDENCE) {
-    if (decision.target === "new") return handleText(ctx, text);
+    if (decision.target === "new") return toBot(ctx, text);
     const s = sessions[decision.target - 1];
     return sendToPane(ctx, s.paneId, sessionLabel(s), text);
   }
@@ -269,7 +278,7 @@ export async function handleNew(ctx: Context, text: string): Promise<void> {
   await resetSession(chatId);
   await updateSession(chatId, { pin: { kind: "bot" } });
   if (text) {
-    void handleText(ctx, text).catch((e) => console.error("[new]", e));
+    void toBot(ctx, text).catch((e) => console.error("[new]", e));
   } else {
     await ctx.reply("🆕 Fresh bot session (claude -p), pinned. /unpin to go back to routing.");
   }
@@ -317,7 +326,7 @@ export async function handleCallback(ctx: Context): Promise<void> {
     pendingRoutes.delete(id);
     await ctx.editMessageReplyMarkup().catch(() => {});
     if (target === "new") {
-      void handleText(ctx, text).catch((e) => console.error("[route-new]", e));
+      void toBot(ctx, text).catch((e) => console.error("[route-new]", e));
       return;
     }
     const s = (await listLiveSessions(cfg)).find((x) => x.paneId === target);

@@ -8,6 +8,8 @@ type OverrideOpts = Pick<StreamOptions, "model" | "effort"> & {
   cwd?: string;
   /** If true: don't resume the chat's session and don't persist the new id. */
   ephemeral?: boolean;
+  /** Called with the id of every message that carries answer text. */
+  onSent?: (messageId: number) => void;
 };
 
 const TELEGRAM_LIMIT = 4000;
@@ -131,17 +133,19 @@ export async function handleText(
     if (!clean) return;
     sentTexts.push(clean);
     const parts = chunk(clean);
+    const sent = (id: number | null) => {
+      if (id !== null) override.onSent?.(id);
+    };
 
-    if (pendingMsgId !== null) {
-      const ok = await safeEdit(ctx, pendingMsgId, parts[0], { markdown: true });
-      if (!ok) await safeReply(ctx, parts[0], { markdown: true });
+    if (pendingMsgId !== null && (await safeEdit(ctx, pendingMsgId, parts[0], { markdown: true }))) {
+      sent(pendingMsgId);
     } else {
-      await safeReply(ctx, parts[0], { markdown: true });
+      sent(await safeReply(ctx, parts[0], { markdown: true }));
     }
     pendingMsgId = null;
 
     for (const p of parts.slice(1)) {
-      await safeReply(ctx, p, { markdown: true });
+      sent(await safeReply(ctx, p, { markdown: true }));
     }
   };
 

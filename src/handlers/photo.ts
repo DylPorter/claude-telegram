@@ -1,5 +1,6 @@
 import type { Context } from "grammy";
 import { saveAttachmentToVault } from "../lib/vault.js";
+import { rememberBotReply } from "./bridge.js";
 import { handleText } from "./text.js";
 
 export async function handlePhoto(ctx: Context): Promise<void> {
@@ -28,6 +29,7 @@ export async function handlePhoto(ctx: Context): Promise<void> {
     await handleText(
       ctx,
       `I just attached a photo at ${savedPath}. Caption: "${caption}". Process it appropriately for my vault (if it's a whiteboard, extract ideas; if it's a receipt, log it; etc).`,
+      { onSent: rememberBotReply },
     );
   }
 }
